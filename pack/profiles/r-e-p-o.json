@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "name": "R.E.P.O.",
+  "processes": [
+    "REPO.exe"
+  ],
+  "mode": "perkey",
+  "effect": "static",
+  "base": "#ff0000",
+  "background": "#121212",
+  "keys": {
+    "0": "#ff00b0",
+    "1": "#ff7000",
+    "2": "#ff7000",
+    "3": "#ff7000",
+    "5": "#ff00b0",
+    "6": "#ff00b0",
+    "7": "#ff00b0",
+    "8": "#ff00b0",
+    "9": "#ff00b0",
+    "A": "#ff0000",
+    "B": "#00e5ff",
+    "D": "#ff0000",
+    "E": "#8a00ff",
+    "ENTER": "#0050ff",
+    "ESC": "#0050ff",
+    "G1": "#ffe000",
+    "G2": "#ffe000",
+    "G3": "#ffe000",
+    "G4": "#ffe000",
+    "G5": "#ffe000",
+    "LEFT CTRL": "#00ff30",
+    "LEFT SHIFT": "#00ff30",
+    "Q": "#ff0000",
+    "S": "#ff0000",
+    "SPACE": "#ff0000",
+    "T": "#00e5ff",
+    "TAB": "#0050ff",
+    "V": "#00e5ff",
+    "W": "#ff0000"
+  }
+}

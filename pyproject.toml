@@ -1,0 +1,92 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gearbench"
+description = "Key remapping, lighting, DPI and macros for Logitech G keyboards and mice (the G915, G502 X PLUS and G305), and the Astro A50 headset's controls"
+readme = "README.md"
+requires-python = ">=3.14"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "wmuschetto", email = "113629853+wmuschetto@users.noreply.github.com" }]
+keywords = ["logitech", "g915", "g502", "hidpp", "keyboard", "mouse", "rgb", "macro",
+            "astro", "a50", "headset"]
+dynamic = ["version"]
+
+# No runtime dependencies on purpose. The CLI is standard library only, and
+# so is the daemon but for its desktop session and its login screen check,
+# which use python3-gi's Gio when it is installed and are off without it. The
+# window needs python3-gi with gir1.2-gtk-4.0 and gir1.2-adw-1, system packages
+# carrying GObject introspection typelibs; the PyPI wheels of the same name are
+# a different build that would shadow the working system module. So these are
+# debian/control's Recommends, never pip requirements.
+dependencies = []
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: X11 Applications :: GTK",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Hardware",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/wmuschetto/gearbench"
+Releases = "https://github.com/wmuschetto/gearbench/releases"
+
+[project.scripts]
+# For an installed package, in place of the hand-written desktop/gearbench-ctl
+# launcher that install.sh uses for a checkout: the console script setuptools
+# generates imports gearbench from wherever the package was installed, so
+# nothing has to know where a checkout lives.
+gearbench-ctl = "gearbench.cli:main"
+
+[tool.setuptools.packages.find]
+# Found, not listed: a listed set is not recursive, so a new subpackage would
+# ship missing while the tests, run from the checkout, still passed.
+include = ["gearbench*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "gearbench.__version__" }
+
+# coverage.py is a development tool, installed with pip in a virtual
+# environment; nothing here is needed to run the program or its tests.
+[tool.coverage.run]
+branch = true
+source = ["gearbench"]
+# The tests start the command line and other Python programs as processes of
+# their own, and this measures those too. Each process writes its own data
+# file, which `coverage report` combines; `coverage erase` before a run
+# removes the last run's.
+patch = ["subprocess"]
+parallel = true
+# Outside the checkout, which a run would otherwise leave one file per
+# process in. coverage.py uses ~/.cache only when XDG_CACHE_HOME is unset,
+# and takes an empty or relative value as it is.
+data_file = "${XDG_CACHE_HOME-~/.cache}/gearbench-dev/coverage/.coverage"
+
+[tool.coverage.report]
+# Lines and branches together, to one decimal. `coverage report` exits 2 under
+# the floor; raise the floor when the total rises.
+precision = 1
+fail_under = 99.3
+show_missing = true
+skip_covered = true
+
+# mypy is a development tool too, installed with pygobject-stubs beside
+# coverage.py.
+[tool.mypy]
+files = ["gearbench", "spatial"]
+python_version = "3.14"
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+enable_error_code = ["ignore-without-code"]
+# Outside the checkout, like coverage.py's data.
+cache_dir = "~/.cache/gearbench-dev/mypy"

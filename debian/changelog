@@ -1,0 +1,15 @@
+gearbench (1.0.0) resolute; urgency=medium
+
+  * The first public release.
+  * A first install starts the service in each desktop session already
+    open, so the devices work without logging out, and a removal stops it
+    first, which hands the keyboard back.
+  * The window has a banner while Gearbench's GNOME Shell extension is not
+    running, with Turn on while it is off.
+  * About 530 fixes from a review of every line of the program, 36 of them
+    for security: devices posing as supported ones are refused, files from
+    G HUB and profile packs are read within tighter limits, and messages
+    name the device, the cause and what to do.
+
+ -- wmuschetto <113629853+wmuschetto@users.noreply.github.com>  Sat, 17 Oct 2026 00:38:10 +0000
+

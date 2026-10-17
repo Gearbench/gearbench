@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+# The reload and triggers refresh udev's database. The uaccess ACLs already granted stay
+# until the device is replugged or the machine restarts.
+if [ "$1" = "remove" ] && [ -d /run/udev ] && command -v udevadm >/dev/null 2>&1
+then
+    udevadm control --reload || true
+    udevadm trigger --subsystem-match=hidraw --action=add || true
+    udevadm trigger --subsystem-match=input --action=add || true
+    udevadm trigger --subsystem-match=misc --sysname-match=uinput --action=add || true
+fi
+
+#DEBHELPER#

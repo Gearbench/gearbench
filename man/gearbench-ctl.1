@@ -1,0 +1,2840 @@
+.\" Manual page for gearbench-ctl.
+.\" Copyright (C) 2026 wmuschetto
+.\" Licensed under the GNU GPL version 3 or later.
+.\"
+.\" Keep this in step with build_parser() in gearbench/cli/. A man page that
+.\" disagrees with --help is worse than none.
+.TH GEARBENCH\-CTL 1 "2026-10-17" "gearbench\-ctl 1.0.0" "User Commands"
+.SH NAME
+gearbench\-ctl \- key remapping, lighting, DPI and macros for the Logitech G915, G502 X PLUS and G305, and the Astro A50 headset's settings
+.SH SYNOPSIS
+.B gearbench\-ctl
+.RB [ \-\-json ]
+.I command
+.RI [ arguments ]
+.br
+.B gearbench\-ctl \-\-version
+.SH DESCRIPTION
+.B gearbench\-ctl
+drives a Logitech G915 keyboard, G502 X PLUS and G305 mice, several at once,
+and an Astro A50 Gen 4 headset's base station. It binds the keyboard's G keys,
+per M profile and on an MR layer, and the G502 X PLUS's six extra buttons; it
+sets the lighting, the mice's DPI and onboard profile, and the headset's
+microphone, mix and equalizer. Each device is asked what it can do; a command
+for something it lacks is refused, and the window leaves its section out. It
+speaks HID++ 2.0 over the keyboard's and the mice's vendor hidraw interfaces,
+on a cable or through a LIGHTSPEED receiver, and the base station's own
+protocol, not HID++, over its one HID interface. It needs no root: udev
+.B uaccess
+grants the devices, the
+.B gearbench
+group the G502 X PLUS's event nodes, and the daemon, the CLI and the window
+all run as you.
+.PP
+A long-running daemon owns the devices. It holds the keyboard's software
+lighting claim (HID++ feature 0x8071), reads the diverted G, M and MR keys,
+types bindings and macros through a uinput virtual keyboard and mouse, and
+sets a device up again when it is plugged back in or switched on. Every
+subcommand except
+.BR probe ,
+.BR keys ,
+.BR config ,
+.BR gui ,
+.B daemon
+and
+.BR headset\-spatial ,
+and
+.B import\-ghub
+and
+.B import\-pack
+when they only list or run with
+.BR \-\-dry\-run ,
+is a request to that daemon over a unix socket; a second process writing
+lighting would fight it.
+.PP
+Keyboard lighting is volatile only, and the keyboard's onboard profile is
+never written. The five commands under
+.B Mouse onboard memory
+below write the mouse's onboard profile 1, after a backup, except where that
+section says one writes nothing there, as when
+.B mouse\-rate
+or
+.B mouse\-dpi\-stages
+saves a game profile's own rate or stages. A headset change
+goes to the A50 base station's memory, and only
+.B headset\-save
+writes its flash.
+.SH OPTIONS
+.TP
+.B \-\-json
+Print JSON instead of the formatted output: the daemon's raw reply; what
+\fBprobe\fR, \fBconfig\fR, \fBimport\-ghub\fR, \fBimport\-pack\fR and
+\fBheadset\-spatial\fR read themselves; or, with \fB\-\-dry\-run\fR, the
+requests an import would send.
+\fBkeys\fR, \fBgui\fR and \fBdaemon\fR ignore it. It goes on either side of the
+subcommand, as in
+.BR "gearbench\-ctl status \-\-json" .
+The formatted output prints each character in a name that a terminal would
+act on or not show as its escape, such as
+.B \ex1b
+for ESC or
+.B \eu202e
+for a right-to-left override; the JSON escapes them itself. In a name from a
+G HUB file, some of those are dropped or replaced first (see
+\fBimport\-ghub\fR).
+.TP
+.B \-\-version
+Print the version and exit.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print usage and exit. Every subcommand takes it too.
+.SH COMMANDS
+The groups are the daemon and its state, the keyboard, game profiles and the
+two ways to import them, the mouse and its onboard memory, and the headset.
+.SS Daemon and state
+.TP
+\fBdaemon\fR [\fB\-v\fR | \fB\-\-verbose\fR]
+Run the daemon in the foreground.
+.B \-\-verbose
+logs at DEBUG each G key press, each press and release of the mouse's G4
+to G9, and
+every request but
+.BR status ,
+.B mouse
+and
+.BR headset ;
+a logged request shows a macro's steps only by their type, such as text,
+key or delay, never their values. Normally the
+.BR systemd.service (5)
+user unit runs this; see
+.B FILES
+below. At a login screen, in a session logind gives the class
+.BR greeter ,
+it logs one line and exits 0 before it opens a device. It reads the class
+through python3\-gi; without that it runs at a login screen too.
+Run as root, it logs one line and exits 1 before it opens a device: run it
+as yourself.
+Closing its terminal stops it as SIGTERM does, unless it was started under
+.BR nohup (1).
+It exits 1 without starting while another Gearbench daemon runs, the
+service's included:
+.BR "another Gearbench daemon is already running: it holds" ,
+then the lock's path (see
+.BR FILES )
+and how to stop the other daemon.
+.TP
+.B status
+Report what the daemon and the keyboard are doing, a line each: the
+keyboard's name, whether it is on its cable or through its receiver, its node
+and whether it is answering; its battery, and under it whether a low-battery
+notice was posted; the M profile; the game profile loaded and the latest held
+off;
+what game profiles follow: the focused program and the game profile that
+names it, or, where focus is not followed, the running programs; the
+brightness; the screen lock,
+whether the lights go off
+with it and whether they are on, dimmed or off; the idle dimming's times, and
+whether the keyboard is dimmed or dark for idleness now; whether the tray icon
+shows, and why not while it is on; whether the lighting is claimed and,
+while it is, whether the G keys are diverted, and why the last full apply of
+the lighting did not reach the keyboard, if it did not; whether the virtual
+keyboard and mouse are ready;
+whether a mouse is
+attached and whether a mouse with lighting follows the keyboard's color;
+whether an A50 base station is
+attached; the macro running or counting down to its start; and the daemon's
+process id.
+Under
+.B problems
+comes a line for each thing that is wrong: no keyboard node; a
+node the udev rule has not granted; a node with no keyboard answering on it; a
+keyboard not answering; a mouse node not granted; a mouse running an
+onboard profile other than 1, with why the switch back did not take or when
+it is tried next; a mouse on which host mode did not take; a mouse left in
+host mode because its switch back to onboard mode did not take; a mouse out
+of host mode whose event node the daemon cannot read without the
+\fBgearbench\fR group; a mouse whose event node has carried
+a keyboard's keystrokes in host mode; an A50 base station node not granted; a
+base station not answering, or one found that could not be set up; Solaar,
+ratbagd or OpenRGB running, each with its process id and what to do; a
+\fIconfig.json\fR or loaded game profile file that will not load or was
+edited by hand; a macro file edited by hand; no virtual keyboard or mouse;
+and,
+while
+.B lock\-lights
+is on, a desktop without what it needs: python3\-gi, logind, or GNOME's idle
+monitor. With
+.B \-\-json
+it prints every field of the reply.
+.TP
+.B config
+Print the configuration on disk, each M profile's lighting mode and painted
+key count included, and say when a running daemon is on another M profile
+than the file names. Needs no daemon.
+.TP
+.B save
+Write the daemon's live configuration to
+.IR config.json ,
+and a loaded game profile to its own file, even over a hand edit since the
+daemon read them; nothing else writes over one.
+.I config.json
+is written first: when the system refuses the write of the game profile's
+file, as a full disk does, the reply says
+.I config.json
+was saved, and why the game profile was not. A
+.I config.json
+the daemon could not read at its start stops the whole save, the loaded
+game profile's file included, and the reply says why: fix
+.IR config.json ,
+then
+.BR reload .
+No macro is written: a macro file edited by hand is saved over only after a
+.BR reload .
+.TP
+.B reload
+Re-read
+.IR config.json ,
+the loaded game profile's file and the macro files, picking up hand edits,
+then re-apply the lighting and the M and MR LEDs.
+A
+.I config.json
+that will not load changes nothing, and the reply and
+.B status
+give its error until the file changes again; when the daemon could not read
+it at its start either,
+.B status
+gives the last refused reload's error in place of the start's, even after the
+file changes again, until a reload succeeds. What is loaded
+follows
+.IR config.json ,
+as at a start: a game profile loaded by hand stays if
+.I config.json
+still names it; if it names another, that one loads, and if that one's file
+will not load, nothing loads and
+.I config.json
+keeps the name; a name no game profile has and no game profile file is named
+after, while every game profile file loads, is taken out of
+.IR config.json ;
+one it no longer names is unloaded. A game profile a program
+loaded stays, and when focus moves away from that program, or, where focus is
+not followed, when it exits, the one
+.I config.json
+names comes back. A loaded game profile whose file will not load
+keeps what it held, and the reply and
+.B status
+give the file's error until a reload reads it or
+.B save
+writes over it; one whose file is gone is unloaded and not loaded again at the
+next start. A
+.BR lock\-lights ,
+.BR mouse\-sync ,
+.BR mouse\-host ,
+.B tray
+or
+.B idle
+setting changed in
+.I config.json
+takes effect as that command would. Otherwise the
+mouse's onboard profile and the lighting claim are left alone; in host
+mode a loaded game profile's own DPI stages and report rate follow its file,
+the mouse staying on the stage it is on, unless it has not taken them since
+the profile loaded (see
+.BR mouse\-dpi\-stages ).
+.TP
+\fBprobe\fR [\fB\-\-force\fR]
+Read-only dump of the keyboard: the node, its name, product id and device
+index, the capabilities its feature table lists, its onboard mode, and, if it
+has lighting, the clusters, per-cluster effect indices and ids, brightness and
+the brightness levels the firmware keeps, and the software-control state, its
+control and notify bytes: 0x03 and 0x05 while the daemon holds the lighting
+claim, 0x03 and 0x03 while it holds the claim and the keyboard is idle, 0x00
+and 0x06 after the daemon's release, and 0x00 and 0x00 when nothing has held
+it since the keyboard linked. A
+line for something the keyboard does not have is left out. Needs no daemon,
+and refuses to run while one is up, since both would see each other's HID++
+replies; the refusal prints the
+.B systemctl \-\-user stop
+command. Run with
+.BR sudo ,
+.B run0
+or
+.BR pkexec ,
+it looks for the daemon of the user who ran it, unless
+.B XDG_RUNTIME_DIR
+is set to an absolute path other than root's.
+.B \-\-force
+probes anyway, accepting a possible misread. A lighting reply too short to
+read is an error, exit status 1.
+.TP
+\fBkeys\fR [\fImatch\fR] [\fB\-\-modifiers\fR]
+List the bindable key names: a copy of the kernel's key table from Linux
+7.0, with the names a newer kernel's
+.I \%/usr/include/linux/input\-event\-codes.h
+adds where that file is installed, filtered by the substring
+.IR match ,
+in any case.
+.B \-\-modifiers
+lists the modifier aliases instead, which go in front of a key, as in
+.BR ctrl+f15 ,
+or are bound alone. Needs no daemon.
+.TP
+.B apps
+List the running programs started from the desktop that a game profile can
+bind to, each by its application's name and the process name to bind. Shells,
+interpreters and helpers are left out, and so is a program whose desktop id
+has an entry in
+.I /etc/xdg/autostart
+or
+.IR ~/.config/autostart ,
+enabled or not, even when opened by hand; a launcher stays, since its games
+run inside it. A game started from Steam, Lutris, Heroic, Bottles or itch is
+listed by its own name beside the launcher's, a Proton or Wine game by its
+Windows
+.BR .exe .
+With none to list, it prints
+.BR "nothing running that can be bound" .
+.TP
+\fBgui\fR [\fB\-\-gapplication\-service\fR]
+Open the GTK window. The rest of the CLI works without GTK; without it this
+prints what is missing and exits 1.
+.B \-\-gapplication\-service
+starts it as a D-Bus service that opens the window when asked, as D-Bus does
+from
+.I io.github.wmuschetto.Gearbench.service
+(see
+.BR FILES ).
+.TP
+\fBtray\fR \fBon\fR|\fBoff\fR
+On, the default, the daemon shows an icon where the desktop has a tray: on
+GNOME, Ubuntu's AppIndicators extension. It turns into a warning sign while
+.B status
+lists a problem, or else into a low battery while a device is below 15% and
+not plugged in; where the tray shows tooltips, it gives the batteries and the
+problems. A click opens a menu: each problem, one past 80 characters with
+the home folder written as ~ and, if still past 80, cut after what is
+wrong; each battery; Open Gearbench; the selected mouse's DPI
+stages in force (in host mode a loaded game profile's own), the current one
+marked, while it has them and answers; a Game profile submenu (None, each
+game profile, Keep loaded) once there is a game profile; and the switches
+Lights off when locked, DPI notices and, while a mouse with lighting is
+attached, Sync mouse with keyboard. They do what
+.BR mouse\-dpi ,
+.BR load ,
+.BR unload ,
+.BR keep\-loaded ,
+.BR lock\-lights ,
+.B dpi\-notices
+and
+.B mouse\-sync
+do. Off, no icon. Saved to
+.IR config.json .
+The icon and its menu answer only the tray: the owner of
+.BR org.kde.StatusNotifierWatcher ,
+and while GNOME Shell runs, only when that is GNOME Shell. Any other
+caller on the session bus gets
+.B org.freedesktop.DBus.Error.AccessDenied
+from the icon's and the menu's methods; its
+.B Get
+of a property fails, and its
+.B GetAll
+is empty.
+While GNOME Shell runs, the icon is offered to no other owner of
+.BR org.kde.StatusNotifierWatcher .
+The icon takes no bus name: it is on a session connection of its own,
+which a Flatpak app cannot reach unless it was given the whole session bus.
+Needs python3\-gi; without it or without a tray,
+.B status
+says why on its
+.B tray
+line.
+.SS Keyboard
+.TP
+\fBprofile\fR \fIindex\fR
+Switch the M profile.
+.I index
+is 1, 2 or 3, the same thing the M1 to M3 keys do.
+.TP
+\fBbrightness\fR \fIlevel\fR
+Set the backlight.
+.I level
+is 0 to 100, floored to a level the firmware keeps (on the G915: 0, 12, 25, 50
+or 100). The reply gives both the requested and the applied value. Saved to
+.I config.json
+as applied, or as given while the keyboard is away, since its levels are not
+known then; once it is back with its lights on, the level it keeps is saved.
+The keyboard's brightness key sets the level too, and the daemon saves the
+level it reports.
+A mouse synced to the keyboard
+.RB ( mouse\-sync )
+shows its color scaled by the level.
+.TP
+\fBlock\-lights\fR \fBon\fR|\fBoff\fR
+On, the default, the keyboard's lights and a synced mouse's go off while the
+screen is locked or blank and before a suspend. While it is locked, any
+input brings them back, a G, M or MR key included; they dim to half after 30
+seconds without input and go off again after 60, by GNOME's idle time, which
+a game holding off GNOME's idleness does not stop. Unlocking brings them back.
+A keyboard its own idle dimming has dimmed or turned off (see
+.BR idle )
+stays so until the next keypress; a synced mouse comes back with any input.
+The saved brightness is not touched. For the suspend the daemon holds a logind
+delay inhibitor, shown by
+.B systemd\-inhibit \-\-list
+as
+.BR Gearbench ,
+and closes it after turning the lights off. A lighting change made while the
+lights are down is saved and shows when they are back. Off, they stay on.
+Saved to
+.IR config.json .
+Needs python3\-gi and logind; the blank, and the relight on input other than a
+G, M or MR key while locked, need GNOME.
+.TP
+\fBidle\fR [\fB\-\-dim\-after\fR \fIseconds\fR] [\fB\-\-off\-after\fR \fIseconds\fR] [\fB\-\-never\-dim\fR \fBon\fR|\fBoff\fR]
+The keyboard's idle dimming. It dims to half
+.B \-\-dim\-after
+seconds after the last keypress, 60 by default, its lights go off
+.B \-\-off\-after
+seconds after that, 300 by default, and the next keypress brings them back.
+Each is 10 to 3600.
+.B "\-\-never\-dim on"
+keeps them from dimming or going off; the keyboard's notices are still
+answered. A lighting change from the window or the CLI counts as a keypress:
+it brings them back, and made while they are lit it starts the count again.
+With no option it prints the settings. Saved to
+.IR config.json ;
+new times go to the keyboard at once, lighting it as a keypress would, or
+when it is back if it is away or not answering. The brightness and the claim
+are not touched. With the screen lock the darker of the two shows.
+A mouse synced to the keyboard
+.RB ( mouse\-sync )
+stays lit while it is in use. Once nothing on the desktop, keyboard or mouse,
+has been touched for
+.B \-\-dim\-after
+seconds (GNOME's idle time, which a game holding off GNOME's idleness does not
+stop), it takes the keyboard's idle level, dimmed, off or lit, and follows it
+until the next input, which lights it; a key lights the keyboard too. With the
+keyboard away, without lighting Gearbench can drive, or with no report from it
+since it last stopped answering, it goes by the keyboard's times instead:
+dimmed after
+.B \-\-dim\-after
+and off
+.B \-\-off\-after
+seconds after that. New
+.B \-\-dim\-after
+or
+.B \-\-never\-dim
+start it over lit; a new
+.B \-\-off\-after
+alone moves only its off, and going by the keyboard's times, a longer one dims
+it again when it is off already, until the new time has passed; one that has
+run out already leaves it off. The
+same values change nothing.
+.B "\-\-never\-dim on"
+keeps it lit. Without python3\-gi or GNOME's idle monitor it stays lit.
+.TP
+\fBcolor\fR \fIvalue\fR
+Set the color of the profile in force and save it.
+.I value
+is six hex digits, with or without the
+.BR # ,
+like
+.BR '#0080ff' ;
+.B '#fff'
+is refused.
+It leaves the lighting mode and the effect alone: in per-key mode with no
+animation it is the background under the painted keys, and the Static color
+is kept for the next switch to Static; in static mode, and under breathe,
+cycle, wave or ripple, it is the Static color, and the background is kept.
+With a game profile loaded this edits that game profile and saves its file,
+not the M profile.
+It is refused while the file that would save it was edited by hand, will not
+load, or has another file read in its place. Refused as the release of a drag
+(see
+.BR preview ),
+it puts back the lighting the daemon holds.
+.TP
+\fBpreview\fR \fIvalue\fR
+Repaint only: one per-key frame over zones 1 to 210, the logo included, with no
+zone effects and no M or MR LEDs, and no frame under an animation or while the
+lights are down. Like any lighting change, it first counts as a keypress (see
+.BR idle ),
+and one that brings the lights back applies the profile in force first, zone
+effects and the M and MR LEDs included.
+A synced mouse follows. Outside per-key mode this is what dragging a color in
+the window sends; it saves nothing. The
+release of the drag sends
+.BR color ,
+which saves.
+It is refused as
+.B color
+would be for the file that would save it. A refusal part way through a
+drag puts back the lighting the daemon holds; any other writes nothing.
+.TP
+\fBeffect\fR \fIname\fR [\fB\-\-speed\fR \fIms\fR] [\fB\-\-direction\fR \fIdirection\fR]
+Set the effect of the profile in force and save it: the loaded game profile,
+or the M profile.
+.I name
+is one of \fBbreathe\fR, \fBcycle\fR, \fBdisabled\fR, \fBripple\fR,
+\fBstatic\fR or \fBwave\fR;
+.B disabled
+turns the board black, with a per-key layout's painted keys still showing on
+it. Breathe, cycle, wave and ripple are animations: one shows in place of the static or per-key board,
+whose painted keys are kept and come back with
+.BR "effect static" ,
+and breathe and ripple run in the profile's Static color. The logo waves with
+the keys under wave, and stays steady in the Static
+color under ripple.
+.B \-\-speed
+is how long one cycle takes, in milliseconds, so lower is faster: 1000 to
+20000 for breathe, cycle and wave, and 100 to 1000 for ripple.
+.B \-\-direction
+is wave's:
+.B horizontal
+(the default),
+.BR vertical ,
+.B center\-out
+or
+.BR reverse\-horizontal .
+Each is saved per animation, so an effect named without them runs at what was
+saved, or the default: breathe 3000 ms, cycle and wave 2100, ripple 1000. A
+speed outside its range, a speed for
+.B static
+or
+.BR disabled ,
+or a direction for anything but wave is refused.
+.TP
+\fBbind\fR \fIkey\fR \fIbinding\fR [\fB\-\-shift\fR]
+Bind a G key and save it.
+.I key
+is G1 to G5, in any case.
+.I binding
+is a key spec like
+.BR ctrl+shift+f5 ,
+a modifier alone like
+.B shift
+(any name \fBkeys \-\-modifiers\fR lists, which go in front of a key too, as
+in
+.BR rsuper+f15 ),
+several keys held together like
+.B a+b+c
+or
+.BR ctrl+a+b ,
+or
+.BI macro: name
+to run a macro, or
+.BR none ,
+.B clear
+or
+.BR off ,
+in any case, to clear it. The Clear key cannot be bound by any name,
+.B key_clear
+included, since it is too easily confused with
+.BR clear .
+.B \-\-shift
+binds the MR shift layer instead, used while MR is held; a G key unbound there
+does what it does without MR. The binding is held as long as the G key is:
+the spec's keys go down on the press in the order named and come up on the
+release in reverse. A spec that names a key twice, as
+.BR a+a ,
+is refused, as is a
+.B +
+with no key beside it, as
+.BR ctrl++ ;
+the plus key is
+.B shift+equal
+on a US layout, or
+.B kpplus
+on the keypad. Spaces or a line break around a binding, here and in
+.BR mouse\-bind ,
+are not saved; a hand-edited file with them still loads. A key held
+by two things at once, another G key, a mouse button or a running macro, stays
+down until the last of them lets go. Once SysRq goes down with Alt held,
+neither a binding nor a macro presses a key other than Alt, Shift or SysRq
+until Alt comes up, as the
+.B b
+of
+.BR alt+sysrq+b ,
+and the journal says so: the kernel would run that key as a magic SysRq
+command, and
+.B b
+reboots at once under Ubuntu's kernel.sysrq default. A screen lock, a blank, a
+suspend, or another account or a text console taking the screen lets go of
+what a G key holds and of the MR layer, and a release after that does
+nothing: a G key or MR still held through it needs a new press. The spec is
+parsed before it is sent. A macro name is not checked against the library,
+since a binding may name a macro written later; one over 1,000 characters or
+holding a control character is refused. With a game profile loaded this
+writes to that game profile.
+.TP
+.B macros
+List the macros in
+.IR ~/.config/gearbench/macros/ ,
+with their step count and repeat mode, marking the one running now with
+.BR * .
+One played with a delay is not marked while it counts down; a line under the
+list says when it starts, as in
+.B "Spam starts in 2.4 s."
+Macros
+are written in the window's Macros tab, or as JSON by hand. A file edited by
+hand runs as edited at the next press, and the daemon does not save over it,
+rename it or delete it until a
+.BR reload .
+One deleted by hand is written again when the macro is saved.
+.TP
+\fBmacro\-run\fR \fIname\fR [\fB\-\-delay\fR \fIseconds\fR]
+Play the saved macro
+.I name
+after a countdown of
+.IR seconds ,
+3 by default, 0 to 60: time to click into the window the macro is for, since
+it types wherever the focus is. The daemon counts down, so the prompt comes
+back at once and
+.B status
+shows the countdown; with the terminal still in front at the end, or no
+delay, the macro types into the terminal. No key is held, so a
+.B once
+or
+.B while_held
+macro runs one pass and a
+.B toggle
+macro runs until
+.BR macro\-stop ,
+the window's Stop, another macro, a save or delete of it, a screen lock, a
+blank or a suspend, or the daemon stopping; a rebind or a profile switch
+leaves it running. The window's Play does the same with what its editor
+holds, saved or not. While the screen is locked or blank, or the machine is
+going to sleep, both are refused,
+.BR "macro 'Spam' not started: the screen is locked" ,
+and a G key or mouse button bound to a macro starts nothing. The same holds
+while the session is not active, when another account or a text console has
+the screen
+.RB ( "macro 'Spam' not started: the session is not active" );
+then no G key or mouse button bound to a key, or to back or forward, types
+either, and switching away stops a running macro.
+Without python3\-gi none of this is refused, and without logind only a blank
+is.
+.TP
+.B macro\-stop
+Stop the macro that is running or counting down, whatever started it: a G
+key, a mouse button,
+.B macro\-run
+or the window's Play. Says
+.B no macro was running
+when none was.
+.SS Game profiles
+A game profile that names programs is loaded while a window of one of them has
+focus: with two games running, the one in front has its profile loaded, and
+focus anywhere else brings back the M profile or a profile loaded by hand. The
+daemon that
+.I gearbench.service
+runs reads focus from Gearbench's GNOME Shell extension, which gives the
+focused window's process id only to a program of the same user in a cgroup
+named
+.IR gearbench.service .
+While the extension is not running, and
+for a daemon started by hand with
+.BR "gearbench\-ctl daemon" ,
+the daemon reads Xwayland, which sees X11 programs, and Proton games unless
+they run Wine's Wayland driver (GE-Proton's
+.BR PROTON_ENABLE_WAYLAND=1 ),
+and a native
+Wayland window counts as no program. With neither, the daemon follows running
+programs instead: a profile loads while its program runs. A focus change
+counts once focus has stayed on a window for 0.3 seconds, or 1 second after
+the first of a run of changes that does not settle.
+.TP
+.B profiles
+List the game profiles, marking the loaded one, with each one's mode, its
+painted key count and the programs that load it. A profile whose effect is an
+animation or disabled shows that effect in place of its mode.
+.TP
+\fBload\fR \fIname\fR
+Load the game profile called \fIname\fR, in any case and with punctuation
+and symbols counted as spaces (a name with no letter or digit keeps its
+symbols), over the active M profile.
+The daemon loads it again at its next start. One a program loaded stays that
+program's instead: when that program loses focus or exits, it gives way to the
+profile it was loaded over, and that is the one the next start loads. On a
+mouse in host mode its own DPI stages and report rate, where it has them,
+come into force (see
+.BR mouse\-dpi\-stages ).
+.TP
+.B unload
+Drop the loaded game profile, back to the M profile's lighting and bindings
+and, on a mouse in host mode, profile 1's DPI stages and report rate (see
+.BR mouse\-dpi\-stages ).
+.TP
+.B let\-load
+End every hold-off by hand and make the daemon scan at once. The profile whose
+program has focus, or runs where focus is not followed, then loads, unless
+.B keep\-loaded
+holds a profile loaded by hand. It names the profiles no longer held off
+.RB ( "no longer held off: Doom" );
+with nothing held off it changes nothing, and says
+.BR "nothing was held off" .
+A game profile is held off when
+.BR load ,
+.B unload
+or
+.B promote
+makes another choice by hand while it is loaded and its program has focus, or
+runs where focus is not followed, whether its program or a hand loaded it.
+It stays off until focus leaves that profile's programs or, where focus is not
+followed, until none of them runs. Several can be held off at once;
+.B status
+names the latest on its game profile line, with the program that holds it now.
+.TP
+\fBkeep\-loaded\fR \fBon\fR|\fBoff\fR
+With
+.BR on ,
+a game profile loaded by hand stays loaded when a window of a program that
+would load another one gets focus, or, where focus is not followed, when that
+program starts. With
+.BR off ,
+as at every start of the daemon, it is replaced and comes back when that
+program loses focus or exits. It does not stop an auto-load over the M profile.
+.B status
+adds
+.B kept loaded
+to its game profile line while the switch is on and a profile loaded by hand
+is loaded, and with
+.B \-\-json
+always gives the switch as
+.BR keep_loaded .
+.TP
+\fBsave\-profile\fR \fIname\fR [\fB\-\-process\fR \fIprocess\fR]...
+Save the live lighting, G-key bindings, MR layer and mouse bindings as a
+game profile in
+.IR ~/.config/gearbench/profiles/ .
+It loads and unloads nothing itself:
+.B load
+loads the profile saved, and the daemon's next scan, within 5 seconds, acts on
+its programs.
+The painted keys, the background and the Static color go with it in the mode
+they are in, so in static mode the layout and the background are saved hidden.
+An animation is saved with its speed and wave's direction, including ones set
+by hand in an M profile's
+.BR params ,
+and the keys and the background stay hidden under it.
+A board under
+.B disabled
+is saved with the effect static and both colors black.
+.B \-\-process
+names a program that loads it by itself, and is repeatable; a launcher is
+set anyway, with the warning
+.B profile\-programs
+gives. A game profile
+of that name is written over, keeping its programs unless
+.B \-\-process
+names others. A loaded game profile's own DPI stages and report rate go with
+it; from an M profile none do, and a game profile written over loses its own.
+The name is trimmed, and a blank one refused, as is a name over 1,000
+characters, a name or program holding a control character, a program name
+over 255 bytes, or more than 64 programs.
+.TP
+\fBprofile\-programs\fR \fIname\fR [\fIprogram\fR]...
+Set the programs that load a game profile, loaded or not, by themselves while
+a window of theirs has focus, or while they run where focus is not followed;
+with no program given, it loads by hand only. It loads and unloads
+nothing itself; the daemon's next scan, within 5 seconds, acts on the new
+list. A name matches a running program's whole name, in any
+case, with
+.B .exe
+optional on either side. A launcher, such as Steam, is set anyway, with a
+warning on standard error: the profile would load while the launcher itself
+has focus, or, where focus is not followed, whenever it runs. A profile loads
+for at most 64 programs, each name at most 255 bytes, the longest file name,
+and none may hold a control character; a list past any of these is refused,
+and a profile file past any does not load.
+.TP
+.B promote
+Copy the loaded game profile into the active M profile, save it, and unload
+the game profile. Its painted keys, its background, its Static color and its
+effect with its speeds and direction go in the mode they are in, hidden ones
+included, and so do its G-key, MR and mouse bindings. Its own DPI stages and
+report rate stay with it: an M profile has none.
+With no game profile loaded, it saves the active M profile as it shows.
+.TP
+\fBrename\-profile\fR \fIold\fR \fInew\fR
+Rename a game profile. Its file moves to the one the new name calls for, and
+whatever named it follows: a loaded profile stays loaded, one a program loaded
+stays that program's, and a held-off one stays held off, under the new
+name. Nothing is loaded or unloaded. The new name is trimmed, and a blank one
+is refused, as is one over 1,000 characters or holding a control character,
+one another game profile has, in any case and with punctuation and symbols counted as spaces (a name
+with no letter or digit keeps its symbols), or one
+whose file is already there and holds
+another game profile or will not load. A rename of a loaded profile is refused
+too while its file was edited by hand, would not load when the daemon last
+read it, or has another file read in its place, and so is a rename of the
+profile that
+.I config.json
+names while that file was edited by hand or could not be read.
+.TP
+\fBdelete\-profile\fR \fIname\fR
+Delete a game profile's file and clear every reference to it. A loaded one is
+unloaded; one a program loaded gives way to the profile it was loaded over.
+.SS Importing from G HUB
+.TP
+\fBimport\-ghub\fR \fIfile\fR [\fB\-\-list\fR] [\fB\-\-profile\fR \fIname\fR]... [\fB\-\-all\fR] [\fB\-\-dry\-run\fR] [\fB\-\-on\-clash\fR \fBreplace\fR|\fBkeep\fR|\fBskip\fR] [\fB\-\-with\-programs\fR]
+Import profiles, bindings, lighting and macros from G HUB's settings.
+.I file
+is
+.I settings.db
+from
+.I %LOCALAPPDATA%\eLGHUB
+on Windows, copied with G HUB closed, with its
+.I settings.db\-wal
+beside it if there is one, which can hold the newest changes; or a JSON file
+holding the same settings. The database is read from a private copy and
+never written. Each file must be a regular file, or a link to one. When
+.I settings.db
+is a link, the
+.I settings.db\-wal
+beside the link is read, or with none there, the one beside the file it links
+to.
+.I settings.db
+and
+.I settings.db\-wal
+may each be at most 64 MiB; a JSON file, and the settings the database holds,
+at most 16 MiB. A file of more than 10,000 profiles or
+10,000 cards (what G HUB puts on a key, a button or a profile, such as a
+keystroke, a macro, an action or the profile's lighting) is refused,
+naming the cap. The database must keep its settings in a plain table, not a
+view or a virtual table and with no generated column, and SQLite's read of it
+is stopped after 10 seconds, or once SQLite holds 256 MiB of memory.
+.IP
+.B \-\-list
+shows what the file holds: the G HUB profiles, named by their application,
+with their G keys, mouse buttons, lighting and macros, every step of each
+macro a line under it, and what cannot be imported and why. A profile with
+a name of its own, in an application G HUB has more than one profile for,
+is named by both, such as
+.IR "Apex Legends: Ranked" .
+At most 64
+programs come over per profile, and a program name over 255 bytes is left
+out and listed as
+.BR "Program names over 255 bytes: no file name is that long" .
+Control characters in G HUB's names are dropped; an error that quotes the
+file drops each one or shows it as its escape, such as \ex1b. A JSON escape
+in a name that is not a whole character, such as \eud800, becomes a question
+mark, and a line or paragraph separator (U+2028, U+2029) or a character that
+turns the direction of the text after it (U+202A to U+202E, U+2066 to U+2069)
+becomes U+FFFD.
+Application, profile and card names are cut at 256 characters,
+each cut listed, as
+.B "Application name after 256 characters: an imported name is cut there"
+and
+.B "G1: its card's name after 256 characters, an imported name is cut there"
+at each key or button the card is on.
+Once a file's Not imported text passes 16,777,216 characters, each profile
+from there on, the one that passed it included, shows one line in place of its
+own, such as
+.BR "112 lines not shown: the file's Not imported text is over 16 million characters" .
+Each profile lists again every step of each macro it binds, so once the
+lines under the profiles pass 16,777,216 characters as printed, each profile
+from there on, the one that passed it included, is listed by name alone, and
+a line after them says how many, such as
+.BR "3 profiles listed by name alone: the listing is over 16 million characters" ,
+and that
+.B \-\-profile
+.I name
+.B \-\-dry\-run
+says what importing one would write.
+A last line names the file's other devices, which are not imported: 20 at
+most, then how many more.
+.B \-\-list
+writes nothing and needs no daemon. It is also what runs when neither
+.B \-\-profile
+nor
+.B \-\-all
+is given.
+.B \-\-profile
+imports one profile, as
+.B \-\-list
+names it, and is repeatable;
+.B \-\-all
+imports every game profile. The desktop's default profile, named
+.BR Desktop ,
+is never in
+.BR \-\-all ,
+so on a file with no other profile
+.B \-\-all
+writes nothing and says so;
+every other profile imported becomes a game profile. When
+.B \-\-profile
+names
+.BR Desktop ,
+its three banks' G keys and MR layers replace those of M1, M2 and M3,
+and its mouse buttons, and its lighting if it has any, replace all three's.
+A file can hold more than one desktop default; naming two is an error, and
+nothing is written, since both would go onto M1, M2 and M3.
+.B \-\-dry\-run
+says what would be written, each macro's steps included, and writes
+nothing.
+.IP
+A game profile imported loads by hand, with no programs, unless
+.B \-\-with\-programs
+is given: then each loads for the programs G HUB names for it. One that
+replaces a game profile of yours without it, or with it where G HUB names
+no programs, keeps that profile's programs. A program
+such as
+.I firefox.exe
+also loads the profile for a Linux program of that name without
+.IR .exe ,
+so a file from someone else can name a program you run every day. The last
+of a game profile's notes in
+.B \-\-list
+says it loads by hand, or with
+.B \-\-with\-programs
+what it loads for (the first eight programs, then how many more), and
+.B \-\-dry\-run
+ends each game profile's line with
+.BR "keeps your programs" ,
+.B loads by hand
+or
+.BR "loads for" " and its programs."
+.IP
+A name Gearbench already has for a game profile or a macro stops the import
+before anything is written, unless
+.B \-\-on\-clash
+says what to do:
+.B replace
+writes over it, though a game profile keeps its own DPI stages and report
+rate, and
+.B \-\-dry\-run
+adds
+.B replacing yours
+to its line;
+.B keep
+imports it beside yours under a new name such as
+.I "Apex Legends (2)"
+(a game profile kept this way loads by hand);
+.B skip
+leaves it out, and a binding to a skipped macro uses yours. A macro that is
+already there with the same steps and repeat mode is used as it is. Two
+imported macros of one name are asked about once at most and are never both
+written under it: the second, when written, takes a new name.
+A game profile of a name Gearbench has that holds the same G keys, MR layer,
+mouse buttons, lighting and macros, whatever its programs, is already there:
+no clash, nothing written, and one line says so. With
+.BR \-\-with\-programs ,
+a program another game profile already loads stays with it:
+the import comes without that program and says which profile keeps it.
+Two names are one program when one running process would match both: the
+kernel keeps the first 15 bytes of a process's name, so two names over 15
+bytes that share those are one. A
+program two imported profiles would share goes to the one G HUB had active for
+its application, else to the one
+.B \-\-list
+shows first, and the import says which.
+Once the lines on programs a profile comes without pass 16,777,216
+characters, each profile from there on, the one that passed them included, has
+one line in place of its own, such as
+.BR "Game profile \(dqRacer (2)\(dq is imported without 64 programs, not listed: the import's lines about programs are over 16 million characters" .
+A game profile, or an M profile from the desktop default, that binds a macro
+which could not be saved is not written, since its key would play your own
+macro of that name, or none: the import prints
+.B not sent, its macro \(dqNAME\(dq was not saved
+for it and exits 1.
+The import's lines on what became of a name or a program, not imported,
+imported under a new name or without a program, are printed only when the
+daemon wrote every request; after an error it prints what it wrote and the
+errors. A line on a game profile already there is printed then too, and also
+when a clash stops the import before anything is written.
+An import onto the loaded game profile or the active M profile is saved even
+when the keyboard does not show it in full, as when it is away, dimmed or dark,
+or refuses the write: a
+.B note:
+line gives the daemon's reason, and the exit status is 0.
+With
+.BR \-\-json ,
+.B \-\-list
+prints the profiles found,
+.B \-\-dry\-run
+the requests it would send, and an import the daemon's replies, with
+.B {\(dqok\(dq: false, \(dqerror\(dq: \(dqnot sent, its macro \e\(dqNAME\e\(dq was not saved\(dq}
+in the place of a profile that was not sent. A clash that stops the import
+prints nothing on standard output under
+.BR \-\-json :
+the clash goes to standard error and the exit status is 1, as for a file it
+cannot read.
+.SS Importing the pack
+.TP
+\fBimport\-pack\fR [\fIname\fR...] [\fB\-\-list\fR] [\fB\-\-dry\-run\fR] [\fB\-\-replace\fR \fIname\fR]... [\fB\-\-without\-programs\fR]
+Import game lighting profiles and macros from the pack that comes with
+Gearbench: all of them, or for each
+.I name
+the pack's game profile or macro of that name, or both when a profile and a
+macro share it. A name matches in any case, with punctuation and symbols
+counted as spaces (a name with no letter or digit keeps its symbols). A name
+the pack does not
+have is an error, and nothing is written. Nothing from the pack is imported
+until this is run or the window's Import pack is used.
+.IP
+The pack is
+.IR profiles/*.json " and " macros/*.json
+under
+.I /usr/share/gearbench/pack/
+(from a git checkout, its
+.IR pack/ ),
+in the formats of
+.I ~/.config/gearbench/profiles/
+and
+.IR macros/ .
+Each file is read as Gearbench reads your own. One that cannot be read, a
+game profile that binds a G key or a mouse button or holds DPI stages or a
+report rate, and a second file of a name another already has are broken:
+listed, never imported. The pack's
+.I notes.json
+holds a line to show under a game profile or macro, such as a program a game
+profile leaves out. A
+.I notes.json
+that cannot be read or is not an object of
+.I profiles
+and
+.IR macros ,
+each mapping names to notes, and a note that is blank or not one line of text
+of at most 240 characters, holds a control character, a lone surrogate or a
+character that turns the direction of the text after it, names no game profile
+or macro the pack can import, or is a second note on one, are listed as broken
+too.
+.IP
+.B \-\-list
+shows each game profile with its lighting and programs, each macro with its
+steps, the pack's note under any that has one, and the broken files, with
+.RB \(dq "Use at your own risk: some games forbid macros." \(dq
+above the macros; it writes nothing and needs no daemon.
+.B \-\-dry\-run
+says what would be written, and writes nothing. A pack game profile is its
+name, programs and lighting only. It loads for the programs the pack names
+for it unless
+.B \-\-without\-programs
+is given or the pack names none for it; then a new one loads by hand, and
+one that replaces yours keeps your programs. A program another game
+profile of yours already loads stays with it, and the import says which.
+.IP
+A name Gearbench already has, for a game profile or a macro, keeps yours.
+The import prints
+.B Game profile \(dqNAME\(dq is not imported; yours is kept.\&
+for a game profile, or the same line starting
+.B Macro
+for a macro, and ends with a line on
+.BR \-\-replace .
+.B \-\-replace
+.I name
+takes the pack's instead, and is repeatable; a name the pack does not have
+is an error here too. For a game profile it writes
+the pack's lighting and, without
+.BR \-\-without\-programs ,
+its programs if it names any, and leaves your G keys, MR layer, mouse
+buttons, DPI stages and report rate;
+.B \-\-dry\-run
+says
+.BR "replacing your lighting" .
+For a macro it writes the pack's steps and repeat mode over yours. With
+names given, a
+.B \-\-replace
+name must be one of them, since only those are imported; any other is an
+error, and nothing is written. A game
+profile of yours with the same lighting, or a macro with the same steps and
+repeat mode, is already there: no clash, nothing written, and one line says
+so. A daemon too old to know
+.B import_profile_lighting
+writes none of the pack's game profiles; each fails with
+.BR "the daemon running is older than this Gearbench and wrote nothing" ,
+and the last error line is
+.BR "restart the Gearbench service: systemctl \-\-user restart gearbench" .
+As with
+.BR import\-ghub ,
+the lines on a name you have, a program another game profile loads and
+.B \-\-replace
+are printed only when the daemon wrote every request, and a
+.B note:
+line says why the keyboard does not show an import onto the loaded game
+profile in full.
+With
+.BR \-\-json ,
+.B \-\-list
+prints the pack as an object of
+.BR directory ,
+.BR profiles ,
+.BR macros ,
+.B macros_note
+(the risk line above)
+and
+.BR broken ,
+.B \-\-dry\-run
+the requests it would send, and an import the daemon's replies.
+.SS Mouse
+.TP
+.B mouse
+State of the selected mouse and, with more than one attached, a list of them
+with the selected one starred. It shows only what the mouse has: the
+battery; the DPI and its range; the report rate; the
+lighting clusters, the effects of theirs that
+.B mouse\-effect
+takes, and the mouse's color and the effect last set, or, while
+.B mouse\-sync
+is on, that its color is synced with the keyboard; and onboard profile 1
+with its report rate, CRC
+and DPI stages. On the G502 X PLUS alone it also shows profile 1's button
+table, the current bindings and the evdev nodes the daemon reads its buttons
+from, or the one it may not read and why. With a game profile loaded, the
+.B game stages:
+line gives that profile's own DPI stages and report rate for this mouse and
+whether they are in force, or, where
+.B mouse\-dpi\-stages
+and
+.B mouse\-rate
+would give it its own, says it has none. The
+.B mode:
+line says whether the mouse is in host mode, and if host mode did not take,
+why (see
+.BR mouse\-host ).
+A mouse whose switch back to onboard mode was refused, after host mode did not
+take or at
+.BR "mouse\-host off" ,
+is
+.BR "host, stuck there" :
+G4 to G9 and its DPI buttons do nothing until it is switched off and on,
+reconnects, or
+.B "mouse\-host on"
+arms it again.
+A mouse not answering at the time is
+.BR "host until the mouse answers" :
+the daemon finishes the switch, or with
+.B "mouse\-host on"
+arms it again, once it answers.
+The
+.B buttons:
+line says what profile 1 holds for G4 to G9, the enable write's mouse
+buttons, the fallback, some of the buttons, or none of them, and the
+write to run when there is one: in host mode, unless left there,
+.BR mouse\-fallback\-buttons ,
+otherwise
+.BR mouse\-enable\-buttons .
+The
+.B running:
+line names the onboard profile the mouse runs; on any other than profile 1,
+what is shown of profile 1 is not in effect, and
+.B status
+says why the switch back did not take or, with no failed switch to name, that
+the mouse switches back when it is next switched on. In host mode no onboard
+profile runs
+(see
+.BR mouse\-host ).
+It attaches nothing itself;
+asking about a mouse that is not there, or not answering, pulls the daemon's
+next attempt forward to within 30 seconds, unless the mouse's receiver has said
+its link is down (switched off or out of range): that mouse is not asked again
+until the receiver says the link is back, the mouse is heard from, or the
+machine resumes from a suspend. The
+readings are the daemon's last
+ones, taken again only once the mouse has been heard from since (motion
+through its receiver, a button on the G502 X PLUS, a command it answered, or a
+report, though a battery report only from a mouse shown not answering), once
+they are five minutes old, or while a failed write has left profile 1 unknown,
+so asking
+does not wake a mouse nobody is touching. Once the mouse has reported its
+battery by itself, that report is shown and the battery is no longer asked
+for. A mouse that did not answer is shown as
+.BR "not answering: asleep or switched off" ,
+with the time its readings were taken, and its battery with the time it was
+last read or reported; a time from an earlier day has the date before it. A
+reading not taken yet, or one the
+mouse refused, is shown as
+.BR "not read" ,
+except the battery, which has no line until it is first read or reported and
+keeps its last reading through a refused one.
+.TP
+\fBmouse\-select\fR \fIvalue\fR
+Choose which attached mouse
+.BR mouse ,
+.BR mouse\-dpi ,
+.BR mouse\-color ,
+.B mouse\-effect
+and the onboard memory commands act on.
+.I value
+is a model name or a product id, in any case, as
+.B mouse
+lists them. Every attached mouse is driven whichever is selected; this decides
+only which one the commands mean and the window shows, and whose DPI stages
+the tray menu lists. The choice is kept in memory only: when the daemon
+starts, the first mouse to attach is selected.
+.TP
+\fBmouse\-dpi\fR \fIvalue\fR
+Set the DPI live over HID++ 0x2201, clamped to the sensor's range and snapped
+to its step; a mouse that reports no range takes 1 to 65534 and refuses any
+other value. The applied value is kept in
+.I config.json
+as
+.BR mouse_dpi ,
+per mouse model, and put back when that mouse attaches or reports being
+switched on: a mouse comes back from a power cycle on the onboard stage it
+was last on (in host mode, on the profile's default stage), not necessarily
+this value. A stage the G305's DPI button moves it to is kept the same way.
+A write that changes the stage list, with
+.B mouse\-dpi\-stages
+or
+.BR mouse\-restore ,
+replaces the kept value with the DPI the mouse is on after the write: the new
+value when the mouse was on the edited stage, where in onboard mode the write
+moves the mouse and in host mode the daemon does, without the stage's flash.
+With the paddle's DPI shift held, the kept value becomes the new list's DPI at
+the stage the mouse was on before the shift, which the release puts back. If
+the daemon cannot read or move the DPI after the write, or the mouse stopped
+answering by then, as when it did not answer the report rate sent after the
+write, the kept value is forgotten. With no value
+kept, such a write stores nothing, and the mouse stays on its own stage. Under
+a loaded game profile's own stages in host mode, the value is that profile's,
+kept in memory only, and
+.B mouse_dpi
+keeps the DPI outside them. It is put back after a power cycle while the
+profile stays loaded, and at the profile's next load before the daemon stops
+if it is still one of the profile's stages. A value that is one of the stages
+in force sends its stage number, which on the G502 X PLUS flashes the stage's
+color.
+.TP
+\fBmouse\-bind\fR \fIbutton\fR \fIbinding\fR
+Bind a mouse button in the active M profile and save it; each M profile keeps
+its own G4 to G9 bindings.
+.I button
+is G4 to G9 in any case.
+They are G4 (side, rear), G5 (side, front), G6 (paddle), G7 (DPI down), G8
+(DPI up) and G9 (behind the wheel).
+.I binding
+is
+.BR back ,
+.BR forward ,
+.BR dpi\-shift ,
+.BR dpi\-up ,
+.BR dpi\-down ,
+a key spec, held for as long as the button is,
+.BI macro: name \fR,
+or
+.BR none ,
+.B clear
+or
+.B off
+to clear it, as with
+.BR bind .
+The actions match in any case, so
+.B Back
+is the mouse's back;
+.B key_back
+binds the Back key.
+A screen lock, a blank, a suspend, or another account or a text console
+taking the screen lets go of a held key,
+.B back
+or
+.BR forward ,
+as it does a G key's. A
+.BI macro: name
+whose name runs over 1,000 characters or holds a control character is
+refused, as with
+.BR bind .
+With a game profile loaded this writes to that game profile instead.
+.TP
+\fBmouse\-defaults\fR
+Put all six of G4 to G9 in the active M profile back to the default bindings:
+back, forward, dpi\-shift, dpi\-down, dpi\-up and none. The other M profiles
+keep theirs. It touches no onboard memory. With a game profile loaded it
+writes to that game profile instead.
+.TP
+\fBmouse\-color\fR \fIvalue\fR
+Set the mouse's color on every cluster that has a static effect, then a per-key
+fill.
+.I value
+is six hex digits, as with
+.BR color .
+Refused while
+.B mouse\-sync
+is on, and on a mouse without lights, such as the G305. The daemon keeps the
+color while it runs and puts it back after a power cycle; it is not saved.
+.TP
+\fBmouse\-effect\fR \fIname\fR [\fB\-\-color\fR \fIvalue\fR]
+Set a zone effect on whichever mouse clusters have it.
+.I name
+is any effect
+.B gearbench\-ctl mouse
+lists: those the mouse reports that Gearbench has a name for.
+.B \-\-color
+defaults to
+.BR '#0080ff' .
+Refused while
+.B mouse\-sync
+is on, on a mouse without lights, and for an effect no cluster has. It is
+kept as the color is.
+.TP
+\fBmouse\-sync\fR \fBon\fR | \fBoff\fR
+On: the mouse follows the keyboard's lighting:
+the keyboard's color, the one
+.B color
+sets (black under
+.BR disabled ),
+live previews included, scaled by the keyboard's
+.BR brightness ,
+since the mouse has no brightness control;
+.BR lock\-lights ;
+and the
+.B idle
+dimming while nothing on the desktop is touched. Its own color and effect
+commands are refused, and
+.B "mouse\-sync on"
+while it is on changes nothing. Off: each mouse goes back to its own color or
+effect, the one last set with
+.B mouse\-color
+or
+.BR mouse\-effect ;
+one with none keeps the synced color at the keyboard's brightness as its own,
+and goes back to that color at every later switch off while the daemon runs.
+A mouse with no color or effect of its own while sync is off would stay dark
+after a DPI flash, so once the flash is over it takes the keyboard's color at
+the keyboard's brightness. Saved to
+.IR config.json .
+.TP
+\fBdpi\-notices\fR \fBon\fR | \fBoff\fR
+On, the default: when a mouse button bound to
+.B dpi\-up
+or
+.B dpi\-down
+steps the DPI, G8 and G7 on the G502 X PLUS unless rebound, or the G305's DPI
+button moves it to another stage, a desktop notice says the new value, like
+.BR "G502 X PLUS: 1600 DPI" .
+Each step replaces the notice in place; it is posted as transient, and the
+daemon takes it down 5 seconds after the last step. A DPI set with
+.BR mouse\-dpi ,
+from the window or from the tray menu, the paddle's DPI shift and the DPI put
+back when a mouse is switched on post none. Off: no notice. Saved to
+.IR config.json .
+Needs python3\-gi and a notification server. The switch for Gearbench in
+GNOME Settings, Notifications, silences these together with the low-battery
+notices and the notice a refused tray menu choice posts.
+.TP
+\fBmouse\-host\fR \fBon\fR | \fBoff\fR
+On, the default: while
+the daemon runs, a G502 X PLUS, on its receiver or its cable, is in host mode
+with its button spy (0x8110) armed, and G4 to G9 reach the daemon as the spy's
+masks, with no onboard profile write; the DPI stages and report rate are
+profile 1's, or a loaded game profile's own, and the rate is sent live. A move
+between its receiver and its cable while the daemon runs arms it again on the
+new route. When the daemon stops, a mouse that answers goes back to onboard
+mode on profile 1, at its remembered DPI or the one it had; one that does not
+is left in host mode, its G4 to G9 and wheel tilts
+dead until its next power cycle or the daemon's next start. A mouse that
+refuses host mode runs profile 1 as with the switch off (or, if the switch to
+profile 1 does not take, the profile it was on), and
+.B status
+says why under problems. Off: the mouse runs onboard profile 1 all the time,
+and G4 to G9 need
+.BR mouse\-enable\-buttons .
+A mouse off or out of range when the switch is turned off stays in host mode
+until it is back, and goes to profile 1 then, unless the switch is on again by
+then. The G305 runs profile 1 either way. Saved to
+.IR config.json .
+In host mode a wheel tilt reaches the daemon only through the spy, and the
+daemon scrolls sideways for it on its virtual mouse, a notch at the tilt and
+one every 100 ms while held, as the mouse does by itself otherwise.
+.SS Mouse onboard memory
+These five rewrite the mouse's onboard profile 1; with a game profile loaded
+and
+.B mouse\-host
+on, on a G502 X PLUS,
+.B mouse\-rate
+and
+.B mouse\-dpi\-stages
+save that profile's own instead and write nothing to the mouse's onboard
+memory. Each write
+backs up the profile directory and every profile sector to
+.I ~/.config/gearbench/backup/
+first, and reads the sector back byte for byte after writing. The four that
+edit refuse to write when the sector, read now, has a bad CRC;
+.B mouse\-restore
+writes over it. In onboard mode a written profile takes effect at the write's
+commit, with no power cycle. A mouse runs whichever of its onboard
+profiles is current, and G HUB can leave the G502 X PLUS on profile 2; the
+daemon switches it back to profile 1 at connect and after each power-on, with
+0x8100 setCurrentProfile, which writes nothing to onboard memory, and puts
+the remembered DPI back after it. Each reply's note says a write is in
+effect, naming the mouse it wrote:
+.RB \(dq "Written to onboard profile 1 on the G502 X PLUS; it is in effect now." \(dq
+On a mouse last read running another onboard profile, it says instead that
+the write is not in effect until the mouse runs profile 1. In host mode,
+where no profile runs, it says instead that Gearbench uses profile 1's DPI
+stages and report rate now, except those a loaded game profile has of its
+own, which it names, and that the mouse runs profile 1 when Gearbench stops.
+After
+.B mouse\-enable\-buttons
+or
+.B mouse\-fallback\-buttons
+in host mode it says instead what G4 to G9 do now and once Gearbench stops.
+In host mode it also says if the mouse stopped answering after the write, so
+the report rate is sent once it answers, and after
+.B mouse\-restore
+or
+.B mouse\-rate
+if the mouse did not take the rate sent live, which is sent again at the
+mouse's next setup.
+.TP
+\fBmouse\-rate\fR \fIvalue\fR | \fB\-\-reset\fR
+Set the report rate in Hz.
+.I value
+is 1000, 500, 250 or 125. On a mouse the daemon runs in host mode, or one it
+could not switch back to onboard mode, it writes profile 1 and then sends the
+rate live. On a mouse in host mode that the daemon does not run in host mode,
+such as one another program left there whose switch to onboard mode at
+connect did not take, it falls back to a live 0x8060 write, which takes no
+backup and verifies nothing; the reply says which happened. A rate the mouse
+does not take is refused, unless it is saved as a game profile's own (below).
+With a game profile loaded and
+.B mouse\-host
+on, on a G502 X PLUS, it is saved as that profile's own rate for this mouse
+model and sent live while the mouse is in host mode; profile 1 is not
+written, and the reply's
+.B written
+is
+.BR game_profile .
+Its note says when the rate is in force: now, once the mouse answers, once
+it is in host mode where host mode did not take, or not, where the mouse
+refused it; a refused one is sent again at the mouse's next setup or the
+profile's next load. The same goes for
+.BR mouse\-dpi\-stages .
+Where the mouse took the rate and refused the DPI for the stages in force,
+the note says the rate is in force now and that the DPI is sent again at the
+mouse's next setup or the profile's next load.
+.B \-\-reset
+drops the loaded game profile's own rate, and profile 1's is used again; with
+no game profile loaded, on the G305 or with
+.B mouse\-host
+off, it is refused.
+.TP
+\fBmouse\-dpi\-stages\fR \fIstages\fR [\fB\-\-default\fR \fIdpi\fR] [\fB\-\-shift\fR \fIdpi\fR] | \fB\-\-reset\fR | \fB\-\-factory\fR
+Write a new DPI stage list.
+.I stages
+is one to five DPI values, comma separated, with space around a comma
+ignored; more than five, or stages separated only by spaces, is refused before
+anything is sent. A stage outside the sensor's range is refused, naming the
+range, and one inside is snapped to its step, as
+.B mouse\-dpi
+snaps; they must stay distinct.
+.B \-\-default
+is the onboard profile's default stage and
+.B \-\-shift
+the stage the paddle drops to; both take DPI values, not indices, snapped as
+the stages are and refused outside the range, and a value the list does not
+hold is refused. A value under 100, which no supported sensor takes, is
+refused before anything is sent
+.RB ( "that is a DPI, not a stage number" ).
+Leave either out and it stays on its value
+if the new list holds it, else on its position, taking the value now there,
+or the last stage if the list is shorter. The mouse
+starts on the default stage when it switches to profile 1, as when the daemon
+switches it back from another profile, and in host mode at a power cycle.
+When the list
+changes, the reply's
+.B dpi
+is the DPI the mouse is on after the write (see
+.BR mouse\-dpi ).
+When the list is a game profile's own (below), it is there only if the mouse
+is in host mode and the edit set its DPI: to the new value at the place of the
+old stage it was on, where the new list keeps that place; or, where the mouse
+has not taken the profile's stages and rate since the profile loaded, as when
+it refused them, to the DPI last chosen under the profile's stages if the new
+list holds it, else to the new default stage.
+.IP
+With a game profile loaded and
+.B mouse\-host
+on, on a G502 X PLUS, the list is saved as that profile's own for this mouse
+model, in its file, in force while the mouse is in host mode, and profile 1 is
+not written. The list it starts from is the profile's own, or profile 1's when it
+has none. The DPI buttons and the paddle use the profile's own stages while
+they are in force, and profile 1's otherwise. When the game profile loads,
+the DPI goes back to the one last chosen under
+them since the daemon started, kept in memory only, and to its default stage
+at its first load or once that DPI is not one of its stages; at its unload the
+DPI goes back to where it was before, none of these with the stage's flash.
+An edit keeps the mouse on the stage it is on, at its new value, unless the
+mouse has not taken the profile's stages and rate since the profile loaded:
+then the edit moves it as a load does.
+.B \-\-reset
+drops the loaded game profile's own stages, and profile 1's are used again,
+the mouse keeping its place in the list; with no game profile loaded it is
+refused.
+.B \-\-factory
+writes the stages, default and shift of the mouse's factory profile, read
+from its ROM copy of profile 1, which nothing writes, where a list would go:
+to profile 1, or to the loaded game profile's own. On the G502 X PLUS that is
+800, 1200, 1600, 2400 and 3200 DPI, default 1600, shift 800. On the G305 or with
+.B mouse\-host
+off, a game profile's own stages and rate do not apply: this writes profile
+1, and
+.B \-\-reset
+is refused.
+.TP
+\fBmouse\-enable\-buttons\fR
+Rewrite onboard profile 1 so G4 to G9 send mouse buttons 11 to 16, which arrive
+on the mouse's evdev node as key codes 0x11a to 0x11f. From the factory G4
+and G5 send back and forward, which the daemon does not read, and G6 to G9 are
+bound to firmware functions and emit nothing, so with host mode off none of
+the six can be bound without this; in host mode they reach the daemon through
+the button spy either way. G502 X PLUS only: on a mouse whose button table this
+build does not know, it is refused, because the write would land on other
+buttons.
+.TP
+\fBmouse\-fallback\-buttons\fR
+Rewrite onboard profile 1 so G4 to G8 work without Gearbench, at the login
+screen or on another system: G4
+and G5 back and forward, G6 the DPI shift, G7 and G8 DPI down and up, as from
+the factory, and G9 nothing, where from the factory it cycles the onboard
+profiles. In host mode G4 to G9 still reach the daemon through the button spy
+and keep their bindings. In onboard mode, with
+.B mouse\-host
+off or where host mode did not take, they do these things themselves and
+their bindings do not apply;
+.B mouse\-enable\-buttons
+gives them back. G502 X PLUS only, refused elsewhere as
+.B mouse\-enable\-buttons
+is.
+.TP
+\fBmouse\-restore\fR
+Write onboard profile 1 back from the newest
+.I .bin
+backup of sector 0x0001 for the selected mouse's model, whichever mouse of
+that model wrote it. It writes over a sector whose CRC fails, the case it is
+for, and never writes a backup whose own CRC fails.
+.B RECOVERY
+below covers a write or a restore that fails.
+.SS Headset
+The Astro A50 Gen 4's base station, in PC mode (USB 9886:002c). A change goes
+to the base station's memory and is in effect at once. The base station's
+flash, which it starts from after a power cycle, is written only by
+.BR headset\-save :
+a save takes over two seconds and the flash's wear limit is not known. Every
+value is checked before it is sent, since the base station clamps
+nothing; one out of range is refused and nothing is sent.
+.TP
+\fBheadset\fR [\fB\-\-read\fR]
+Report the headset, a line each: the base station's node; whether the headset
+is
+.BR on " or " "off or out of range" ,
+and
+.BR "on, docked" " or " "switched off, docked"
+while it sits on its base station, or that the base station is not answering
+and either when the readings shown were taken or that its settings have not
+all been read yet; the firmware versions, the base station's and, once the
+headset has been on since the daemon connected to the base station, the
+headset's; the battery, also once the headset has been on, with the time it
+was read while the headset is off or the base station is not answering, and
+the date before that time for a reading from an earlier day; while the headset
+is on, the Game/Voice balance its buttons set; each setting, named as
+.B headset\-set
+takes it, followed by
+.RI "\(dq(saved: " value )\(dq
+where the flash holds another value; the active EQ preset, and each preset's
+name and five bands, each with its gain, frequency and width ("shelf" for
+bands 1 and 5), and what the flash holds where it differs; what is not saved
+to flash, or that the settings have not been read yet; and a save in progress,
+or the last one's error. A setting or preset the base station refused to
+report is left out. It asks the base station whether the headset is on and,
+while it is, the balance and the active preset, as the daemon does every five
+seconds; while the headset is on it also asks for the battery when its reading
+is a minute old or the headset was docked or lifted off its base station since;
+.B \-\-read
+has every setting and preset read again first.
+While a save runs or the base station is not answering it asks nothing,
+.B \-\-read
+included, and shows what the daemon last read.
+.TP
+\fBheadset\-set\fR \fIsetting\fR \fIvalue\fR
+Change one setting in the base station's memory and show it as read back.
+.I setting
+is one of
+.B mic\-level
+and
+.B sidetone
+(0 to 100);
+.BR stream\-game ,
+.BR stream\-chat ,
+.B stream\-mic
+and
+.BR stream\-aux ,
+the stream port's mix (0 to 100);
+.B noise\-gate
+.RB ( streaming ,
+.BR night ,
+.B home
+or
+.BR tournament );
+.B mic\-eq
+.RB ( bright ,
+.B airy
+or
+.BR warm );
+.B default\-balance
+(0, all Voice, to 255, all Game);
+.B alert\-volume
+(0 to 100);
+.B auto\-off
+(10, 15, 20, 25 or 30 minutes); or
+.B preset
+(1, 2 or 3), which switches the active EQ preset. The preset is shown as sent,
+with its name as last read: for a moment after a switch the base station still
+reports the old one.
+.TP
+\fBheadset\-eq\fR [\fB\-\-preset\fR \fIn\fR] [\fB\-\-name\fR \fIname\fR] [\fB\-\-gains\fR \fIg1,g2,g3,g4,g5\fR] [\fB\-\-band\fR \fIband\fR:\fIfreq\fR[:\fIwidth\fR]]...
+Change an EQ preset, the active one unless
+.B \-\-preset
+names another, and show it as read back.
+.B \-\-name
+is 1 to 49 bytes of UTF-8 with no control character; the command refuses any
+other before anything is sent.
+.B \-\-gains
+is the five bands' gains, whole dB from \-7 to 7.
+.B \-\-band
+sets one band's frequency, 80 to 15000 Hz. Bands 2, 3 and 4 also need a
+width, 0.1 to 3.0, which the daemon rounds to a tenth, as fine as Gearbench
+reads a width back; bands 1 and 5 are shelves and take no width. It can be
+given once for each band. At least one of the three is needed, and all of them
+are checked before the first is written.
+.TP
+\fBheadset\-import\fR \fIfile\fR [\fB\-\-preset\fR \fIn\fR]
+Load an Astro Command Center preset file,
+.IR .astroeq ,
+into an EQ preset, the active one unless
+.B \-\-preset
+names another: its name, its five gains and all five bands. The command reads
+the file itself, in either the Windows or the Mac form, and refuses one that
+does not parse or holds a value out of range before anything is sent. It
+also refuses a path that is not a regular file, such as a named pipe or a
+device, a file over 16 KiB, and a
+.B Name
+that holds a control character, such as one written
+.B \ex1b
+in the file.
+.TP
+.B headset\-save
+Save every setting and EQ preset to the base station's flash. The save runs in
+the daemon, which sends it once, and once more when the base station asks for
+a retry;
+.B headset
+shows it in progress, then what is still not saved, or why the save failed.
+A change sent while it runs is refused.
+.TP
+.B headset\-revert
+Put every setting and EQ preset that differs back to what the flash holds.
+Which preset is active stays as it is.
+The flash's value for
+.B auto\-off
+cannot be read, so a change to it since the
+last save stays. The reply's note says so when the daemon sent that change
+since it last connected to the base station; after a daemon restart, a
+change made before it gets no note. A value the
+base station refuses, or one Gearbench refuses before sending it, is named in
+the note if it still differs from the flash once everything is read again,
+and the rest go back. Anything
+that still differs from the flash afterward, a refused value included, is
+named on standard error, and the exit status is 1. A change to
+.B auto\-off
+alone leaves the exit status 0.
+.TP
+\fBheadset\-spatial\fR [\fBon\fR|\fBoff\fR] [\fB\-\-head\fR \fBku100\fR|\fBkemar\fR] [\fB\-\-room\fR \fBcompetitive\fR|\fBimmersive\fR]
+Show or set Astro A50 Spatial, a 7.1 output rendered for headphones on the
+A50's Game output, for games that send 5.1 or 7.1. It sends nothing to the
+base station and needs no daemon: it runs
+.BR systemctl ,
+.B pw\-dump
+and
+.B pw\-cli
+itself. The report is a line each: its state; the output's name, with its node
+name in parentheses; the head; the room, and the room running where that
+differs; the games playing into it, each with its channel count where
+PipeWire gives it as a whole number (a name past
+100 characters is cut to its first 99 and an ellipsis), and what to do about
+one that sends 2 channels; the Steam launch option; and whether the A50's Game
+and Chat show as two outputs.
+.B on
+enables
+.I gearbench\-spatial.service
+and, through its
+.BR Also= ,
+.IR gearbench\-spatial\-login.service ,
+and starts it if the base station is plugged in; from then on it runs whenever
+the base station is plugged in, from a plug\-in or a login.
+.B off
+stops it and disables both; a
+.B \-\-head
+or
+.B \-\-room
+given with it is only saved, for its next start.
+.B \-\-head
+is the dummy head it is rendered for, from the SADIE II database:
+.B ku100
+(the default), the Neumann KU100 (subject D1), or
+.B kemar
+(subject D2). It restarts a running Astro A50 Spatial, even for the head it
+has.
+.B \-\-room
+is
+.B competitive
+(the default), direction alone, or
+.BR immersive ,
+a short, dry room about 11 dB under the sound, changed while it plays. Both are
+saved to
+.I spatial.json
+and kept while it is off. With
+.BR \-\-head ,
+the room is only saved, and the restart for the head takes it. Without
+.B \-\-head
+or
+.BR off ,
+a room set while Astro A50 Spatial is starting waits up to 2 seconds for it to
+come up and is set then. If the start fails in that wait, the room is taken at
+the next start and the command exits 0; if it is still starting after 2
+seconds, the command prints that it keeps the room it started with until its
+next start and exits 1. One set while it waits to start again after a failure
+is taken at that start, with no wait. The room, the head, then
+.B on
+run in that order, and the report follows; after
+.B on
+or
+.B \-\-head
+it waits up to 2 seconds while the state is starting. A step that fails
+prints systemctl's or PipeWire's own error when it prints one, and
+Gearbench's words otherwise, as for a program that is not installed or a
+.I spatial.json
+that cannot be saved, and exits 1, with a line on installing Gearbench when
+the unit file is missing. When the room did not change while Astro A50
+Spatial runs, the command says so and that the room takes effect at the next
+start, with PipeWire's error in parentheses when it printed one, or
+.B "pw\-cli exited N"
+or
+.B "pw\-cli was killed by signal N"
+when it failed without one, and exits 1.
+.IP
+In Steam, a game plays on it with the launch option
+.BR "\%PULSE_SINK=gearbench\-a50\-spatial \%%command%" ;
+from another launcher, with
+.B \%PULSE_SINK=gearbench\-a50\-spatial
+in the game's environment. The game's own audio output goes on surround or
+System Default. A game started
+while it is off plays on the default output in stereo, and stays in stereo
+until the game is started again. Or pick Astro A50 Spatial as the output in
+GNOME before the game starts, and Astro A50 Game again after the game quits:
+until then everything on the default output plays on Astro A50 Spatial. Set
+the headset's Dolby button to the star while it plays, or the base station
+processes the sound a second time.
+.SH FILES
+.TP
+.I ~/.config/gearbench/config.json
+The configuration, one JSON object: \fBversion\fR; \fBactive_profile\fR, the
+M profile in force; \fBbrightness\fR; \fBsaved_colors\fR, the colors the
+window's Keyboard tab keeps, at most 24; \fBactive_game_profile\fR, the game
+profile loaded by hand, which the next start loads again; \fBmouse_dpi\fR,
+each mouse's DPI by product id (see \fBmouse\-dpi\fR); the switches
+\fBmouse_sync_color\fR,
+\fBlights_off_when_locked\fR, \fBdpi_notices\fR, \fBmouse_host_mode\fR and
+\fBtray\fR, and \fBidle_dim_after\fR, \fBidle_off_after\fR and
+\fBnever_dim\fR, which \fBmouse\-sync\fR, \fBlock\-lights\fR,
+\fBdpi\-notices\fR, \fBmouse\-host\fR, \fBtray\fR and \fBidle\fR set;
+\fBkeyboard_link_notices\fR, true by default and set only by hand, which has
+the keyboard's receiver send its link notices; and \fBprofiles\fR, the three M
+profiles keyed "1" to "3". Each has a \fBname\fR, \fBkeys\fR and \fBshift\fR
+(the G-key bindings, and the MR layer's), \fBmouse\fR (the G4 to G9
+bindings) and \fBlighting\fR: \fBmode\fR, \fBcolor\fR (the Static color),
+\fBbackground\fR, \fBkeys\fR (the painted keys), \fBeffect\fR, \fBparams\fR,
+\fBspeeds\fR (each animation's) and \fBdirection\fR (wave's).
+.TP
+.I ~/.config/gearbench/profiles/
+Game profiles, one JSON file each, named after the profile: its name in
+lowercase, with its letters and digits kept and each run of anything else
+between them made one hyphen, as in
+.I arc\-raiders.json
+for Arc: Raiders. A name with no letter or digit gets
+.I profile\-
+and a short hash instead, and one that comes out longer than 200 bytes is cut
+short and given a hash at its end.
+Each file is one JSON object: \fBversion\fR; \fBname\fR; \fBprocesses\fR, the
+programs that load it; its lighting, in \fBmode\fR, \fBeffect\fR,
+\fBspeeds\fR, \fBdirection\fR, \fBbase\fR (the Static color),
+\fBbackground\fR and \fBkeys\fR (the painted keys); \fBbindings\fR and
+\fBshift\fR (the G-key bindings, and the MR layer's); \fBmouse\fR (the G4 to
+G9 bindings); and \fBmouse_tuning\fR, its own DPI stages and report rate per
+mouse model.
+Two profiles whose names give the same file name, such as C and C++, or
+Half\-Life and Half Life, count as one name. Of their two files, the one with
+that file name is read, else the first by file name, and the other is skipped,
+with
+.BI "\%skipping game profile " file ": the same name as " other ", which is read instead"
+in the journal, until the profile in it is given a name of its own or one of
+the two files goes. Renaming a file changes which is read by the same rule:
+the skipped one comes back under that file name, or, while neither file has
+it, under one that comes first.
+.TP
+.I ~/.config/gearbench/macros/
+Macros, one JSON file each, named after the macro as a game profile's file
+is. Of two files whose macros' names give the same file name, one is read by
+the rule for game profiles, and the other is skipped, with
+.BI "\%skipping macro " file ": the same name as " other ", which is read instead"
+in the journal.
+A game profile's or macro's file is read only if it is a regular file, or a
+link to one, of at most 1 MiB, and is skipped otherwise. It is skipped too
+when the game profile's or macro's name runs over 1,000 characters, or when
+that name or a program the game profile names holds a control character or a
+lone surrogate, half of a pair written as a JSON escape such as
+.BR \eudce9 .
+The name is measured and checked with the white space at its two ends cut
+off, a tab or a newline included, so a name that ends in a newline is read
+without it; a program's name is checked as written.
+Found at the daemon's start, a
+.I config.json
+that is not such a file, or links to a file that is not there, leaves the
+daemon on the defaults, and nothing is saved over it; found at a
+.BR reload ,
+it changes nothing.
+A save or rename that would make one of these files larger than 1 MiB is
+refused, and nothing is written.
+A save writes through a link to the file it names.
+.TP
+.I ~/.config/gearbench/backup/
+Backups of the mouse's onboard profile directory and profile sectors, one file
+per sector per write:
+.IR .bin ,
+or
+.I .bad\-read
+for a sector whose CRC did not verify, which a restore never picks, nor a
+.I .bin.unchanged
+that a failed restore set aside.
+.B mouse\-restore
+reads the newest only if it is a regular file no larger than the mouse's
+sector.
+.TP
+.I ~/.config/gearbench/spatial.json
+Astro A50 Spatial's head and room, saved by
+.B headset\-spatial
+and the window's Headset tab, as in
+\fB{"head": "kemar", "room": "immersive"}\fR.
+A file that is missing, cannot be read, is not valid JSON or is not a JSON
+object reads as ku100 and competitive; a missing or unknown head or room,
+such as \fB"KEMAR"\fR, reads as its own default, with no warning. Whether it
+is on is the unit's enable link, kept nowhere else.
+.TP
+.I $XDG_RUNTIME_DIR/gearbench.sock
+The daemon's control socket. It falls back to
+.I /run/user/<uid>/gearbench.sock
+when
+.B XDG_RUNTIME_DIR
+is unset, empty or a relative path. A request is read to end of file, so a client shuts its
+write side once it has sent one. A request over 1 MiB, one that sends nothing
+for 0.5 s before its end, or one not sent whole within 2 s of the daemon
+accepting the connection is refused with a
+.B bad request
+reply and the connection closed.
+.TP
+.I $XDG_RUNTIME_DIR/gearbench.lock
+The daemon's single-instance lock, beside the socket, held while it runs and
+left in place when it stops. While a daemon holds it, another refuses to
+start.
+.TP
+.I /usr/lib/systemd/user/gearbench.service
+The user unit that runs the daemon. Before each start it runs
+.BR "install \-d \-m 0700" ,
+which creates
+.I ~/.config/gearbench/
+when it is missing and sets its mode to 0700 when it is there. Manage
+it with
+.BR "systemctl \-\-user" ,
+never with
+.BR "sudo systemctl" ,
+which does not see a user unit. Installed from a git checkout by
+.B install.sh
+it lands in
+.I ~/.config/systemd/user/
+instead.
+.TP
+.I /usr/lib/systemd/user/gearbench\-spatial.service
+.TQ
+.I ~/.config/systemd/user/gearbench\-spatial.service
+The user unit that runs Astro A50 Spatial while the base station is plugged
+in, as a PipeWire client of its own on the configuration below. The package
+installs the first and
+.B install.sh
+writes the second. Neither enables it;
+.B headset\-spatial on
+and the window's Headset tab do. Its log is
+.BR "journalctl \-\-user _SYSTEMD_USER_UNIT=gearbench\-spatial.service" ;
+.B \-u gearbench\-spatial
+adds systemd's lines about the unit, and any line another program of the
+user logs under its name.
+.TP
+.I /usr/lib/systemd/user/gearbench\-spatial\-login.service
+.TQ
+.I ~/.config/systemd/user/gearbench\-spatial\-login.service
+A oneshot user unit that starts
+.I gearbench\-spatial.service
+when the user manager starts with the base station already plugged in:
+systemd starts the spatial unit on its own only when the device appears. Its
+.B ConditionPathExists=/dev/snd/by\-id/usb\-Astro_Gaming_Astro_A50\-00
+skips it, with no failure, without the base station. It is enabled and
+disabled with the spatial unit, through that unit's
+.BR Also= .
+.TP
+.I $XDG_RUNTIME_DIR/gearbench\-spatial.conf
+Astro A50 Spatial's PipeWire configuration, written each time the unit starts
+from the head and room in
+.I spatial.json
+and the template and audio files in
+.I /usr/share/gearbench/spatial/
+(from a git checkout, its
+.IR spatial/ ).
+It goes with the runtime directory: when every session of the account has
+ended, or, with lingering on, at a restart.
+.TP
+.I /usr/share/gearbench/pack/
+The profiles and macros pack, read by
+.B import\-pack
+and the window, never written (from a git checkout, its
+.IR pack/ ).
+.TP
+.I /usr/share/alsa\-card\-profile/mixer/profile\-sets/gearbench\-astro\-a50.conf
+.TQ
+.I ~/.config/alsa\-card\-profile/mixer/profile\-sets/gearbench\-astro\-a50.conf
+.TQ
+.I /usr/share/wireplumber/wireplumber.conf.d/60\-gearbench\-astro\-a50.conf
+.TQ
+.I ~/.config/wireplumber/wireplumber.conf.d/60\-gearbench\-astro\-a50.conf
+The A50's profile set, which gives its Game and Chat an output each, and the
+WirePlumber rule that has the base station use it. The package installs them
+in
+.I /usr/share
+and does not restart WirePlumber;
+.B install.sh
+puts them in
+.I ~/.config
+and restarts WirePlumber when either file changed, which stops all audio for
+a moment. WirePlumber reads them when it starts with the user manager: at a login
+once every session of the account has ended or, with lingering on, at a
+restart, or on
+.BR "systemctl \-\-user restart wireplumber" .
+.TP
+.I /usr/share/dbus\-1/services/io.github.wmuschetto.Gearbench.service
+What D-Bus starts the window from, as
+.BR "\%gearbench\-ctl gui \%\-\-gapplication\-service" ,
+when the app grid or the tray icon asks for
+.B io.github.wmuschetto.Gearbench
+and no window runs: the desktop entry is
+.BR DBusActivatable ,
+and the daemon, a sandboxed service, never starts the window itself.
+.B install.sh
+writes it to
+.I \%~/.local/share/dbus\-1/services/
+instead, with the launcher's path.
+.TP
+.I /usr/share/gnome\-shell/extensions/gearbench\-focus@wmuschetto.github.io/
+Gearbench's GNOME Shell extension, which sends the daemon the focused window's
+process id over D\-Bus, for game profiles. The package installs it; after the
+next login, the window's Turn on, or
+.B \%gnome\-extensions \%enable \%gearbench\-focus@wmuschetto.github.io\c
+, turns it on.
+.B install.sh
+puts it in
+.I ~/.local/share/gnome\-shell/extensions/
+instead and enables it itself; GNOME loads it at the next login.
+.TP
+.I /usr/lib/udev/rules.d/70\-g915.rules
+.TQ
+.I /usr/lib/udev/rules.d/70\-g502x.rules
+.TQ
+.I /usr/lib/udev/rules.d/70\-g305.rules
+.TQ
+.I /usr/lib/udev/rules.d/70\-astro\-a50.rules
+The udev rules that tag the keyboard's and the cabled G502 X PLUS's vendor
+HID++ interface, each mouse's own hidraw node through its receiver, and the
+A50 base station's HID interface, which carries its settings and no
+keystrokes, with
+.BR uaccess .
+The G502 X PLUS's event nodes are
+.B root:gearbench
+0640 instead: a member of the system group
+.B gearbench
+reads them and cannot write events to them. The evdev ioctls ignore the open
+mode, though, so a member's program that has a node open can still grab it,
+or remap its buttons until a replug. The package creates the
+group and adds no one;
+.B install.sh
+creates it and adds the account that runs it. The daemon has the groups its
+user manager started with, so an account added since reads the nodes once it
+has logged out of every session and back in, or, with lingering on, once the
+machine restarts. Until then, with host mode off or not taken,
+.B status
+says so under its problems.
+Without the rules the daemon cannot open the devices.
+.B uaccess
+gives a node to the account whose session has the seat. While another account
+has the seat, or a text console where this account is not logged in, the
+daemon cannot open a node it does not already hold, and
+.B status
+says so under its problems until this account has the seat again.
+.B install.sh
+puts the same files, and the one below, in
+.I /usr/local/lib/udev/rules.d/
+instead.
+.TP
+.I /usr/lib/udev/rules.d/70\-gearbench\-uinput.rules
+Tags
+.I /dev/uinput
+with
+.BR uaccess ,
+the same line the \%steam\-devices package's
+.I \%60\-steam\-input.rules
+carries. With it any program the user runs can create a virtual input
+device, a keyboard included. The grant also crosses accounts: a program that
+opened the node keeps its keyboard after a user switch, or after a logout
+that leaves its processes running, and can type into a later account's
+session, a sudo prompt included. On a machine several people use, the rule's
+own comment gives a group grant to use instead.
+.TP
+.I /dev/uinput
+Where the virtual keyboard and mouse that the bindings and macros type
+through are made. It needs an ACL for the user, which systemd's own rules do
+not give and the rule above does. Without it the bindings type nothing, and
+.B status
+says so on its
+.B uinput
+line;
+the daemon tries again every 30 seconds and at the next bind.
+With the rule installed, the line says
+.B none ready
+where uinput is a module not loaded yet: the rule applies at the next boot,
+or at once after
+.B sudo \%modprobe \%uinput
+and
+.BR "sudo \%udevadm \%trigger \%\-\-subsystem\-match=misc \%\-\-sysname\-match=uinput \%\-\-action=add" .
+.SH ENVIRONMENT
+.TP
+.B HOME
+Where
+.I ~
+is: the configuration's base without an absolute
+.BR XDG_CONFIG_HOME ,
+and
+.I ~/.Xauthority
+without
+.BR XAUTHORITY .
+.TP
+.B XDG_CONFIG_HOME
+The base for the configuration directory, and for the autostart directory
+whose programs
+.B apps
+leaves out, a launcher aside. Defaults to
+.I ~/.config
+when unset or not an absolute path,
+giving
+.I ~/.config/gearbench/
+and
+.IR ~/.config/autostart/ .
+Where the service's sandbox applies, the one folder under the home folder
+the daemon may write is
+.I gearbench
+under the systemd user manager's own
+.BR XDG_CONFIG_HOME .
+A value set only in
+.I ~/.config/environment.d
+or by the desktop session reaches the daemon and not the manager: the daemon
+logs an error at its start, and where the sandbox applies it saves nothing.
+Set it for the manager itself, with
+.B \%ManagerEnvironment=
+in
+.IR \%~/.config/systemd/user.conf ,
+or not at all.
+.TP
+.B XDG_RUNTIME_DIR
+The directory holding the control socket and the daemon's lock. Defaults to
+.IR /run/user/<uid> ,
+which a relative path also gets, as the XDG Base Directory specification says;
+for
+.B probe
+under sudo, run0 or pkexec, see
+.BR SUDO_UID .
+It must be the user's own: the daemon refuses to start in a directory another
+account owns or other accounts may write in, through its group or as any
+account, such as
+.IR /tmp ,
+and a command run by any user but root sends nothing to a socket another
+account's process listens on. The daemon makes the directory, when it is not
+there yet, with mode 0700, and each missing parent of it with mode 0700 too.
+.TP
+.B SUDO_UID
+.TQ
+.B PKEXEC_UID
+.B SUDO_UID
+is set by sudo and run0, and
+.B PKEXEC_UID
+by pkexec, to the id of the user who ran them.
+.B probe
+run as root with one of them set and
+.B XDG_RUNTIME_DIR
+unset, empty, relative or
+.I /run/user/0
+uses
+.I /run/user/<id>
+as that directory, so it looks for the daemon of the user who ran it, not for
+root's.
+.TP
+.B GEARBENCH_SETTINGS_GRANT
+Set by the service's unit to
+.IR %E/gearbench ,
+the one folder under the home folder its sandbox lets the daemon write.
+When the daemon's settings folder is another one, it logs an error at its
+start; see
+.BR XDG_CONFIG_HOME .
+.TP
+.B GEARBENCH_ASSUME_SHUTDOWN
+Set to
+.B 1
+to make the daemon treat its own stop as a system shutdown: it turns the
+keyboard's lights off and keeps its claim and host mode instead of handing them
+back, and a synced mouse goes black. It is for testing that path without a
+reboot. Otherwise the daemon asks
+.B systemctl is\-system\-running
+and anything but
+.B stopping
+counts as not shutting down.
+.TP
+.B GEARBENCH_ASSUME_BATTERY
+Set to a number from 0 to 100, like
+.B 29
+(any other value, 29% included, is ignored),
+and every reading the keyboard's low-battery notices go by is that percentage,
+off external power, whether the keyboard is on its cable, through its
+receiver or not attached at all; the headset's notices still go by the
+headset's own readings. It is for seeing the notice: two readings a minute
+apart below 30 post it.
+The notices themselves, below 30% and below 15% on the receiver, need
+python3\-gi and a notification server; the switch for Gearbench in GNOME
+Settings, Notifications, silences them.
+.TP
+.B DISPLAY
+.TQ
+.B XAUTHORITY
+The X server the daemon reads window focus from, as any X11 program finds it:
+a local display such as
+.BR :0 ,
+reached through its abstract socket and then
+.IR /tmp/.X11\-unix/X0 ,
+with the MIT\-MAGIC\-COOKIE\-1 from
+.B XAUTHORITY
+or
+.IR ~/.Xauthority ,
+read only if it is a regular file of at most 1 MiB.
+DISPLAY is read once, at the daemon's start. Without a local display, game
+profiles follow window focus through Gearbench's GNOME Shell extension, or
+else the running programs (see
+.BR "Game profiles" ).
+The daemon's connection keeps Xwayland running where GNOME starts it on
+demand.
+.TP
+.B DBUS_SESSION_BUS_ADDRESS
+.TQ
+.B DBUS_SYSTEM_BUS_ADDRESS
+Where the daemon finds the session and system buses, as any D-Bus client does.
+Without the first it uses
+.I $XDG_RUNTIME_DIR/bus
+when XDG_RUNTIME_DIR is an absolute path and that file exists; the
+.I /run/user/<uid>
+default does not apply here. With neither, the daemon has no session bus, and
+does without the screen blank, GNOME's idle monitor, the focus Gearbench's
+GNOME Shell extension reports, desktop notices and the tray icon.
+Without the second it uses
+.IR /run/dbus/system_bus_socket .
+.TP
+.B JOURNAL_STREAM
+Set by systemd when a service's standard output or standard error is the
+journal. When it names
+the daemon's standard error,
+.B gearbench\-ctl daemon
+starts each log line with its syslog priority, as in
+.B <4>
+for a warning, and leaves out the time, which the journal keeps.
+.SH EXIT STATUS
+.TP
+.B 0
+The command succeeded.
+.TP
+.B 1
+The daemon answered with an error, the command refused its arguments before
+sending anything, a local command such as
+.B probe
+or
+.B gui
+could not do its job, or
+.B headset\-revert
+could not put everything back. The error is a sentence; more may follow on the
+next line in parentheses: a HID++ error or the A50 base station's error name,
+the request that got no answer, what was wrong with an answer, or the system's
+error.
+.TP
+.B 2
+The daemon could not be reached, did not answer in time, closed the connection
+without answering, or its reply could not be read; or the command line did not
+parse: an unknown command or option, a missing argument that has no alternative
+in the synopsis, or a value of the wrong type or outside its choices.
+The CLI waits 30 seconds for the commands under
+.BR "Mouse onboard memory" ,
+10 for
+.BR headset\-eq ,
+.BR headset\-import ,
+.B headset\-revert
+and
+.BR "headset \-\-read" ,
+and 3 for the rest. A timeout can mean the daemon is busy with a slow write:
+a mouse's onboard profile takes about a second when the mouse answers, a
+headset EQ change or revert is up to tens of requests to the base station
+one after another, and either takes longer when a device stops answering
+part way.
+.TP
+.B 130
+Interrupted. A running
+.B daemon
+takes an interrupt as a stop, as it does SIGTERM and, unless it was started
+under
+.BR nohup (1),
+a hangup: it shuts down and exits 0.
+.TP
+.B 141
+The program reading the output closed it before reading all of it, as
+.BR head (1)
+does once it has its lines; the rest of the output is dropped. A shell
+gives the same status for a program that SIGPIPE ended.
+.SH RECOVERY
+Gearbench writes flash in two places: a mouse's onboard profile 1, with the
+commands under
+.BR "Mouse onboard memory" ,
+and the A50 base station's, with
+.BR headset\-save .
+It never writes the keyboard's onboard profiles, and it writes no firmware.
+.SS The mouse's backups
+Every onboard write first backs up the profile directory, sector 0x0000, and
+every profile sector to
+.IR ~/.config/gearbench/backup/ ,
+a file for each, named
+.IB model \-sector\- sector \- time .bin\fR,
+where
+.I model
+is
+.B g502x
+or
+.BR g305 ,
+.I sector
+is four hex digits,
+.B 0001
+for profile 1, and
+.I time
+is the second that file was saved, just before the write, in UTC, as in
+.BR 20260929T181500Z .
+A sector that fails its CRC is saved with
+.I .bad\-read
+in place of
+.IR .bin .
+When a file has that name, or that name with
+.I .unchanged
+added, as after a second backup of the sector in the same second,
+.BR \-1 ,
+.B \-2
+and so on go before the suffix.
+Each file is on disk before the flash write, so a
+.I .bin
+is whole or absent. Nothing deletes them; delete by hand if the space
+matters, keeping the oldest, which hold the mouse as it was before
+Gearbench's first write.
+.B gearbench\-ctl
+never writes the directory; its backups record which profiles were enabled.
+.PP
+.B mouse\-restore
+writes back the newest
+.I .bin
+of sector 0x0001 for the selected mouse's model, by modification time, and
+its
+.B restored_from:
+line names the file. Of files with the same modification time, as a copy of
+the directory can leave them, it takes the one with the later
+.I time
+in its name, then the one with the higher number before the suffix.
+It backs up the sector it replaces first, so after a
+restore over a good profile 1, a second run puts that back. The newest is
+the model's, whichever unit wrote it: with two G502 X PLUS it can be the
+other one's, so after a write on one, move its backups out of the directory
+before a restore on the other. To restore an older backup, set the newer
+ones aside: move them out of the directory, or add
+.I .unchanged
+to their names, and no restore picks them.
+.B ls \-t
+lists the backups newest first by modification time. Of files with the same
+modification time it lists the earlier
+.I time
+in the name first, where
+.B mouse\-restore
+takes the later, so after a copy that left those times equal, set aside the
+one with the latest
+.I time
+and highest number, not the first one listed. Where the modification times
+differ:
+.PP
+.RS 4
+.EX
+cd ~/.config/gearbench/backup
+ls \-t g502x\-sector\-0001\-*.bin     # g305\-sector\-0001\-*.bin on the G305
+newest=$(ls \-t g502x\-sector\-0001\-*.bin | head \-1)
+mv "$newest" "$newest.unchanged"
+gearbench\-ctl mouse\-restore
+.EE
+.RE
+.SS A write that failed
+A write that fails part way can still have changed profile 1, so the daemon
+reads it again. When that read finds what was written, as after a commit
+whose answer the mouse did not send, the write counts as done: the command
+answers as for any write that went through, and the journal says
+.BR "the \%write of sector 0x0001 failed (" ... "), but it reads back as written" .
+When the read-back after the write's commit differs from what was
+written and the read after it differs too, or the read after a failure
+fails, the error says what it found:
+.TP
+.B it still holds a valid profile
+Not the one written. Nothing needs restoring; run the command again.
+.TP
+.B it now fails its CRC
+Run
+.B mouse\-restore
+before switching the mouse off: what the mouse does at power-on with such a
+sector is not known. See
+.B A bad CRC on profile 1
+below.
+.TP
+.B could not be read back
+The read after the write failed too, so what profile 1 holds is not known,
+and
+.B gearbench\-ctl mouse
+says
+.B profile 1 in flash unknown
+on its
+.B onboard:
+line, and the window's Onboard profile 1 group says
+.B Not known
+on its Stages and rate row. Leave the mouse switched on. Once it answers,
+.B gearbench\-ctl mouse
+reads profile 1 again. With
+.B CRC ok
+on that line, the stages and buttons shown are what profile 1 holds: run the
+write again if they are not the ones you wanted. With
+.BR "CRC BAD" ,
+see below.
+.PP
+After any other failed write,
+.B gearbench\-ctl mouse
+shows what profile 1 holds now, with
+.B CRC ok
+or
+.B CRC BAD
+on its
+.B onboard:
+line.
+.SS A bad CRC on profile 1
+The four commands that edit profile 1,
+.BR mouse\-rate ,
+.BR mouse\-dpi\-stages ,
+.B mouse\-enable\-buttons
+and
+.BR mouse\-fallback\-buttons ,
+refuse to write over a sector that fails its CRC:
+.BR "onboard profile 1 has a bad CRC" .
+The window's Onboard profile 1 group says
+.B Profile 1 fails its CRC
+on its Stages and rate row.
+.B mouse\-restore
+writes the newest good backup over it; run it before switching the mouse
+off. Its backup of the bad sector is kept as
+.IR .bad\-read ,
+which no restore picks, so a second run writes the same backup again.
+.SS A restore that failed
+These refusals write nothing:
+.TP
+.B no backup of sector 0x0001 found
+The model has no
+.I .bin
+of profile 1, or each is a link to a file moved or deleted; see
+.B No good backup
+below.
+.TP
+.IB path ": not a regular file"
+.TQ
+.IB path ": larger than " size " bytes"
+.TQ
+.IB path " is " n " bytes, the sector is " size
+.TQ
+.IB path " has a bad CRC; not writing it"
+.TQ
+.BI "cannot read " path ": " reason
+Set that file aside, as above, and run
+.B mouse\-restore
+again: it takes the next newest. A link to a good backup restores.
+.PP
+A
+.I .bin
+that is a link to a file moved or deleted is skipped with
+.BI "\%skipping backup " path
+in the journal, and the newest of the rest restores.
+.PP
+A restore that backs up a good profile 1, then fails and leaves it as it
+was, renames that backup, adding
+.IR .unchanged ,
+and the journal says
+.BR "the \%restore left sector 0x0001 as it was" .
+Run
+.B mouse\-restore
+again: it writes the backup the first run meant. Nothing is deleted. If the
+journal warns
+.BI "could not set " path " aside"
+instead, set that file aside by hand before the second run.
+.PP
+A restore whose profile 1 reads back as the backup counts as done, even when
+the mouse did not answer the end of the write. A second run then does what it
+does after any restore: when profile 1 passed its CRC before the restore, it
+puts back profile 1 as it was; over a bad CRC, it writes the same backup again.
+A restore that fails after changing profile 1 to something else, or that
+could not read it back, leaves the backup of profile 1 it just made in place. When profile 1
+passed its CRC before the restore, that backup is now the newest
+.IR .bin ;
+over a bad CRC it is a
+.IR .bad\-read ,
+and the newest
+.I .bin
+is still the backup the failed run meant.
+Run
+.B gearbench\-ctl mouse
+first, once the mouse answers: with
+.B CRC ok
+and the stages and buttons of the backup you meant, the restore is in
+effect. Otherwise check which
+.I .bin
+is newest before running
+.B mouse\-restore
+again, since that is the one it writes. When it is the failed run's backup,
+a second run puts back the state from before the first, so set it aside
+first.
+.SS No good backup
+With none of the model's backups of profile 1 left, or none a restore takes,
+the edits still work while profile 1's CRC is good. The mouse keeps a
+read-only factory copy of profile 1 in ROM, whose stages, default and shift
+go back with
+.BR "mouse\-dpi\-stages \-\-factory" ,
+and on the G502 X PLUS
+.B mouse\-fallback\-buttons
+gives G4 to G8 their factory entries and G9 nothing, where from the factory
+it cycles the onboard profiles.
+.PP
+With profile 1 failing its CRC as well,
+.B gearbench\-ctl
+can write nothing to it, and no command writes the ROM copy or the directory
+back. Two scripts below write a sector back whole with the daemon stopped,
+through the installed package;
+from a checkout, run them in the checkout with
+.B python3 \-
+in place of
+.BR "python3 \-I \-" .
+Each backs up the sector it replaces first, and
+.B write_sector
+reads the sector back and raises if it differs.
+Leave the mouse switched on until one has run.
+.PP
+The newest good backup of a sector, by hand: the directory, or profile 1 when
+.B mouse\-restore
+cannot run. For profile 1 it takes the file
+.B mouse\-restore
+would, reads it the same way and makes the same size and CRC checks, so where
+a restore would take no backup, it stops before writing anything. Set
+.B MODEL
+to the name
+.B gearbench\-ctl mouse
+prints, and
+.B SECTOR
+to
+.B PROFILE_SECTOR
+(profile 1) or
+.B DIRECTORY_SECTOR
+(sector 0x0000, the list of profiles). Put a good directory back before
+switching the mouse off: what a directory whose CRC fails does at power-on
+is not known, and one that disables profile 1 puts a G305, whose only
+writable profile it is, on its ROM copy. A run that backs up a good sector,
+then fails to write and leaves it as it was, renames that backup, adding
+.IR \%.unchanged ,
+as
+.B mouse\-restore
+does, so a second run takes the same file. A write that raised can still have
+taken, as when the answer to the commit is lost. When the sector then reads
+back as the image written, the script says so and exits with status 0: the
+write took, as
+.B mouse\-restore
+counts it. When it reads back as neither that image nor its
+.I .bin
+backup, or cannot be read back, nothing is renamed, and that backup stays the
+newest
+.IR .bin :
+set it aside before a second run, or that run writes the state from before
+this one back.
+.PP
+.RS 4
+.EX
+systemctl \-\-user stop gearbench.service
+python3 \-I \- <<'PY'
+from gearbench.config import ConfigError, escaped, read_capped
+from gearbench.hidpp import Hidpp
+from gearbench.mouse import CABLED_IDS, MODELS, PROFILE_SECTOR, backup_name, find_attached_mice
+from gearbench.onboard import DIRECTORY_SECTOR, OnboardProfiles, sector_crc_ok
+
+MODEL = "G502 X PLUS"       # or "G305"
+SECTOR = PROFILE_SECTOR     # or DIRECTORY_SECTOR
+# On its cable the G502 X PLUS stops answering on its receiver, whose node stays.
+found = sorted((m for m in find_attached_mice() if MODELS.get(m[1]) == MODEL),
+               key=lambda m: m[1] not in CABLED_IDS)
+if not found:
+    raise SystemExit(f"no {MODEL} attached; stop here")
+node, product, index = found[0]
+dev = Hidpp(node, device_index=index)
+onboard = OnboardProfiles(dev)
+path = OnboardProfiles.newest_backup(backup_name(product), SECTOR)
+if path is None:
+    raise SystemExit("no backup of this sector for this model; stop here")
+# Anyone who can put a file in the folder chooses its name, and it can be a pipe or
+# any size: read as mouse\-restore reads it.
+shown = escaped(path)
+try:
+    image = read_capped(path, onboard.info.sector_size)
+except ConfigError as exc:
+    raise SystemExit(f"{escaped(exc)}; stop here") from None
+if len(image) != onboard.info.sector_size:
+    raise SystemExit(f"{shown} is the wrong size; stop here")
+if not sector_crc_ok(image):
+    raise SystemExit(f"{shown} fails its CRC; stop here")
+# Every directory seen lists profile 1 first, and it must be enabled.
+if SECTOR == DIRECTORY_SECTOR and image[0:3] != bytes((0, 1, 1)):
+    raise SystemExit(f"{shown} does not enable profile 1; stop here")
+made = onboard.backup(backup_name(product), SECTOR, onboard.read_sector(SECTOR))
+try:
+    onboard.write_sector(SECTOR, image)
+except Exception:
+    # A failed write can still have taken, as when the answer to its commit is lost:
+    # mouse\-restore counts one that reads back as written as done.
+    now = onboard.read_sector(SECTOR)
+    if now != image:
+        # Left as it was, the sector's backup is now the newest .bin: set it aside, or
+        # running this again writes it.
+        if made.suffix == ".bin" and now == made.read_bytes():
+            OnboardProfiles.set_aside(made)
+        raise
+    print(f"wrote {escaped(path.name)} to sector 0x{SECTOR:04x}; the write failed, but the "
+          "sector reads back as written")
+else:
+    print(f"wrote {escaped(path.name)} to sector 0x{SECTOR:04x}; read back byte for byte")
+dev.close()
+PY
+systemctl \-\-user start gearbench.service
+.EE
+.RE
+.PP
+The factory copy in ROM, the last resort. Sector 0x0101 is the read-only copy
+of profile 1. Its last two bytes are ff ff where the CRC goes, so
+.B write_sector
+refuses it as read;
+.B OnboardProfiles.reseal_rom
+computes the CRC and changes nothing else.
+.B write_sector
+refuses sectors from 0x0100 up, so the resealed image goes into profile 1:
+.PP
+.RS 4
+.EX
+systemctl \-\-user stop gearbench.service
+python3 \-I \- <<'PY'
+from gearbench.hidpp import Hidpp
+from gearbench.mouse import CABLED_IDS, MODELS, PROFILE_SECTOR, backup_name, find_attached_mice
+from gearbench.onboard import OnboardProfiles
+
+MODEL = "G502 X PLUS"       # or "G305"
+# On its cable the G502 X PLUS stops answering on its receiver, whose node stays.
+found = sorted((m for m in find_attached_mice() if MODELS.get(m[1]) == MODEL),
+               key=lambda m: m[1] not in CABLED_IDS)
+if not found:
+    raise SystemExit(f"no {MODEL} attached; stop here")
+node, product, index = found[0]
+dev = Hidpp(node, device_index=index)
+onboard = OnboardProfiles(dev)
+# Twice, and they must agree: the ROM copy has no CRC to catch a chunk delivered late.
+rom = onboard.read_sector(0x0101)
+if rom != onboard.read_sector(0x0101):
+    raise SystemExit("two reads of the ROM disagree; stop here")
+sealed = OnboardProfiles.reseal_rom(rom)
+onboard.backup(backup_name(product), PROFILE_SECTOR, onboard.read_sector(PROFILE_SECTOR))
+onboard.write_sector(PROFILE_SECTOR, sealed)
+print("restored profile 1 from the ROM copy; read back byte for byte")
+dev.close()
+PY
+systemctl \-\-user start gearbench.service
+.EE
+.RE
+.SS The keyboard
+A daemon killed before it could stop can leave the G, M and MR keys diverted
+and doing nothing, the lighting held where it left it, and the keyboard in
+host mode. A clean stop, with
+.B systemctl \-\-user stop \%gearbench.service
+or SIGTERM, an interrupt or a hangup to
+.BR "gearbench\-ctl daemon" ,
+turns the M and MR LEDs off, gives the keys back, releases the lighting claim
+and puts the keyboard in onboard mode; a daemon whose loop fails does the
+same on its way out. At a shutdown or reboot it turns the keyboard's lights
+off instead, a synced mouse's too, and keeps the claim and host mode, so a
+keyboard dark after a power-off is as intended. A keyboard the daemon has
+found not answering, such as one switched off behind its receiver, is sent
+nothing at either stop. A
+.B kill \-9
+or an out-of-memory kill skips the stop. Run as the unit, the daemon is
+started again 2 seconds later and sets the keyboard up again, up to five
+starts a minute. Past that limit, or for a daemon run with
+.BR "gearbench\-ctl daemon" ,
+start the daemon, wait until
+.B status
+says G keys diverted, then stop it cleanly: a stop that comes before the
+daemon has begun setting the keyboard up hands nothing back. A unit past its
+limit refuses a start until the minute is over.
+.B systemctl \-\-user \%reset\-failed \%gearbench.service
+zeroes the unit's start and restart counters and clears a failed state, which
+lets it start at once; on a unit within its limit the restart after it runs as
+it would without it, so the commands below run it first.
+.PP
+.RS 4
+.EX
+systemctl \-\-user reset\-failed gearbench.service
+systemctl \-\-user restart gearbench.service
+gearbench\-ctl status    # repeat until the lighting line ends in "G keys diverted"
+systemctl \-\-user stop gearbench.service
+.EE
+.RE
+.PP
+Where the daemon cannot reach the keyboard, switch it off and on, or unplug
+its cable and plug it back in: after a power cycle it has lost the
+diversion, the claim and host mode.
+.SS The headset
+Gearbench writes the base station's flash only at
+.B headset\-save
+or the Save on the window's Headset tab, and never its firmware or its id.
+What can go wrong is in its memory: a change not wanted, or a base station
+that stops answering.
+.B \%headset\-revert
+puts back every setting and EQ preset that differs from the flash, but
+.B auto\-off
+and which preset is active. Unplugging the base station's USB cable
+and plugging it back in starts it from its flash, dropping everything not
+saved. That is also what
+.B status
+says to do for a base station that is not answering or could not be set up.
+The daemon looks for a missing base station every 5 seconds. While each look
+finds one that does not answer, the wait between looks doubles from 5 seconds
+up to a minute. Unplugging it for more than about a second ends that wait, and
+a base station plugged back in is looked at within about 5 seconds.
+.SS Firmware
+.B gearbench\-ctl
+updates no device's firmware. It uses no HID++ firmware update feature, and
+the base station's bootloader and the headset's updater are among the
+commands it refuses to send.
+.SH EXAMPLES
+Make a keyboard that is already in static mode, with the static effect, a dim
+orange:
+.PP
+.RS 4
+.EX
+gearbench\-ctl brightness 25
+gearbench\-ctl color \(aq#ff2200\(aq
+.EE
+.RE
+.PP
+Bind G1 to a macro on the base layer and to F15 on the MR layer:
+.PP
+.RS 4
+.EX
+gearbench\-ctl bind G1 \(aqmacro:Reload and heal\(aq
+gearbench\-ctl bind G1 f15 \-\-shift
+.EE
+.RE
+.PP
+Hold Shift for as long as G2 is held, for a crouch:
+.PP
+.RS 4
+.EX
+gearbench\-ctl bind G2 shift
+.EE
+.RE
+.PP
+With
+.B mouse\-host
+off, rewrite the G502 X PLUS's extra buttons so the daemon reads them, then
+bind the paddle to F15:
+.PP
+.RS 4
+.EX
+gearbench\-ctl mouse\-enable\-buttons
+gearbench\-ctl mouse\-bind G6 f15
+.EE
+.RE
+.PP
+Save the live lighting and bindings as a game profile that loads itself for
+Doom Eternal:
+.PP
+.RS 4
+.EX
+gearbench\-ctl save\-profile "Doom" \-\-process DOOMEternalx64vk.exe
+.EE
+.RE
+.PP
+Make an existing game profile, loaded or not, load itself for a Proton game:
+.PP
+.RS 4
+.EX
+gearbench\-ctl apps
+gearbench\-ctl profile\-programs "Apex Legends" r5apex_dx12.exe
+.EE
+.RE
+.PP
+See what a G HUB database holds, then import two of its profiles, its Desktop
+bindings and lighting over your M1, M2 and M3:
+.PP
+.RS 4
+.EX
+gearbench\-ctl import\-ghub settings.db \-\-list
+gearbench\-ctl import\-ghub settings.db \-\-profile "Apex Legends" \-\-profile Desktop
+.EE
+.RE
+.PP
+See what the pack holds, then import two of its game profiles, the pack's
+lighting and programs over your own Apex Legends:
+.PP
+.RS 4
+.EX
+gearbench\-ctl import\-pack \-\-list
+gearbench\-ctl import\-pack "Apex Legends" "Dota 2" \-\-replace "Apex Legends"
+.EE
+.RE
+.PP
+Dim the keyboard after two minutes without a keypress, and turn its lights
+off ten minutes after that:
+.PP
+.RS 4
+.EX
+gearbench\-ctl idle \-\-dim\-after 120 \-\-off\-after 600
+.EE
+.RE
+.PP
+Load a Command Center preset into the A50's second EQ preset, switch to it,
+and save the preset to the base station's flash:
+.PP
+.RS 4
+.EX
+gearbench\-ctl headset\-import "A50 MOD KIT.astroeq" \-\-preset 2
+gearbench\-ctl headset\-set preset 2
+gearbench\-ctl headset\-save
+.EE
+.RE
+.SH NOTES
+The Game key is the keyboard's own Game Mode, and
+.B gearbench\-ctl
+does not touch it. Game Mode turns off both Super keys and the Menu key: if
+the Super key does nothing, Game Mode is on; press the Game key again.
+.PP
+With the daemon stopped the keyboard runs its onboard profiles, where G1 to
+G5 type F1 to F5 on M1, 1 to 5 on M2 and 6 to 0 on M3, and its own power
+saving, which turns it off a few minutes after the last key. A daemon killed
+before it could stop can leave the G keys diverted and typing nothing, and
+the keyboard in host mode;
+.B RECOVERY
+says how to hand them back.
+.PP
+Pair nothing else to either mouse's receiver. A keyboard paired to one could
+have its keystrokes arrive on that mouse's nodes, which the udev rules grant:
+the
+G502 X PLUS's hidraw and event nodes, and the G305's hidraw node. In host
+mode, when a key arrives on the G502 X PLUS's event node, the daemon warns
+in the journal once each time the mouse attaches, and
+.BR status ,
+the tray and the window's Mouse tab show the warning until the mouse
+detaches.
+.PP
+Six of the daemon's commands have no subcommand:
+.BR paint ,
+.BR rename ,
+.B save_color
+and
+.BR forget_color ,
+which the window's Keyboard tab sends;
+.BR macro_delete ,
+which the Macros tab sends; and
+.BR quit .
+All six are reachable over the control socket from a script.
+.B profile\-programs
+and
+.B rename\-profile
+send
+.B profile_processes
+and
+.BR rename_profile ,
+as the window's Game profiles dialog does.
+.B import\-ghub
+sends
+.BR macro_save ,
+as the Macros tab does, and
+.B import_profile
+and
+.BR import_m_profile ,
+as the window's Import from G HUB does.
+.B import\-pack
+sends
+.B macro_save
+and
+.BR import_profile_lighting ,
+as the window's Import pack does. The window's Mouse and Headset tabs send
+.B mouse
+and
+.B headset
+with
+.B ask
+false as the window opens, while another tab shows or the window is not in
+front, and the Headset tab also while a save runs; the daemon then answers
+from what it last read and sends the device nothing.
+.SH SEE ALSO
+.BR pw\-cli (1),
+.BR pw\-dump (1),
+.BR systemctl (1),
+.BR systemd.service (5),
+.BR udev (7),
+.BR udevadm (8)
+.PP
+The project's own documentation is
+.I README.md
+to install it and
+.I GUIDE.md
+to use it. In the source tree the README is at the top and the guide in
+.IR docs/ ;
+the package installs both gzipped, as
+.I README.md.gz
+and
+.IR GUIDE.md.gz ,
+in
+.IR /usr/share/doc/gearbench/ .
+.SH BUGS
+Report them at
+.UR https://github.com/wmuschetto/gearbench/issues
+.UE ,
+with the output of
+.B gearbench\-ctl status
+and
+.BR "journalctl \-\-user \-u gearbench" ,
+or the text of the Debugging Information page of About Gearbench, under
+Troubleshooting, in the window's main menu.
+.SH AUTHOR
+wmuschetto.

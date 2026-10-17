@@ -1,0 +1,135 @@
+[Unit]
+Description=Gearbench - Logitech G keyboard, mouse and Astro A50 headset control
+Documentation=https://github.com/wmuschetto/gearbench
+# Tied to the graphical session because device access comes from udev uaccess,
+# which grants the ACL to the user of the active seat session. Started outside
+# one, the daemon cannot open the keyboard.
+After=graphical-session.target
+PartOf=graphical-session.target
+# A daemon that crashes at every start is restarted every RestartSec. With
+# systemd's default window of 10 s, six starts 2.5 s apart never fit in it,
+# so the restarts never end. Past five starts in a minute the unit is left
+# failed; `systemctl --user reset-failed gearbench` clears that once the
+# cause is fixed.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Environment="PYTHONPATH=@CHECKOUT@"
+WorkingDirectory=@CHECKOUT@
+# -P keeps the working directory off sys.path, where python3 -m puts it ahead
+# of PYTHONPATH.
+#
+# The settings folder first, which ReadWritePaths= below needs. The + runs it
+# outside the sandbox, as the same user: ProtectHome=read-only would stop it
+# creating a folder in ~/.config. A folder the window, or headset-spatial with --head
+# or --room, made under the login umask is tightened to 0700 too: install -d -m sets
+# the mode of one that is there, as GNU coreutils 9.7 and uutils 0.10.0 both did
+# (measured 2026-09-29).
+ExecStartPre=+/usr/bin/install -d -m 0700 %E/gearbench
+ExecStart=/usr/bin/python3 -P -m gearbench daemon
+# The keyboard may not be present at login, or may be unplugged later. The
+# daemon reconnects on its own, so a restart here is for a real crash.
+Restart=on-failure
+RestartSec=2
+# The journal names the process python3 otherwise, and `journalctl
+# -t gearbench` would find nothing.
+SyslogIdentifier=gearbench
+# It used about 23 MB on 2026-09-28. Past the cap the kernel kills it and
+# Restart= starts it again, where a leak would go on to take the session's
+# memory. With swap allowed, the kernel would swap it past the cap instead,
+# and kill it only once swap was full.
+MemoryMax=256M
+MemorySwapMax=0
+
+# It needs the keyboard's, each mouse's and the headset base station's hidraw
+# node, the G502 X PLUS's event node and /dev/uinput, and nothing else.
+#
+# On Ubuntu with its default AppArmor restriction on unprivileged user
+# namespaces (kernel.apparmor_restrict_unprivileged_userns=1) the six
+# directives that work by mounting do nothing: PrivateTmp, ProtectSystem,
+# ProtectHome, ReadWritePaths, ProtectKernelTunables and ProtectControlGroups.
+# systemd-executor is moved into AppArmor's unprivileged_userns profile when
+# it creates the user namespace, that profile denies the CAP_SYS_ADMIN the
+# mounts need, and the service starts without them. Measured on Ubuntu 26.04,
+# systemd 259, 2026-09-22: the daemon shares the host's mount namespace, while
+# PrivateUsers, NoNewPrivileges (the no_new_privs flag), the seccomp filters
+# (RestrictNamespaces, RestrictRealtime, LockPersonality,
+# MemoryDenyWriteExecute, SystemCallFilter, SystemCallArchitectures,
+# RestrictAddressFamilies, RestrictSUIDSGID), KeyringMode and UMask apply.
+# The six are kept for systems without the restriction. systemd-analyze
+# scores this file, not the running process.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# %E is the user manager's own XDG_CONFIG_HOME, or ~/.config when it is unset
+# or relative. environment.d(5) and a session's import-environment set the
+# daemon's environment and not the manager's, so the daemon's settings folder
+# can differ; it compares it with GEARBENCH_SETTINGS_GRANT and logs an error
+# at start. With no "-" in front, a missing folder fails the start with
+# 226/NAMESPACE where the mounts apply (systemd.exec(5)); with one, the daemon
+# would start unable to save. The ExecStartPre above creates the folder, so a
+# missing one is a real fault.
+Environment="GEARBENCH_SETTINGS_GRANT=%E/gearbench"
+ReadWritePaths=%E/gearbench
+# The control socket is bound in XDG_RUNTIME_DIR, %t, which ProtectHome=
+# read-only makes read-only with the rest of /run/user (systemd.exec(5));
+# binding a socket creates an inode, so where the mounts apply the daemon
+# could not create it. Not verified on this machine, where they do not apply
+# (above); it needs a system without the AppArmor restriction.
+ReadWritePaths=%t
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+# Every socket it opens is AF_UNIX: the control socket in XDG_RUNTIME_DIR,
+# its D-Bus connections to the system and session buses (with python3-gi,
+# gearbench/desktop.py), and one to Xwayland for which X11 window has focus,
+# through its abstract socket, which PrivateTmp does not hide
+# (gearbench/xfocus.py). With this the daemon cannot open a network socket
+# itself. It does not contain a compromised daemon, and a filtered session
+# bus would not either: one StartTransientUnit call to the user's systemd
+# manager starts a service with no sandbox, as systemd-run --user does, on the
+# bus or on the manager's own sockets in %t/systemd, and a read-only mount
+# does not stop a connect(). %t is writable besides (above; kept so by the
+# owner's decision of 2026-09-28).
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=yes
+# A user namespace, the one directive in this family a user service can
+# actually have (the rest are under "Deliberately absent" below). The
+# keyboard's and the mouse's hidraw nodes, /dev/uinput and XDG_RUNTIME_DIR
+# stay reachable under it (measured 2026-09-22), as does the headset base
+# station's node (2026-09-29). So does a group grant, as on the G502 X PLUS's
+# event node: the kernel grants by the supplementary groups the namespace
+# shows as nogroup (checked 2026-09-28 on a file of the adm group).
+PrivateUsers=yes
+KeyringMode=private
+UMask=0077
+
+# Deliberately absent, measured on systemd 259 with and without
+# PrivateUsers=yes: a user namespace is normally what makes this family
+# available, and it does not here.
+# PrivateDevices= would hide /dev/hidraw*, /dev/input and /dev/uinput, the
+# devices this exists to use, and PrivateNetwork= the host's abstract
+# sockets, Xwayland's among them (gearbench/xfocus.py; systemd.exec(5)).
+# ProtectProc= and ProcSubset= were accepted and not enforced under the
+# AppArmor restriction above; they work by mounting, and without the
+# restriction they have not been measured. DeviceAllow= was accepted and not
+# enforced: it is a cgroup device filter, which a user manager does not get
+# to set. CapabilityBoundingSet=, ProtectKernelModules=, ProtectKernelLogs=
+# and ProtectClock= are rejected outright, with or without the namespace.
+# Between them they are most of what systemd-analyze still counts against
+# this unit, and none of it is fixable without running as a system service,
+# which would give up the uaccess ACL that is the whole reason nothing here
+# runs as root.
+
+[Install]
+WantedBy=graphical-session.target

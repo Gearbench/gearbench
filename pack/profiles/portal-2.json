@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "name": "Portal 2",
+  "processes": [
+    "portal2_linux"
+  ],
+  "mode": "perkey",
+  "effect": "static",
+  "base": "#ff0000",
+  "background": "#121212",
+  "keys": {
+    "W": "#ff0000",
+    "A": "#ff0000",
+    "S": "#ff0000",
+    "D": "#ff0000",
+    "SPACE": "#ff0000",
+    "LEFT CTRL": "#00ff30",
+    "E": "#8a00ff",
+    "ESC": "#0050ff",
+    "TAB": "#0050ff",
+    "T": "#0050ff",
+    "PAUSE": "#0050ff",
+    "G1": "#ffe000",
+    "G2": "#ffe000",
+    "G3": "#ffe000",
+    "G4": "#ffe000",
+    "G5": "#ffe000",
+    "F5": "#ffe000",
+    "F6": "#ffe000",
+    "F7": "#ffe000",
+    "C": "#00e5ff",
+    "F": "#00e5ff",
+    "Q": "#00e5ff"
+  }
+}

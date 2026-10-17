@@ -1,0 +1,36 @@
+# Logitech G915 (046d:c33e) vendor HID++ interface -> uaccess for the seat user.
+#
+# Scoped to USB interface 02 deliberately. Interfaces 00 and 01 are the
+# keystroke interfaces; granting the logged-in user read access to their hidraw
+# nodes would be a keylogger surface. Interface 02 is the vendor collection
+# (usage page 0xFF00) and carries no keystroke reports.
+#
+# Matched on properties rather than sysfs attributes. bInterfaceNumber lives on
+# the USB interface (3-6:1.2) while idVendor/idProduct live on the USB device
+# (3-6), and udev requires every ATTRS key in one rule to match the same parent
+# device -- so ATTRS{idVendor} + ATTRS{bInterfaceNumber} can never match. The
+# ID_* properties below are set on the hidraw device itself by udev's usb_id
+# builtin, which 60-persistent-hidraw.rules imports, well before this file is
+# read.
+#
+# install.sh puts this in /usr/local/lib/udev/rules.d/; the .deb puts it in
+# /usr/lib/udev/rules.d/. Either way, reload with:
+#   sudo udevadm control --reload
+#   sudo udevadm trigger --subsystem-match=hidraw --action=add
+# Triggering the usb subsystem does not re-run hidraw rules.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c33e", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"
+
+# The same keyboard, through its LIGHTSPEED receiver (046d:c541).
+#
+# Read off the hardware on 2026-09-22. This receiver does not give a paired
+# device a hidraw node of its own the way the mouse's c547 does: it presents
+# only its own three interfaces, and the keyboard's traffic comes over them.
+# The layout is the same as a cabled device's, verified from the report
+# descriptors: 00 is a pointer collection, 01 is the keyboard collection that
+# carries keystrokes, and 02 is the vendor HID++ collection at usage page
+# 0xFF00. So the scoping is the same as the cable's, and for the same reason.
+#
+# A receiver's vendor interface carries the HID++ traffic of everything
+# paired to it. Keystrokes are not on it: those are interface 01, which gets
+# nothing.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c541", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"

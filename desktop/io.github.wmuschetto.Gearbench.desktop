@@ -1,0 +1,20 @@
+[Desktop Entry]
+Type=Application
+Name=Gearbench
+GenericName=Keyboard, mouse and headset settings
+Comment=Remap keys and buttons, control lighting and DPI, and run macros on the Logitech G915, G502 X PLUS and G305; set the Astro A50 Gen 4 headset's microphone, mix and equalizer
+Exec=gearbench-ctl gui
+Icon=io.github.wmuschetto.Gearbench
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=logitech;g915;g502;g305;keyboard;mouse;rgb;lighting;macro;gkey;dpi;astro;a50;headset;equalizer;microphone;
+# Changing the id would orphan the icons installed under it.
+# Must match the GTK application_id so the compositor associates the window
+# with this entry. Without it GNOME shows an unnamed generic window in the
+# dash instead of this name and icon.
+StartupWMClass=io.github.wmuschetto.Gearbench
+SingleMainWindow=true
+# Started over D-Bus (io.github.wmuschetto.Gearbench.service), so the daemon, a
+# sandboxed service, can open the window without it being its child. Exec
+# stays for a launcher that does not know the key.
+DBusActivatable=true

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "name": "Autorun",
+  "repeat": "toggle",
+  "steps": [
+    {
+      "type": "key_down",
+      "value": "w"
+    },
+    {
+      "type": "delay",
+      "ms": 1000
+    }
+  ]
+}

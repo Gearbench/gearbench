@@ -1,0 +1,57 @@
+# /dev/uinput -> uaccess for the seat user.
+#
+# The daemon runs as the logged-in user and creates two input devices on
+# /dev/uinput, the virtual keyboard and mouse that every G-key binding, mouse
+# button binding and macro types through. The node is root's alone, and
+# systemd's own rules do not grant it: 70-uaccess.rules has no uinput line
+# (systemd 259). Without this rule, or another that does the same, the
+# bindings type nothing.
+#
+# This is the line steam-devices ships in 60-steam-input.rules, so on a machine
+# with that package installed it changes nothing.
+#
+# The trade-off, the one https://github.com/ValveSoftware/steam-devices/issues/71
+# raises about Steam's copy: uinput has no notion of which program may create
+# what, so with this rule any program the user runs can create a virtual
+# keyboard and type into the session, a sandboxed one included if its sandbox
+# lets it open /dev/uinput, and a keystroke such as Alt+F2 can then reach
+# outside the sandbox. Valve closed that issue as not planned. Gearbench takes
+# the same trade-off because its daemon runs as the user and has to create
+# the devices the bindings type through. Granting the node to a
+# group instead, as the Arch Wiki's Steam page does for Steam's rule, narrows
+# it to that group's accounts, which helps only when that is not the account
+# used for everything else; the daemon needs it for the account whose
+# bindings it types.
+#
+# The grant also crosses accounts. The ACL is checked only when the node is
+# opened, and an open fd is not taken back when another account gets the
+# seat. So a process of an account that was once active can keep a virtual
+# keyboard after a user switch, and after a logout too while logind's
+# KillUserProcesses is off, as it is on Ubuntu, and type into a later
+# account's session, a terminal or a sudo prompt included. The stock
+# root-only node allows none of this. On a machine several people use, the
+# group grant above is the alternative: GROUP="<group>", MODE="0660" in place
+# of the tag, with only the owner's account in the group, in a copy of this
+# file in /etc/udev/rules.d/. That copy overrides this file by name, and a
+# reinstall or upgrade, which rewrites this file, leaves it alone.
+# steam-devices' 60-steam-input.rules tags the node too, and its tag alone
+# brings the ACL back, so with that package installed a copy of its file in
+# /etc/udev/rules.d/ with the uinput line left out is needed as well; that
+# copy then hides the package's later changes to the file. A TAG-="uaccess"
+# line is not enough where uinput is a module: Steam's static_node option
+# tags the node the module has before it loads, and the ACL logind puts on
+# it stays. After the next boot, getfacl /dev/uinput lists no user:<name>
+# line.
+#
+# static_node: where uinput is a module that is not loaded yet, /dev/uinput is
+# only a static node that loads the module when it is opened, and has no device
+# for this rule to match until then. The option puts the tag on that node too;
+# udev applies it when it starts, so at the next boot. Where uinput is built in
+# or loaded, it applies at once with:
+#   sudo udevadm control --reload
+#   sudo udevadm trigger --subsystem-match=misc --sysname-match=uinput --action=add
+#
+# install.sh puts this in /usr/local/lib/udev/rules.d/; the .deb puts it in
+# /usr/lib/udev/rules.d/. Numbered below 73-seat-late.rules, which turns the
+# uaccess tag into the ACL.
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

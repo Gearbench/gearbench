@@ -1,0 +1,88 @@
+#!/bin/sh
+set -e
+
+# Made before the udev reload: udev drops a rule line that names a group not yet there, and
+# 70-g502x.rules grants the mouse's event nodes to this one. The package adds no account,
+# since it cannot know who uses the mouse.
+make_group() {
+    getent group gearbench >/dev/null && return 0
+    addgroup --system --quiet gearbench
+    # udev may have read the rule already and dropped the group's lines; the reload re-reads a
+    # changed file only.
+    touch -c /usr/lib/udev/rules.d/70-g502x.rules
+    echo "gearbench: with host mode off, the G502 X PLUS's G4 to G9 need your account" \
+        "in the gearbench group: run sudo usermod -aG gearbench <you>, then log out of" \
+        "every session and back in, or, with lingering on, restart the machine" >&2
+}
+
+if [ "$1" = "configure" ]; then
+    make_group
+fi
+
+# All three triggers are needed: a usb trigger does not re-run the hidraw rules, input
+# covers the mouse's event nodes, and misc covers /dev/uinput. install.sh runs the same
+# four commands.
+if [ "$1" = "configure" ] && [ -d /run/udev ] && command -v udevadm >/dev/null 2>&1
+then
+    udevadm control --reload || true
+    udevadm trigger --subsystem-match=hidraw --action=add || true
+    udevadm trigger --subsystem-match=input --action=add || true
+    udevadm trigger --subsystem-match=misc --sysname-match=uinput --action=add || true
+fi
+
+# Rules a checkout install left in $1 (install.sh's RULES) override this package's of the
+# same name, keeping any grant the package narrows. Debian Policy keeps a package's scripts
+# out of /usr/local, so this only warns.
+checkout_rules() {
+    for rule in 70-g915.rules 70-g502x.rules 70-g305.rules 70-astro-a50.rules \
+        70-gearbench-uinput.rules
+    do
+        [ -e "$1/$rule" ] || continue
+        echo "gearbench: $1/$rule, from an install from a checkout, overrides this" \
+            "package's rule of that name; run ./install.sh --uninstall in that checkout" >&2
+    done
+}
+
+if [ "$1" = "configure" ]; then
+    checkout_rules /usr/local/lib/udev/rules.d
+fi
+
+#DEBHELPER#
+
+# On an upgrade, each logged-in user's running unit restarts on the new code (the
+# owner's decision of 2026-10-02). A unit not running stays stopped, and a daemon
+# started by hand with gearbench-ctl daemon runs outside the unit, so a window from
+# this version talks to it until it is stopped. On a first install, which dpkg calls
+# with no earlier version ($1 empty here), the unit starts in each manager whose
+# desktop session is running, so the devices work before the next login (the owner's
+# decision of 2026-10-16). Needs systemd 249 or later for --machine.
+restart_daemons() {
+    if [ -z "$1" ] && command -v udevadm >/dev/null 2>&1; then
+        # The uaccess grants of the trigger above land asynchronously, and the daemon
+        # opens /dev/uinput once, at its start. Bounded, so a stuck queue cannot hold
+        # dpkg; checked by hand only (MAINTENANCE, the package's first install).
+        udevadm settle --timeout=10 || true
+    fi
+    for unit in $(systemctl --no-legend --plain list-units 'user@*.service' | awk '{print $1}')
+    do
+        uid=${unit#user@}
+        uid=${uid%.service}
+        systemctl --user --machine "$uid@" daemon-reload || true
+        # Queued, not waited for: the account can override the unit, and a stop that
+        # never ends would hold dpkg here.
+        if [ -n "$1" ]; then
+            systemctl --user --machine "$uid@" --no-block try-restart gearbench.service || true
+        # Only where a desktop session runs: the unit is part of graphical-session.target,
+        # which a manager kept by an ssh login or lingering does not have.
+        elif systemctl --user --machine "$uid@" --quiet is-active graphical-session.target; then
+            systemctl --user --machine "$uid@" --no-block start gearbench.service || true
+        fi
+    done
+}
+
+# After debhelper's lines, whose enable reloads no user manager: a running one
+# sees the enable only through this reload, and until then its next graphical
+# login starts no daemon.
+if [ "$1" = "configure" ] && [ -z "$DPKG_ROOT" ] && [ -d /run/systemd/system ]; then
+    restart_daemons "$2"
+fi

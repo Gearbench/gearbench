@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "name": "Warhammer 40,000: Space Marine 2",
+  "processes": [
+    "Warhammer 40000 Space Marine 2 - Retail.exe",
+    "Warhammer 40000 Space Marine 2.exe"
+  ],
+  "mode": "perkey",
+  "effect": "static",
+  "base": "#ff0000",
+  "background": "#121212",
+  "keys": {
+    "1": "#ff7000",
+    "2": "#ff7000",
+    "A": "#ff0000",
+    "C": "#8a00ff",
+    "D": "#ff0000",
+    "E": "#8a00ff",
+    "F": "#8a00ff",
+    "G": "#8a00ff",
+    "G1": "#ffe000",
+    "G2": "#ffe000",
+    "G3": "#ffe000",
+    "G4": "#ffe000",
+    "G5": "#ffe000",
+    "LEFT SHIFT": "#00ff30",
+    "O": "#00e5ff",
+    "Q": "#8a00ff",
+    "R": "#8a00ff",
+    "S": "#ff0000",
+    "SPACE": "#ff0000",
+    "T": "#00e5ff",
+    "TAB": "#0050ff",
+    "V": "#ff7000",
+    "W": "#ff0000",
+    "X": "#8a00ff",
+    "Z": "#00e5ff"
+  }
+}

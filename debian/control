@@ -1,0 +1,74 @@
+Source: gearbench
+Section: utils
+Priority: optional
+Maintainer: wmuschetto <113629853+wmuschetto@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13),
+               dh-python,
+               pybuild-plugin-pyproject,
+               python3-all,
+               python3-setuptools (>= 77),
+               python3-gi <!nocheck>,
+               gir1.2-gtk-4.0 <!nocheck>,
+               gir1.2-adw-1 <!nocheck>,
+               libgtk-4-bin <!nocheck>,
+               dbus-daemon <!nocheck>
+Standards-Version: 4.7.2
+Homepage: https://github.com/wmuschetto/gearbench
+X-Python3-Version: >= 3.14
+
+Package: gearbench
+Architecture: all
+Depends: ${misc:Depends},
+         ${python3:Depends},
+         adduser,
+         udev
+# The window needs GTK 4 and libadwaita through GObject introspection, and
+# `gearbench-ctl gui` says what is missing and exits 1 rather than failing to
+# import. The daemon uses python3-gi's Gio for D-Bus: its exit at a login
+# screen, following the screen lock, blank and a suspend (the lights off, a
+# running macro stopped and held keys let go), holding bindings and macros
+# back while another account or a text console has the seat, a synced mouse's
+# idle dimming, every notice, the tray icon and the focused window from
+# Gearbench's GNOME Shell extension. Without it those are off, the journal
+# says python3-gi is missing when the service starts, and the rest works. So
+# these are Recommends: apt installs them by default and a headless box can
+# leave them out.
+Recommends: python3-gi,
+            gir1.2-gtk-4.0,
+            gir1.2-adw-1
+Description: control for the Logitech G915, G502 X PLUS, G305 and Astro A50 Gen 4
+ Gearbench drives the Logitech G915 keyboard and the G502 X PLUS and G305
+ mice over their vendor HID++ 2.0 interfaces, on a cable or through a
+ LIGHTSPEED receiver, and probes what each one can do from its own feature
+ table. It remaps the G keys and the MR shift layer, sets
+ per-key and zone lighting, records and replays macros through a uinput
+ virtual keyboard, binds the G502 X PLUS's six extra buttons, and sets each
+ mouse's DPI, report rate and DPI stages.
+ .
+ It also drives the Astro A50 Gen 4 base station over its own vendor HID
+ interface, which is not HID++: microphone level, sidetone, noise gate and
+ mic EQ, the three EQ presets (Astro Command Center's .astroeq files too),
+ the stream port mix and the base station's own settings, and it reads the
+ headset's battery. It lists the A50's Game and Chat as two outputs, and adds
+ Astro A50 Spatial, a 7.1 output for games rendered for headphones with
+ SADIE II's measured heads, which is off until switched on.
+ .
+ A user systemd service owns the devices and holds the keyboard's software
+ lighting claim; the command line and the GTK 4 window are front ends that talk
+ to it over a unix socket. Nothing runs as root. Device access comes from
+ four udev rule files that tag nodes with uaccess, which grants them to the
+ user of the active seat: the vendor interface of the keyboard, of the
+ cabled G502 X PLUS and of the A50's base station, and each mouse's own
+ hidraw node through its receiver. That node carries the mouse's motion and
+ buttons too and, going by the kernel's source, would carry the keystrokes
+ of a keyboard paired to the same receiver after the mouse, so pair nothing
+ else there. A fifth file does the same for /dev/uinput, the line
+ steam-devices ships. With it any program that user runs can create a
+ virtual input device. The G502 X PLUS's own event nodes are the gearbench
+ group's to read, which the package creates; with host mode off, the extra
+ buttons need the user's account in it.
+ .
+ The keyboard's onboard profile is never written. Five mouse commands do write
+ a mouse's onboard profile 1, each backing up every profile sector first and
+ reading the sector back after. The headset's settings reach the base
+ station's flash only when saved.

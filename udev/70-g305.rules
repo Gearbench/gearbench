@@ -1,0 +1,20 @@
+# Logitech G305 (046d:4074, paired to a 046d:c53f receiver) -> uaccess on its
+# own hidraw node.
+#
+# Matched the same way as the G502 X PLUS's wireless rule, and for the same
+# reason: this receiver gives a paired device a hidraw node of its own, so the
+# device can be named directly instead of granting the receiver's interfaces,
+# which carry the traffic of everything paired to it.
+#
+# Pair nothing else to this mouse's receiver, for the reason 70-g502x.rules
+# gives. The G305 connects over eQUAD Lightspeed 1.1, a link hid-logitech-dj
+# marks as taking keyboard reports, and the driver hands each keyboard report
+# to the first such device in slot order. With a keyboard paired after the
+# mouse, its keystrokes would arrive on this node, the one this file grants.
+# Read from the driver, not checked on hardware.
+#
+# Read off the hardware on 2026-09-22: the receiver presents interfaces 00,
+# 01 and 02, and the G305 appears as a separate node with no interface of its
+# own. KERNELS matches a parent's kernel name, which for the paired device is
+# bus:vendor:product.instance -> 0003:046D:4074.<n>.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0003:046D:4074.*", TAG+="uaccess"

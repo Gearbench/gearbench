@@ -1,0 +1,26 @@
+#!/bin/sh
+set -e
+
+# On a remove, and a purge, which removes first, each logged-in user's units stop
+# before their code goes, so no daemon runs on without it and each hands the
+# keyboard and mouse back (the owner's decision of 2026-10-16). An upgrade calls this
+# with "upgrade", and postinst restarts the running units on the new code. Each stop
+# is waited for, since the hand-back runs the code dpkg is about to remove, but at
+# most STOP_WAIT seconds an account, so one account's service cannot hold dpkg for
+# long. Needs systemd 249 or later for --machine.
+STOP_WAIT=15
+stop_daemons() {
+    for unit in $(systemctl --no-legend --plain list-units 'user@*.service' | awk '{print $1}')
+    do
+        uid=${unit#user@}
+        uid=${uid%.service}
+        timeout "$STOP_WAIT" systemctl --user --machine "$uid@" stop \
+            gearbench-spatial-login.service gearbench-spatial.service gearbench.service || true
+    done
+}
+
+if [ "$1" = "remove" ] && [ -z "$DPKG_ROOT" ] && [ -d /run/systemd/system ]; then
+    stop_daemons
+fi
+
+#DEBHELPER#

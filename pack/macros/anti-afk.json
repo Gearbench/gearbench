@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "name": "Anti-AFK",
+  "repeat": "toggle",
+  "steps": [
+    {
+      "type": "key_down",
+      "value": "w"
+    },
+    {
+      "type": "delay",
+      "ms": 50
+    },
+    {
+      "type": "key_up",
+      "value": "w"
+    },
+    {
+      "type": "delay",
+      "ms": 50
+    },
+    {
+      "type": "key_down",
+      "value": "s"
+    },
+    {
+      "type": "delay",
+      "ms": 50
+    },
+    {
+      "type": "key_up",
+      "value": "s"
+    },
+    {
+      "type": "delay",
+      "ms": 60000
+    }
+  ]
+}

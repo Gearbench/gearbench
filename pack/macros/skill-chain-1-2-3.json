@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "name": "Skill chain 1-2-3",
+  "repeat": "once",
+  "steps": [
+    {
+      "type": "key_down",
+      "value": "1"
+    },
+    {
+      "type": "delay",
+      "ms": 50
+    },
+    {
+      "type": "key_up",
+      "value": "1"
+    },
+    {
+      "type": "delay",
+      "ms": 1450
+    },
+    {
+      "type": "key_down",
+      "value": "2"
+    },
+    {
+      "type": "delay",
+      "ms": 50
+    },
+    {
+      "type": "key_up",
+      "value": "2"
+    },
+    {
+      "type": "delay",
+      "ms": 1450
+    },
+    {
+      "type": "key_down",
+      "value": "3"
+    },
+    {
+      "type": "delay",
+      "ms": 50
+    },
+    {
+      "type": "key_up",
+      "value": "3"
+    }
+  ]
+}

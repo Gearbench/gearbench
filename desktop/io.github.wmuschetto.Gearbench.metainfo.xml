@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 wmuschetto -->
+<component type="desktop-application">
+  <id>io.github.wmuschetto.Gearbench</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>Gearbench</name>
+  <summary>Settings for the Logitech G915, G502 X PLUS, G305 and Astro A50 Gen 4</summary>
+
+  <description>
+    <p>
+      Gearbench is a control panel for the Logitech G915 keyboard, the
+      G502 X PLUS and G305 mice, and the Astro A50 Gen 4 headset with its
+      base station's switch on PC. Only these models attach, the A50's Xbox
+      edition not among them, and another is added once it has been tested
+      on the hardware. It talks to the keyboard and mice over their vendor HID++ 2.0
+      interfaces, on a cable or through a LIGHTSPEED receiver, and to the
+      headset's base station over its own vendor HID interface, with no vendor
+      software and nothing running as root. For each device it shows only what
+      that device can do.
+    </p>
+    <p>The keyboard:</p>
+    <ul>
+      <li>Per-key and zone lighting, with the six effects the firmware has</li>
+      <li>G1 to G5 bound to key combinations or macros, on the base layer and, from gearbench-ctl, the MR shift layer</li>
+      <li>Three M profiles, switched by the M1 to M3 keys</li>
+      <li>Backlight brightness, snapped to a level the firmware keeps</li>
+    </ul>
+    <p>The mice, several at once:</p>
+    <ul>
+      <li>DPI set live and remembered per model, and the onboard DPI stage list and report rate rewritten</li>
+      <li>On the G502 X PLUS, G4 to G9 bound to key combinations, macros, DPI shift, DPI up and down, or the browser buttons</li>
+      <li>Lighting where the mouse has it, either its own or following the keyboard</li>
+    </ul>
+    <p>The headset:</p>
+    <ul>
+      <li>Microphone level, sidetone, noise gate and mic EQ</li>
+      <li>The three EQ presets, edited band by band or imported from Astro Command Center's files</li>
+      <li>The stream port mix, the base station's own settings and the headset's battery</li>
+      <li>Changes apply at once; Save writes them to the base station's flash, and until then Revert to saved undoes all of them but Auto shut-off and which preset is active</li>
+      <li>Game and Chat as two outputs, and Astro A50 Spatial, a 7.1 output for games, rendered for headphones from measured heads</li>
+    </ul>
+    <p>
+      Game profiles hold a lighting and binding set that loads itself while a
+      named program's window has focus, and macros are recorded from the
+      Macros tab and replayed through a uinput virtual keyboard and mouse.
+    </p>
+    <p>
+      Lighting is volatile and the keyboard's onboard profile is never written.
+      Each write to the mouse's onboard profile, from the window or
+      gearbench-ctl, backs up every profile sector first and reads the written
+      sector back after.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.wmuschetto.Gearbench.desktop</launchable>
+  <provides>
+    <binary>gearbench-ctl</binary>
+    <!-- Every id the udev rules grant, so a software center can offer this
+         when one of them is plugged in. A cabled device, and the G915's own
+         receiver, show up on the USB bus under their own product id. A mouse
+         paired through its receiver is the receiver on the bus (046d:c547 for
+         the G502 X PLUS, 046d:c53f for the G305), and only the HID modalias
+         carries the mouse's own id. -->
+    <modalias>usb:v046DpC33E*</modalias>
+    <modalias>usb:v046DpC541*</modalias>
+    <modalias>usb:v046DpC095*</modalias>
+    <modalias>usb:v9886p002C*</modalias>
+    <modalias>hid:b0003g*v0000046Dp00004099*</modalias>
+    <modalias>hid:b0003g*v0000046Dp00004074*</modalias>
+  </provides>
+
+  <categories>
+    <category>Settings</category>
+    <category>HardwareSettings</category>
+  </categories>
+
+  <keywords>
+    <keyword>logitech</keyword>
+    <keyword>keyboard</keyword>
+    <keyword>mouse</keyword>
+    <keyword>headset</keyword>
+    <keyword>lighting</keyword>
+    <keyword>macro</keyword>
+  </keywords>
+
+  <url type="homepage">https://github.com/wmuschetto/gearbench</url>
+  <url type="bugtracker">https://github.com/wmuschetto/gearbench/issues</url>
+
+  <developer id="io.github.wmuschetto">
+    <name>wmuschetto</name>
+  </developer>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="1.0.0" date="2026-10-17">
+      <description>
+        <p>The first public release. A first install starts the service in
+        the open desktop session, and a removal stops it first. The window
+        offers to turn on Gearbench's GNOME Shell extension while it is off.
+        About 530 fixes from a review of every line, 36 of them for
+        security.</p>
+      </description>
+    </release>
+  </releases>
+</component>

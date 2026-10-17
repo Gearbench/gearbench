@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "name": "Hold right click",
+  "repeat": "toggle",
+  "steps": [
+    {
+      "type": "click_down",
+      "button": "right"
+    },
+    {
+      "type": "delay",
+      "ms": 1000
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+# Astro A50 Gen 4 base station (9886:002c) HID interface -> uaccess for the
+# seat user.
+#
+# Read off the hardware on 2026-09-27: in PC mode the base presents two USB
+# Audio Class devices, Game and Voice, and one HID interface, 06. That is a
+# vendor collection (usage page 0xFF32, report id 2, 63-byte reports each way)
+# carrying the base's control protocol, which is not HID++; it has no
+# keystroke reports, so granting it exposes no keylogger surface. The audio
+# nodes are the sound subsystem, which systemd's 70-uaccess.rules already
+# grants the seat user; this rule adds nothing there.
+#
+# Matched on properties, like the G915's cabled rule, and for the same reason:
+# bInterfaceNumber lives on the USB interface and idVendor/idProduct on the
+# USB device, and every ATTRS key in one rule must match the same parent. The
+# Xbox edition (002d) and console mode (002b, which has no HID interface) stay
+# out until read off the hardware.
+#
+# install.sh puts this in /usr/local/lib/udev/rules.d/; the .deb puts it in
+# /usr/lib/udev/rules.d/. Either way, reload with:
+#   sudo udevadm control --reload
+#   sudo udevadm trigger --subsystem-match=hidraw --action=add
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="9886", ENV{ID_MODEL_ID}=="002c", ENV{ID_USB_INTERFACE_NUM}=="06", TAG+="uaccess"

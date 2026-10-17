@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "name": "Auto-click",
+  "repeat": "toggle",
+  "steps": [
+    {
+      "type": "click_down",
+      "button": "left"
+    },
+    {
+      "type": "delay",
+      "ms": 50
+    },
+    {
+      "type": "click_up",
+      "button": "left"
+    },
+    {
+      "type": "delay",
+      "ms": 600
+    }
+  ]
+}

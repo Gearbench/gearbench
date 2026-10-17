@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "name": "Bunny hop",
+  "repeat": "while_held",
+  "steps": [
+    {
+      "type": "key_down",
+      "value": "space"
+    },
+    {
+      "type": "delay",
+      "ms": 25
+    },
+    {
+      "type": "key_up",
+      "value": "space"
+    },
+    {
+      "type": "delay",
+      "ms": 25
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "name": "Slay the Spire 2",
+  "processes": [
+    "SlayTheSpire2",
+    "SlayTheSpire2.exe"
+  ],
+  "mode": "perkey",
+  "effect": "static",
+  "base": "#ff0000",
+  "background": "#121212",
+  "keys": {
+    "0": "#ff7000",
+    "1": "#ff7000",
+    "2": "#ff7000",
+    "3": "#ff7000",
+    "4": "#ff7000",
+    "5": "#ff7000",
+    "6": "#ff7000",
+    "7": "#ff7000",
+    "8": "#ff7000",
+    "9": "#ff7000",
+    "A": "#0050ff",
+    "BACKSPACE": "#ff00b0",
+    "D": "#0050ff",
+    "DOWN": "#ff0000",
+    "E": "#8a00ff",
+    "ENTER": "#8a00ff",
+    "ESC": "#0050ff",
+    "G1": "#ffe000",
+    "G2": "#ffe000",
+    "G3": "#ffe000",
+    "G4": "#ffe000",
+    "G5": "#ffe000",
+    "LEFT": "#ff0000",
+    "M": "#0050ff",
+    "RIGHT": "#ff0000",
+    "S": "#0050ff",
+    "SPACE": "#ff00b0",
+    "UP": "#ff0000",
+    "X": "#0050ff"
+  }
+}

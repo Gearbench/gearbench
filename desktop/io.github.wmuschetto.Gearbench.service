@@ -1,0 +1,7 @@
+# D-Bus activation of the window (the desktop entry's DBusActivatable): asked
+# for this name, D-Bus starts the window as a GApplication service, which
+# opens once asked. The package installs this file as it is; install.sh
+# writes its own with the launcher's path in Exec.
+[D-BUS Service]
+Name=io.github.wmuschetto.Gearbench
+Exec=/usr/bin/gearbench-ctl gui --gapplication-service

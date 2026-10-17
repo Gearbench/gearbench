@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "name": "Skill 1 turbo",
+  "repeat": "while_held",
+  "steps": [
+    {
+      "type": "key_down",
+      "value": "1"
+    },
+    {
+      "type": "delay",
+      "ms": 50
+    },
+    {
+      "type": "key_up",
+      "value": "1"
+    },
+    {
+      "type": "delay",
+      "ms": 50
+    }
+  ]
+}

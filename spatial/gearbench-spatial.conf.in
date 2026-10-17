@@ -1,0 +1,149 @@
+# Gearbench: Astro A50 Spatial, a 7.1 output rendered for headphones on the
+# Astro A50's Game output.
+#
+# gearbench-spatial.service writes this file from Gearbench's template at
+# every start, with the head and the room chosen in Gearbench's spatial.json,
+# and runs it as a PipeWire client of its own: pipewire -c <this file>.
+#
+# Each speaker channel is convolved with SADIE II's measured left-ear and
+# right-ear responses at its angle: 48 kHz WAV files, unmodified, of subject
+# D1 (the Neumann KU100) or D2 (the KEMAR). LFE joins the center at half
+# level, PipeWire's own downmix level. The seven speakers also feed one room
+# send through a 150 ms synthetic tail; the out mixers' "Gain 2" is the room's
+# level, 0.0 for Competitive and 0.1 for Immersive, which the Headset tab
+# changes while it runs:
+#   pw-cli set-param <node id> Props '{ params = [ "outL:Gain 2" 0.1 "outR:Gain 2" 0.1 ] }'
+
+# PipeWire's default: at 0, a chain that fails to load leaves the unit's
+# journal nothing to say why.
+context.properties = {
+    log.level = 2
+}
+
+context.spa-libs = {
+    audio.convert.* = audioconvert/libspa-audioconvert
+    support.*       = support/libspa-support
+}
+
+context.modules = [
+    { name = libpipewire-module-rt
+        flags = [ ifexists nofail ]
+    }
+    { name = libpipewire-module-protocol-native }
+    { name = libpipewire-module-client-node }
+    { name = libpipewire-module-adapter }
+
+    { name = libpipewire-module-filter-chain
+        args = {
+            node.description = "Astro A50 Spatial"
+            media.name       = "Astro A50 Spatial"
+            filter.graph = {
+                nodes = [
+                    { type = builtin label = copy name = copyFL }
+                    { type = builtin label = copy name = copyFR }
+                    { type = builtin label = copy name = copyFC }
+                    { type = builtin label = copy name = copyRL }
+                    { type = builtin label = copy name = copyRR }
+                    { type = builtin label = copy name = copySL }
+                    { type = builtin label = copy name = copySR }
+                    { type = builtin label = mixer name = mixC control = { "Gain 2" = 0.5 } }
+
+                    # Channel 0 is the left ear, 1 the right.
+                    { type = builtin label = convolver name = convFL_L config = { filename = "@HRIR@/azi_30,0_ele_0,0.wav"  channel = 0 } }
+                    { type = builtin label = convolver name = convFL_R config = { filename = "@HRIR@/azi_30,0_ele_0,0.wav"  channel = 1 } }
+                    { type = builtin label = convolver name = convFR_L config = { filename = "@HRIR@/azi_330,0_ele_0,0.wav" channel = 0 } }
+                    { type = builtin label = convolver name = convFR_R config = { filename = "@HRIR@/azi_330,0_ele_0,0.wav" channel = 1 } }
+                    { type = builtin label = convolver name = convFC_L config = { filename = "@HRIR@/azi_0,0_ele_0,0.wav"   channel = 0 } }
+                    { type = builtin label = convolver name = convFC_R config = { filename = "@HRIR@/azi_0,0_ele_0,0.wav"   channel = 1 } }
+                    { type = builtin label = convolver name = convSL_L config = { filename = "@HRIR@/azi_90,0_ele_0,0.wav"  channel = 0 } }
+                    { type = builtin label = convolver name = convSL_R config = { filename = "@HRIR@/azi_90,0_ele_0,0.wav"  channel = 1 } }
+                    { type = builtin label = convolver name = convSR_L config = { filename = "@HRIR@/azi_270,0_ele_0,0.wav" channel = 0 } }
+                    { type = builtin label = convolver name = convSR_R config = { filename = "@HRIR@/azi_270,0_ele_0,0.wav" channel = 1 } }
+                    { type = builtin label = convolver name = convRL_L config = { filename = "@HRIR@/azi_150,0_ele_0,0.wav" channel = 0 } }
+                    { type = builtin label = convolver name = convRL_R config = { filename = "@HRIR@/azi_150,0_ele_0,0.wav" channel = 1 } }
+                    { type = builtin label = convolver name = convRR_L config = { filename = "@HRIR@/azi_210,0_ele_0,0.wav" channel = 0 } }
+                    { type = builtin label = convolver name = convRR_R config = { filename = "@HRIR@/azi_210,0_ele_0,0.wav" channel = 1 } }
+
+                    { type = builtin label = mixer name = mixL }
+                    { type = builtin label = mixer name = mixR }
+
+                    { type = builtin label = mixer name = roomSend }
+                    { type = builtin label = convolver name = roomL config = { filename = "@ROOM@" channel = 0 } }
+                    { type = builtin label = convolver name = roomR config = { filename = "@ROOM@" channel = 1 } }
+
+                    # The direct sound at -6 dB for headroom; the room about
+                    # 11 dB under it when on.
+                    { type = builtin label = mixer name = outL control = { "Gain 1" = 0.5 "Gain 2" = @ROOM_GAIN@ } }
+                    { type = builtin label = mixer name = outR control = { "Gain 1" = 0.5 "Gain 2" = @ROOM_GAIN@ } }
+                ]
+                links = [
+                    { output = "copyFL:Out" input = "convFL_L:In" }
+                    { output = "copyFL:Out" input = "convFL_R:In" }
+                    { output = "copyFR:Out" input = "convFR_L:In" }
+                    { output = "copyFR:Out" input = "convFR_R:In" }
+                    { output = "copyFC:Out" input = "mixC:In 1" }
+                    { output = "mixC:Out"   input = "convFC_L:In" }
+                    { output = "mixC:Out"   input = "convFC_R:In" }
+                    { output = "copySL:Out" input = "convSL_L:In" }
+                    { output = "copySL:Out" input = "convSL_R:In" }
+                    { output = "copySR:Out" input = "convSR_L:In" }
+                    { output = "copySR:Out" input = "convSR_R:In" }
+                    { output = "copyRL:Out" input = "convRL_L:In" }
+                    { output = "copyRL:Out" input = "convRL_R:In" }
+                    { output = "copyRR:Out" input = "convRR_L:In" }
+                    { output = "copyRR:Out" input = "convRR_R:In" }
+
+                    { output = "convFL_L:Out" input = "mixL:In 1" }
+                    { output = "convFR_L:Out" input = "mixL:In 2" }
+                    { output = "convFC_L:Out" input = "mixL:In 3" }
+                    { output = "convSL_L:Out" input = "mixL:In 4" }
+                    { output = "convSR_L:Out" input = "mixL:In 5" }
+                    { output = "convRL_L:Out" input = "mixL:In 6" }
+                    { output = "convRR_L:Out" input = "mixL:In 7" }
+                    { output = "convFL_R:Out" input = "mixR:In 1" }
+                    { output = "convFR_R:Out" input = "mixR:In 2" }
+                    { output = "convFC_R:Out" input = "mixR:In 3" }
+                    { output = "convSL_R:Out" input = "mixR:In 4" }
+                    { output = "convSR_R:Out" input = "mixR:In 5" }
+                    { output = "convRL_R:Out" input = "mixR:In 6" }
+                    { output = "convRR_R:Out" input = "mixR:In 7" }
+
+                    { output = "copyFL:Out" input = "roomSend:In 1" }
+                    { output = "copyFR:Out" input = "roomSend:In 2" }
+                    { output = "copyFC:Out" input = "roomSend:In 3" }
+                    { output = "copySL:Out" input = "roomSend:In 4" }
+                    { output = "copySR:Out" input = "roomSend:In 5" }
+                    { output = "copyRL:Out" input = "roomSend:In 6" }
+                    { output = "copyRR:Out" input = "roomSend:In 7" }
+                    { output = "roomSend:Out" input = "roomL:In" }
+                    { output = "roomSend:Out" input = "roomR:In" }
+
+                    { output = "mixL:Out"  input = "outL:In 1" }
+                    { output = "roomL:Out" input = "outL:In 2" }
+                    { output = "mixR:Out"  input = "outR:In 1" }
+                    { output = "roomR:Out" input = "outR:In 2" }
+                ]
+                inputs  = [ "copyFL:In" "copyFR:In" "copyFC:In" "mixC:In 2"
+                            "copyRL:In" "copyRR:In" "copySL:In" "copySR:In" ]
+                outputs = [ "outL:Out" "outR:Out" ]
+            }
+            capture.props = {
+                node.name      = "gearbench-a50-spatial"
+                media.class    = Audio/Sink
+                audio.channels = 8
+                audio.position = [ FL FR FC LFE RL RR SL SR ]
+            }
+            playback.props = {
+                node.name          = "gearbench-a50-spatial.output"
+                node.passive       = true
+                audio.channels     = 2
+                audio.position     = [ FL FR ]
+                target.object      = "alsa_output.usb-Astro_Gaming_Astro_A50-00.stereo-game"
+                # Binaural sound never falls back to another output, such as
+                # speakers: it waits for Astro A50 Game.
+                node.dont-fallback = true
+                node.linger        = true
+            }
+        }
+    }
+]

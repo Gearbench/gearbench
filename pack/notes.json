@@ -1,0 +1,6 @@
+{
+  "profiles": {
+    "Left 4 Dead 2": "On Linux its program is hl2_linux, which every native Source game shares, so the pack leaves it out; add it after import with Add by name in the Game profiles dialog if this is the only one you play.",
+    "Garry's Mod": "On Linux its program is hl2_linux, which every native Source game shares, so the pack leaves it out; add it after import with Add by name in the Game profiles dialog if this is the only one you play."
+  }
+}

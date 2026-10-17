@@ -1,0 +1,30 @@
+[Unit]
+Description=Gearbench - Astro A50 Spatial's start at login
+# systemd acts on a device unit's Wants= only when the device appears
+# (systemd.device(5)). A base station plugged in before the user manager
+# starts is already there, so gearbench-spatial.service's WantedBy= does not
+# start it. A Wants= on it from default.target cannot be guarded by a
+# condition (systemd.unit(5)): without the base station it would wait out the
+# device unit's 90 s job timeout and fail. This unit starts it instead, and
+# without the base station its condition skips it, which is no failure. The
+# path is the one the device unit is named after.
+ConditionPathExists=/dev/snd/by-id/usb-Astro_Gaming_Astro_A50-00
+
+[Service]
+Type=oneshot
+# Queued, not waited for: gearbench-spatial.service's own After= orders its
+# start after the device and PipeWire.
+ExecStart=/usr/bin/systemctl --user --no-block start gearbench-spatial.service
+# gearbench-spatial.service's hardening. The syscalls of a `systemctl --user
+# show` are all in @system-service (strace, 2026-09-29); the start itself is
+# checked on the hardware at a login.
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+# Enabled and disabled with gearbench-spatial.service, through its Also=.
+WantedBy=default.target

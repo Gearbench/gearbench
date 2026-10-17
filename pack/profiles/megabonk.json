@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "name": "Megabonk",
+  "processes": [
+    "Megabonk.x86_64",
+    "Megabonk.exe"
+  ],
+  "mode": "perkey",
+  "effect": "static",
+  "base": "#ff0000",
+  "background": "#121212",
+  "keys": {
+    "A": "#ff0000",
+    "D": "#ff0000",
+    "E": "#0050ff",
+    "F": "#8a00ff",
+    "G1": "#ffe000",
+    "G2": "#ffe000",
+    "G3": "#ffe000",
+    "G4": "#ffe000",
+    "G5": "#ffe000",
+    "LEFT CTRL": "#00ff30",
+    "R": "#ff00b0",
+    "S": "#ff0000",
+    "SPACE": "#ff0000",
+    "W": "#ff0000"
+  }
+}

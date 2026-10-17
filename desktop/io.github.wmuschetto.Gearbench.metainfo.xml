@@ -95,13 +95,10 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
-    <release version="1.0.0" date="2026-10-17">
+    <release version="1.0.1" date="2026-10-17">
       <description>
-        <p>The first public release. A first install starts the service in
-        the open desktop session, and a removal stops it first. The window
-        offers to turn on Gearbench's GNOME Shell extension while it is off.
-        About 530 fixes from a review of every line, 36 of them for
-        security.</p>
+        <p>A security policy says how to report a security problem
+        privately.</p>
       </description>
     </release>
   </releases>

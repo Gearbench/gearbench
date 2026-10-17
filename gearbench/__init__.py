@@ -11,4 +11,4 @@ base station speaks its own protocol, not HID++ (gearbench.astro).
 `gearbench-ctl probe`, never touch hardware themselves.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"

@@ -681,6 +681,8 @@ To recover a mouse whose onboard memory a write left in doubt, follow
 RECOVERY in `man gearbench-ctl`. Report a problem at
 https://github.com/wmuschetto/gearbench/issues, with the Debugging
 Information page's text; the project takes issues, not pull requests.
+Report a security problem privately instead, as [SECURITY.md](SECURITY.md)
+says.
 
 ## More documentation
 

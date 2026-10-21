@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 from gi.repository import Adw, Gio, GLib, GObject, Gtk
 
 from .. import ghub, ghub_plan, import_plan
-from ..config import counted, word_list
+from ..wording import counted, word_list
 from .style import held_while_shown, picked_path, plain_row, weakly
 from .worker import Reply, unreachable
 
@@ -456,7 +456,7 @@ class ImportDialog(Importer):
         body.append(listbox)
         desktop = self.found.desktop
         if desktop is not None:
-            lit = " and lighting" if desktop.lighting is not None else ""
+            lit = " and the G915's lighting" if desktop.lighting is not None else ""
             group = Adw.PreferencesGroup(
                 title="Desktop default",
                 description=f"Instead of a game profile, its bindings{lit} replace those "

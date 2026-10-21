@@ -1,29 +1,33 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "Risk of Rain 2",
   "processes": [
     "Risk of Rain 2.exe"
   ],
-  "mode": "perkey",
-  "effect": "static",
-  "base": "#ff0000",
-  "background": "#121212",
-  "keys": {
-    "A": "#ff0000",
-    "D": "#ff0000",
-    "E": "#8a00ff",
-    "G1": "#ffe000",
-    "G2": "#ffe000",
-    "G3": "#ffe000",
-    "G4": "#ffe000",
-    "G5": "#ffe000",
-    "LEFT CTRL": "#00ff30",
-    "LEFT SHIFT": "#8a00ff",
-    "Q": "#8a00ff",
-    "R": "#8a00ff",
-    "S": "#ff0000",
-    "SPACE": "#ff0000",
-    "TAB": "#0050ff",
-    "W": "#ff0000"
+  "lighting": {
+    "c33e": {
+      "mode": "perkey",
+      "effect": "static",
+      "base": "#ff0000",
+      "background": "#121212",
+      "keys": {
+        "A": "#ff0000",
+        "D": "#ff0000",
+        "E": "#8a00ff",
+        "G1": "#ffe000",
+        "G2": "#ffe000",
+        "G3": "#ffe000",
+        "G4": "#ffe000",
+        "G5": "#ffe000",
+        "LEFT CTRL": "#00ff30",
+        "LEFT SHIFT": "#8a00ff",
+        "Q": "#8a00ff",
+        "R": "#8a00ff",
+        "S": "#ff0000",
+        "SPACE": "#ff0000",
+        "TAB": "#0050ff",
+        "W": "#ff0000"
+      }
+    }
   }
 }

@@ -3,9 +3,11 @@ stages, G4 to G9 enabled or set to the fallback, and the restore of the newest b
 one goes through `flash_write` to a method of `Mouse`, which backs the profile's sectors up
 before it writes (`Mouse.write_profile`), except a rate that `Mouse.set_report_rate` sends
 live with no backup, to a mouse without 0x8100 or one that reads HOST mode while the daemon
-does not count it there. In HOST mode, where no profile runs, a write still puts the mouse on
-profile 1's default stage and stored rate, so the DPI is read before it and put back after
-(`put_back_after_write`)."""
+does not count it there; the rate of a mouse that sets_rate_live, which `Dpi.live_rate` sends
+live alone; and the stages or rate of a loaded game profile's own (`Dpi.edits_tuning`), which
+go to `Dpi` and write no flash. In HOST mode, where no profile runs, a write still puts the
+mouse on profile 1's default stage and stored rate, so the DPI is read before it and put back
+after (`put_back_after_write`)."""
 
 from __future__ import annotations
 
@@ -13,19 +15,17 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from ...mouse import (
-    Mouse,
-    MouseError,
-    buttons_enabled,
-    buttons_fallback,
-    enable_note,
-    enabled_buttons,
-    fallback_note,
-    written_note,
-)
+from ...mouse import Mouse, MouseError, enable_note, fallback_note, written_note
 from ...onboard import stage_dpi
 from ..shared import MOUSE_PROBE, whole_number
-from .attached import AttachedMouse, own_stages, same_place, stage_request
+from .attached import (
+    TUNING_HOST_ONLY,
+    AttachedMouse,
+    follow_shift,
+    own_stages,
+    same_place,
+    stage_request,
+)
 
 if TYPE_CHECKING:
     from .. import Daemon
@@ -71,6 +71,8 @@ class ProfileWrites:
         if request.get("reset"):
             return {"ok": False, "error": self.mice.dpi.no_tuning(target)}
         hz = whole_number(request["value"], "mouse_rate")
+        if target.sets_rate_live:
+            return self.mice.dpi.live_rate(target, hz)
         live = ""
         if target.host:
             # Stored in profile 1 for the next arm (send_rate), and sent live now: in HOST
@@ -123,8 +125,7 @@ class ProfileWrites:
         if overlay is None:
             return note
         if not self.mice.wants_host(target):
-            return (f"{note} {overlay.name} is loaded, and a game profile's own stages and "
-                    f"rate are for a mouse in host mode.")
+            return f"{note} {overlay.name} is loaded, and {TUNING_HOST_ONLY}."
         if self.mice.dpi.tuning_for(target) is None:
             return note
         if target.host:
@@ -241,11 +242,7 @@ class ProfileWrites:
         if after == before or own_stages(self.mice.dpi.in_force(target)) is not None:
             # Under a game profile's own stages, profile 1's list is not the one in force.
             return None
-        held = target.dpi_before_shift
-        moved = same_place(held, before, after)
-        if moved is not None:
-            # The DPI under the shift keeps its place in the list, for the release to put back.
-            held = target.dpi_before_shift = moved
+        held = follow_shift(target, before, after)
         try:
             if target.dpi_not_put_back:
                 raise MouseError("the DPI the write moved could not be put back")
@@ -314,25 +311,25 @@ class ProfileWrites:
         return reply
 
     @staticmethod
-    def no_button_table(mouse: Mouse, what: str) -> dict | None:
-        """The refusal of a write to G4 to G9 on `mouse`, or None where its model's table is
-        known: the write puts the G502 X PLUS's six entries at its onboard indices, which are
-        other buttons on any other mouse."""
-        if "buttons" in mouse.capabilities:
-            return None
+    def no_button_table(mouse: Mouse, what: str) -> dict:
+        """The refusal of a write to the buttons in `mouse`'s onboard profile, whose model has
+        no table this build knows (MouseModel.button_table)."""
         return {"ok": False,
-                "error": f"{mouse.name} has no button table this build knows; {what} would "
-                         f"write another model's entries into its profile"}
+                "error": f"{mouse.name} has no button table this build knows, so {what} is "
+                         f"refused; nothing was written"}
 
     def _cmd_mouse_enable_buttons(self, request: dict) -> dict:
         target = self.mice.mouse_for(request)
         mouse = target.mouse
-        refused = self.no_button_table(mouse, "enabling the extra buttons")
-        if refused is not None:
-            return refused
+        table = mouse.button_table
+        if table is None:
+            return self.no_button_table(mouse, "enabling the extra buttons")
+        if target.enable_refused is not None:
+            # Before flash_write, which in host mode reads the DPI first: nothing is sent.
+            return {"ok": False, "error": target.enable_refused}
         image = self.flash_write(target, mouse.enable_buttons)
-        return {"ok": True, "buttons_enabled": buttons_enabled(image),
-                "enabled_buttons": enabled_buttons(image),
+        return {"ok": True, "buttons_enabled": table.all_enabled(image),
+                "enabled_buttons": table.enabled(image),
                 "buttons": mouse.button_words(image),
                 "note": (enable_note(target.name, target.host, mouse.running_profile)
                          + self.rate_unsent(target))}
@@ -342,11 +339,11 @@ class ProfileWrites:
         same backed-up and verified write as enabling them."""
         target = self.mice.mouse_for(request)
         mouse = target.mouse
-        refused = self.no_button_table(mouse, "the fallback")
-        if refused is not None:
-            return refused
+        table = mouse.button_table
+        if table is None:
+            return self.no_button_table(mouse, "writing the fallback buttons")
         image = self.flash_write(target, mouse.write_fallback_buttons)
-        return {"ok": True, "buttons_fallback": buttons_fallback(image),
+        return {"ok": True, "buttons_fallback": table.holds_fallback(image),
                 "buttons": mouse.button_words(image),
                 "note": (fallback_note(target.name, target.host, mouse.running_profile)
                          + self.rate_unsent(target))}
@@ -375,8 +372,9 @@ class ProfileWrites:
                 raise MouseError(GONE_AFTER_WRITE)
             if not sent:
                 note += self.rate_owed(target)
+        table = target.mouse.button_table
         reply = {"ok": True, "restored_from": path,
-                 "buttons_enabled": buttons_enabled(image),
+                 "buttons_enabled": table is not None and table.all_enabled(image),
                  "note": note}
         dpi = self.follow_dpi(target, before, image.dpi_stages)
         if dpi is not None:

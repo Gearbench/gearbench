@@ -26,9 +26,9 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
-from .config import reason
 from .hidpp import GONE_ERRNOS, DeviceGone
 from .uinput import EV_KEY, EV_SYN, EVENT, IOC_READ, IOC_WRITE, KEY_MAX, SYN_REPORT, ioc
+from .wording import reason
 
 SYN_DROPPED = 3
 

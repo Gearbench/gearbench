@@ -21,8 +21,15 @@
   Onboard profile 1 group, cards likewise.
 - `spatial_group`: the Headset tab's Spatial sound group, which runs
   systemctl, pw-dump and pw-cli itself, never through the daemon.
+- `g432_page`: the Headset tab's page for the Logitech G432, its sidetone through
+  the daemon and its noise suppression and equalizer run here, and the stack that
+  shows it or the A50's.
+- `presets_dialog`: the A50's page's Load preset to headset dialog, over the preset
+  library Gearbench keeps, read and saved here.
 - `about`: the About dialog and its debug information.
-- `macro_banner`: the banner that names the running macro, a part the window builds.
+- `daemon_banner`: the banner while the daemon cannot be used, and its Start it, a part
+  the window builds.
+- `macro_banner`: the banner that names the running macro, a part likewise.
 - `extension_banner`: the banner while the Shell extension is not running, a part likewise.
 - `polls`: the status, mouse and headset poll timers, a part of the window likewise.
 - `main_menu`: the header's primary menu, its Tray icon check and About, a part likewise.

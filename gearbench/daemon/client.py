@@ -1,6 +1,7 @@
-"""The daemon's client, for the CLI and the window: the socket's path, the one round trip
-both make (send_command), and what a failed one means (failure). The daemon package's
-`__init__` gives the front ends each name here, so they import the daemon alone.
+"""The daemon's client, for the CLI and the window: the socket's path, whether a daemon
+accepts there (listening), the one round trip both make (send_command), and what a failed
+one means (failure). The daemon package's `__init__` gives the front ends the names they
+take from here, so they import the daemon alone.
 """
 
 from __future__ import annotations
@@ -22,17 +23,36 @@ def socket_path() -> Path:
     return (runtime_home() or Path(f"/run/user/{os.getuid()}")) / "gearbench.sock"
 
 
+def listening(path: Path) -> bool:
+    """Whether a daemon accepts on `path`; a file left by a killed daemon refuses."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        try:
+            probe.connect(str(path))
+        except OSError:
+            return False
+    return True
+
+
+def invoking_uid() -> int | None:
+    """As root gained through sudo, run0 or pkexec, the id of the user who ran it, as SUDO_UID
+    or PKEXEC_UID names it; None for any other run, and for an id that is not a number."""
+    invoker = os.environ.get("SUDO_UID") or os.environ.get("PKEXEC_UID") or ""
+    if os.geteuid() != 0 or not invoker.isdecimal():
+        return None
+    return int(invoker)
+
+
 def use_invoking_users_runtime_dir() -> None:
     """As root gained through sudo, run0 or pkexec, point XDG_RUNTIME_DIR at the invoking
     user's runtime folder, so that socket_path() and send_command() reach that user's daemon.
     sudo starts a command without the variable unless its policy keeps it, pkexec in a
     minimal environment that names the user in PKEXEC_UID, and run0 in a session of root's
     own, whose folder is root's. No daemon listens in root's folder. A relative one counts as
-    unset, since socket_path() ignores it. For a probe that refuses beside a daemon.
+    unset, since socket_path() ignores it.
 
     Taken from sudoers(5), pkexec(1) and run0(1); not checked on a run under any of them."""
-    invoker = os.environ.get("SUDO_UID") or os.environ.get("PKEXEC_UID")
-    if os.geteuid() != 0 or not invoker:
+    invoker = invoking_uid()
+    if invoker is None:
         return
     kept = runtime_home()
     if kept is None or kept == Path(f"/run/user/{os.getuid()}"):

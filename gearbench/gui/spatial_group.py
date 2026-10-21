@@ -1,5 +1,7 @@
-"""The Headset tab's Spatial sound group: Astro A50 Spatial on or off, its
-head and room, and how a game reaches it.
+"""The Headset tab's Spatial sound group: Gearbench Spatial on or off, the
+headset it plays to, its head and room, and how a game reaches it. The window
+builds one, of the one output, and the tab moves it to the A50's page or the
+G432's as that page shows (HeadsetStack).
 
 The window runs this, never the daemon. The systemctl and pw-dump calls can
 take seconds, so each goes through the window's worker thread; building the
@@ -15,19 +17,25 @@ from typing import cast
 from gi.repository import Adw, Gdk, GLib, GObject, Gtk
 
 from .. import spatial
-from ..config import reason, shown_path
-from .style import ASLEEP, plain_row, set_dot, status_dot, toast_note
+from .style import ASLEEP, plain_row, put_dot, status_dot, toast_not_saved, toast_note, unit_words
 from .tips import explain_choices
 from .worker import DaemonWorker, LoadingGuard, Result
 
-HELP = "A 7.1 output for headphones, for games that play 5.1 or 7.1."
+HELP = ("A 7.1 headphone output for games that play 5.1 or 7.1, on the Astro A50 or the "
+        f"Logitech G432. A game whose launch option names {spatial.RETIRED_SINK} plays on the "
+        f"default output: change it to {spatial.LAUNCH_OPTION}.")
+HEAD_HELP = f"Changing it restarts {spatial.DESCRIPTION} while it runs."
+#: The Headset it plays to row: none picked, then each headset in spatial.HEADSETS' order.
+FIRST_CONNECTED = spatial.FIRST_CONNECTED.capitalize()
+HEADSET_KEYS = (None, *(headset.key for headset in spatial.HEADSETS))
+HEADSET_LABELS = (FIRST_CONNECTED, *(headset.name for headset in spatial.HEADSETS))
+HEADSET_HELP = f"The one picked while both are plugged in, the other while it is not. {HEAD_HELP}"
 HEAD_LABELS = tuple(spatial.HEAD_NAMES[head] for head in spatial.HEADS)
 HEAD_TIPS = (
     ("Neumann KU100, SADIE II subject D1: the most preferred head in SADIE II's "
      "listening test."),
     "KEMAR, SADIE II subject D2: a dummy head with torso and shoulders.",
 )
-HEAD_HELP = "Changing it restarts Astro A50 Spatial while it runs."
 ROOM_LABELS = tuple(room.title() for room in spatial.ROOMS)
 ROOM_TIPS = (
     "No room: direction alone.",
@@ -35,24 +43,28 @@ ROOM_TIPS = (
 )
 LAUNCH_HELP = "With spatial sound off, the game plays on your default output in stereo"
 ENV_HELP = f"Set {spatial.ENVIRONMENT} in the game's environment"
-PICK_HELP = "Pick Astro A50 Spatial before the game starts, and Astro A50 Game after it quits"
+PICK_HELP = (f"Pick {spatial.DESCRIPTION} before the game starts, and your usual output "
+             "after it quits")
 DOLBY_HELP = ("Keep the headset's Dolby button on the star, or the sound is processed twice. "
               "Gearbench cannot read the button.")
-OUTPUTS_HELP = ("Astro A50 Game and Chat show as one output until WirePlumber restarts: "
-                "log out of every session and back in, or run "
-                "systemctl --user restart wireplumber.")
-DOLBY_TOAST = "Astro A50 Spatial is playing: the headset's Dolby button goes on the star."
+#: The Outputs row's end, after the headset's joined_shown, while its card has another
+#: profile set than spatial's for it.
+RESTART_WIREPLUMBER = ("until WirePlumber restarts: log out of every session and back in, "
+                       "or run systemctl --user restart wireplumber.")
+DOLBY_TOAST = (f"{spatial.DESCRIPTION} is playing on the Astro A50: the headset's Dolby button "
+               "goes on the star.")
 COPIED = "Copied"
 #: Each action's toast line when its failure is too long for a toast, with
 #: the whole failure behind Details: systemctl's two lines for a start it
 #: cannot queue, the room's sentence. A save that failed has a line of its own.
 NOT_STARTED = f"{spatial.DESCRIPTION} did not start"
 NOT_STOPPED = f"{spatial.DESCRIPTION} did not stop"
-#: set_head saves the head first: its SpatialError comes from systemctl after that.
+#: set_head and set_headset save first: their SpatialError comes from systemctl after that.
 HEAD_NOT_RESTARTED = f"The head is saved, but {spatial.DESCRIPTION} did not restart"
+HEADSET_NOT_RESTARTED = f"The headset is saved, but {spatial.DESCRIPTION} did not restart"
 ROOM_NOT_CHANGED = "The room did not change"
 #: An action's second read: a --no-block start is still activating at the
-#: first read, and the link to Astro A50 Game comes after it.
+#: first read, and the link to the headset comes after it.
 FOLLOW_UP_MS = 1500
 
 #: The dot for each summary kind; a kind missing here is red.
@@ -81,18 +93,28 @@ class SpatialGroup:
         self._follow_up: int | None = None
         #: The last summary kind shown, None while no state is shown.
         self.kind: str | None = None
-        #: The sink was running at the last read that could see it, for the Dolby icon and toast.
+        #: The headset the chain plays to, or would, at the last read that could see it, and
+        #: whether its sink was running on the A50 there: one start of play is toasted once.
+        self._aimed: spatial.Headset | None = None
         self._running = False
+        #: Two headsets were in PipeWire at the last read that could see it, for the
+        #: Headset it plays to row.
+        self._two_present = False
         self.widget = self._build()
 
     def _build(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(title="Spatial sound", description=HELP)
         self.switch_row = plain_row(Adw.SwitchRow, spatial.DESCRIPTION, "")
-        # Added once there is a state to show (_set_dot).
+        # Added once there is a state to show (put_dot).
         self.dot = status_dot()
         self.switch_row.connect("notify::active", self.on_switch)
         group.add(self.switch_row)
 
+        self.headset_row = plain_row(Adw.ComboRow, "Headset it plays to", HEADSET_HELP,
+                                     model=Gtk.StringList.new(HEADSET_LABELS), visible=False)
+        self.headset_row.connect("notify::selected", self.on_choice, HEADSET_KEYS,
+                                 spatial.set_headset, HEADSET_NOT_RESTARTED)
+        group.add(self.headset_row)
         self.head_row = plain_row(Adw.ComboRow, "Head", HEAD_HELP,
                                   model=Gtk.StringList.new(HEAD_LABELS))
         explain_choices(self.head_row, HEAD_TIPS)
@@ -126,7 +148,7 @@ class SpatialGroup:
                                     accessible_role=Gtk.AccessibleRole.PRESENTATION)
         self.dolby_row.add_prefix(self.dolby_icon)
         group.add(self.dolby_row)
-        self.outputs_row = plain_row(Adw.ActionRow, "Outputs", OUTPUTS_HELP, visible=False)
+        self.outputs_row = plain_row(Adw.ActionRow, "Outputs", "", visible=False)
         group.add(self.outputs_row)
         self._set_sensitive()
         return group
@@ -168,38 +190,52 @@ class SpatialGroup:
             return
         self.kind = None
         words = f"Could not be read: {result}"
-        self._set_dot(False, words)
+        put_dot(self.switch_row, self.dot, False, words)
         self.switch_row.set_subtitle(words)
         self._set_sensitive()
 
     def show(self, state: spatial.State) -> None:
         """Set every row from `state`. A read whose systemctl or pw-dump failed leaves
-        what it cannot see, the switch and the Dolby icon, as they were, like a read
-        that failed (_on_state)."""
+        what it cannot see, the switch, the Dolby icon and the headsets there, as they
+        were, like a read that failed (_on_state)."""
         kind, words = spatial.summary(state)
         self.kind = kind
-        hint = spatial.stereo_hint(state)
-        # A command keeps its case: "systemctl --user did not answer".
-        subtitle = words if words.startswith("systemctl ") else words[:1].upper() + words[1:]
-        self.switch_row.set_subtitle(f"{subtitle}\n{hint}" if hint else subtitle)
+        hints = [hint for hint in (spatial.stereo_hint(state), spatial.stale_hint(state))
+                 if hint]
+        subtitle = unit_words(words)
+        self.switch_row.set_subtitle("\n".join([subtitle, *hints]))
         if state.systemd is None:
             self._loading.put_active(self.switch_row, state.enabled)
+        self._loading.put_selected(self.headset_row, HEADSET_KEYS.index(state.choices.headset))
+        # Shown once there is a choice to make, or one made. A read that cannot see
+        # PipeWire finds no headset there, which is not one unplugged.
+        if state.tools and state.pipewire is None:
+            self._two_present = len(state.present) >= 2
+        self.headset_row.set_visible(self._two_present or state.choices.headset is not None)
         self._loading.put_selected(self.head_row, spatial.HEADS.index(state.choices.head))
         self._loading.put_selected(self.room_row, spatial.ROOMS.index(state.choices.room))
-        self._set_dot(DOTS.get(kind, False), subtitle)
+        put_dot(self.switch_row, self.dot, DOTS.get(kind, False), subtitle)
         self._set_sensitive()
         for way in (self.launch_row, self.env_row, self.pick_row):
             way.set_visible(kind != "not_installed")
+        # A read whose systemctl or pw-dump failed cannot see the chain, which is not
+        # play stopping or moving: like a read that failed (_on_state), it keeps the last
+        # look's.
+        if state.systemd is None and state.tools and state.pipewire is None:
+            self._aimed = spatial.aimed(state)
+            playing = state.running and self._aimed is spatial.A50
+            if playing and not self._running:
+                self._toast(DOLBY_TOAST)
+            self._running = playing
         # The switch, not state.enabled: a read whose systemctl failed leaves the switch
         # as the last look or a click since left it.
-        self.dolby_row.set_visible(self.switch_row.get_active())
-        self.outputs_row.set_visible(state.profile_set not in (None, spatial.PROFILE_SET))
-        # A read whose systemctl or pw-dump failed cannot see the chain, which is not
-        # play stopping: like a read that failed (_on_state), it keeps the last look's.
-        if state.systemd is None and state.tools and state.pipewire is None:
-            if state.running and not self._running:
-                self._toast(DOLBY_TOAST)
-            self._running = state.running
+        self.dolby_row.set_visible(self.switch_row.get_active()
+                                   and self._aimed is spatial.A50)
+        aimed = self._aimed
+        self.outputs_row.set_visible(aimed is not None and state.profile_set
+                                     not in (None, aimed.profile_set))
+        if aimed is not None:
+            self.outputs_row.set_subtitle(f"{aimed.joined_shown} {RESTART_WIREPLUMBER}")
         self.dolby_icon.set_from_icon_name("dialog-warning-symbolic" if self._running
                                            else "dialog-information-symbolic")
         if self._running:
@@ -207,23 +243,9 @@ class SpatialGroup:
         else:
             self.dolby_icon.remove_css_class("warning")
 
-    def _set_dot(self, state: bool | str | None, label: str) -> None:
-        """Set the dot, or for None take it out of the row: hidden, it still
-        indents the title by the row's spacing."""
-        attached = self.dot.get_parent() is not None
-        if state is None:
-            if attached:
-                self.switch_row.remove(self.dot)
-            return
-        set_dot(self.dot, state)
-        # set_dot's words are a device's: "Not available" for a unit that failed.
-        self.dot.update_property([Gtk.AccessibleProperty.LABEL], [label])
-        if not attached:
-            self.switch_row.add_prefix(self.dot)
-
     def _set_sensitive(self) -> None:
         usable = self.kind is not None and self.kind not in LOCKED and not self.busy
-        for row in (self.switch_row, self.head_row, self.room_row):
+        for row in (self.switch_row, self.headset_row, self.head_row, self.room_row):
             row.set_sensitive(usable)
 
     # -- actions ----------------------------------------------------------
@@ -235,8 +257,9 @@ class SpatialGroup:
         switch = spatial.switch_on if on else spatial.switch_off
         self._act(lambda: switch(run=self._run), NOT_STARTED if on else NOT_STOPPED)
 
-    def on_choice(self, row: Adw.ComboRow, _pspec: GObject.ParamSpec, choices: tuple[str, ...],
-                  choose: Callable[..., object], failed: str) -> None:
+    def on_choice(self, row: Adw.ComboRow, _pspec: GObject.ParamSpec,
+                  choices: tuple[str | None, ...], choose: Callable[..., object],
+                  failed: str) -> None:
         index = row.get_selected()
         if self._loading.active or index >= len(choices):
             return
@@ -260,11 +283,8 @@ class SpatialGroup:
             words = str(result)
         elif isinstance(result, OSError):
             # Only saving spatial.json raises one: systemctl's and PipeWire's
-            # arrive as SpatialError.
-            words = (f"Could not save {shown_path(spatial.choices_path())}: "
-                     f"{reason(result)}")
-            # Nothing was saved, so nothing restarted or changed.
-            failed = f"Could not save {spatial.choices_path().name}"
+            # arrive as SpatialError. Nothing was saved, so nothing restarted or changed.
+            toast_not_saved(self._toast, spatial.choices_path(), result)
         elif isinstance(result, Exception):
             words = f"Spatial sound: {result}"
         if words is not None:

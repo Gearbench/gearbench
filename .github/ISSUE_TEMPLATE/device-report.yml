@@ -1,0 +1,44 @@
+name: Device report
+description: Send what a Logitech device says about itself, so support for it can be built or fixed.
+title: "Device report: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Put the model in the title, as Logitech prints it on the box or under the device.
+        Plug the device in over USB (its cable, or its receiver for a wireless one) and run
+        `gearbench-ctl report`. It writes nothing to the device. Paste the block it prints
+        below. The block holds no serial number and no computer or user name.
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      placeholder: G915 TKL
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: How it was plugged in for the report
+      options:
+        - Its cable
+        - Its receiver
+        - Both, one report each
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: The report
+      description: >-
+        Everything `gearbench-ctl report` printed on its standard output, the backtick
+        lines that open and close it included.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What works and what doesn't
+      description: >-
+        For a model Gearbench already lists: what you tried, what happened, and what you
+        expected. Leave it empty for a model it doesn't list yet.

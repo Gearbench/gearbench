@@ -3,7 +3,7 @@
 
 Usage: python3 make_room.py [OUT.wav] [--seed N]
 
-The defaults rebuild room-150ms.wav, the room Astro A50 Spatial convolves.
+The defaults rebuild room-150ms.wav, the room Gearbench Spatial convolves.
 Decaying Gaussian noise in three bands split by Linkwitz-Riley crossovers; the
 band below 500 Hz is shared by both ears (a diffuse field is coherent there),
 the upper bands are independent per ear, at the same energy in both.

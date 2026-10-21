@@ -1,0 +1,24 @@
+# Logitech G815 (046d:c33f), cabled, its HID++ interface 01 -> uaccess for
+# the seat user. The G813 has the same id. Not yet checked on this hardware:
+# the interface is from Solaar's device descriptor (interface 1), Solaar's
+# logs of the keyboard's node and a published lsusb of it, read 2026-10-18.
+# The keyboard has no receiver, so its USB identity is its own and the
+# property match below is scoped by interface, as the G915's is.
+#
+# This node carries what is typed on the G815. Interface 01's report
+# descriptor holds the keyboard's own key array, a mouse report and its
+# media keys beside HID++'s long reports (a published report descriptor;
+# libratbag's log of one shows key reports arriving on the node), so a
+# program the seat's user runs can read what is typed on the keyboard while
+# this rule is installed. That is a wider exposure than the G502 HERO's
+# interface 01, which carries only what its buttons are bound to type.
+# Gearbench drops those reports unread. Granted through uaccess, the owner's
+# decision of 2026-10-18. Interface 00, the boot keyboard, gets nothing.
+#
+# The grant crosses accounts, as 70-gearbench-uinput.rules says of
+# /dev/uinput's: a program that opened the node keeps reading it after another
+# account gets the seat, and so reads what that account types on the G815, a
+# password at the login screen included. On a machine several people use, that
+# file's group grant, in a copy of this file in /etc/udev/rules.d/, limits the
+# node to the group's accounts.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c33f", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"

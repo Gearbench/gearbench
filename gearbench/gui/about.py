@@ -21,13 +21,14 @@ from gi.repository import Adw, Gtk
 
 from .. import __version__, spatial
 from ..astro import PRODUCTS as HEADSET_MODELS, VENDOR_ID as HEADSET_VENDOR, find_base
-from ..config import ended, escaped, reason
 from ..daemon import send_command
 from ..desktop import APP_NAME, DESKTOP_ENTRY
+from ..g432 import PRODUCTS as G432_MODELS, find_g432
 from ..hidpp import NO_RULE, VENDOR_ID as LOGITECH_VENDOR
 from ..keyboard import find_attached_keyboard
 from ..mouse import MODELS as MOUSE_MODELS, find_attached_mice
 from ..uinput import UINPUT as UINPUT_NODE
+from ..wording import ended, escaped, reason
 
 #: The journal section's command: the daemon's last lines and the user manager's about it.
 #: The sender is matched by fields journald sets; USER_UNIT, which any program of this user can
@@ -95,6 +96,11 @@ def device_nodes() -> list[tuple[str, Path]]:
     if base is not None:
         model = HEADSET_MODELS.get(base[1], "headset")
         nodes.append((f"{model} {HEADSET_VENDOR:04x}:{base[1]:04x}", base[0]))
+    adapter = find_g432()
+    if adapter is not None:
+        # find_g432 finds only the ids PRODUCTS names.
+        model = G432_MODELS[adapter[1]]
+        nodes.append((f"{model} {LOGITECH_VENDOR:04x}:{adapter[1]:04x}", adapter[0]))
     nodes.append(("virtual keyboard and mouse", UINPUT))
     return nodes
 
@@ -121,7 +127,7 @@ def access_lines(nodes: list[tuple[str, Path]],
 def debug_info(status: dict | Exception, access: list[str],
                spatial_rows: list[tuple[str, str]], journal: str) -> str:
     """The text of the Troubleshooting page. The daemon's error, the
-    problems, the spatial rows and the journal go through `config.escaped`:
+    problems, the spatial rows and the journal go through `wording.escaped`:
     a PipeWire client names its own stream, the saved gearbench-debug.txt is
     read in a terminal, and a newline in a name would start a section of its
     own."""
@@ -168,10 +174,10 @@ def about_dialog() -> Adw.AboutDialog:
     dialog = Adw.AboutDialog(
         application_name=APP_NAME, application_icon=DESKTOP_ENTRY, version=__version__,
         developer_name="wmuschetto", license_type=Gtk.License.GPL_3_0,
-        website="https://github.com/wmuschetto/gearbench",
-        comments="G and M keys, lighting, DPI and macros for the Logitech G915 "
-                 "keyboard and the G502 X PLUS and G305 mice, and the Astro A50 Gen 4 "
-                 "headset's settings, through the Gearbench daemon."
+        website="https://github.com/gearbench/gearbench",
+        comments="G and M keys, lighting, DPI and macros for Logitech G keyboards and "
+                 "mice, and the settings of the Logitech G432 and Astro A50 Gen 4 "
+                 "headsets, through the Gearbench daemon."
                  f"\n\n{NOT_AFFILIATED}",
         debug_info=GATHERING, debug_info_filename="gearbench-debug.txt")
     # Apache-2.0 asks for the attribution wherever the files go.

@@ -1,49 +1,56 @@
 """Game profiles: a library of named layouts, one JSON file each.
 
-A game profile holds a lighting layout, G-key bindings, the mouse's G4-G9 bindings and, per
-mouse model, its own DPI stages and report rate. It is an overlay on the active M profile,
-which keeps its own defaults. One file per profile, so a game's layout can be copied or
-shared on its own, and a bad file costs one profile.
+A game profile holds its lighting for each keyboard model, G-key bindings and, per mouse
+model, the mouse's bindings and its own DPI stages and report rate. It is an overlay on the
+active M profile, which keeps its own defaults. One file per profile, so a game's layout can
+be copied or shared on its own, and a bad file costs one profile. Version 2 keeps the lighting
+under `lighting`, by keyboard model; version 1 kept one at the top of the file, read as the
+G915's (config.V1_KEYBOARD). Version 3 keeps the mouse bindings by mouse model; versions 1 and
+2 kept one set, read as the G502 X PLUS's (config.V2_MOUSE).
 """
 
 from __future__ import annotations
 
-import string
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
 from .apps import MAX_PROGRAM_BYTES
 from .config import (
-    DEFAULT_BACKGROUND,
-    DEFAULT_COLOR,
-    G_KEYS,
-    MOUSE_DEFAULTS,
+    BINDABLE_KEYS,
+    FIRST_VERSION,
+    KEYBOARD_MODEL,
     PER_KEY,
+    RATE_CHOICES,
+    REPORT_RATES,
     STATIC,
+    V1_KEYBOARD,
+    VERSION,
     ConfigError,
     FileUnreadable,
+    Lighting,
+    Profile,
     SkipWarnings,
+    backup_dir,
+    by_model,
     changed_on_disk,
     config_dir,
-    effect_settings,
+    entry_under,
     expect,
     file_stamp,
     format_color,
     from_file,
     g_key_layer,
+    keep_old_version,
+    keep_under,
     layer_binding,
-    layer_color,
-    mouse_layer,
-    parse_color,
-    read_direction,
-    read_mode,
-    read_speeds,
+    layer_json,
+    mouse_json,
+    read_mouse_bindings,
     refuse_controls,
     sync_removal,
-    whole,
     write_json,
-    written,
 )
 from .library_files import (
     by_name,
@@ -54,31 +61,32 @@ from .library_files import (
     read_name,
     refuse_taken,
 )
-from .onboard import DPI_HIGHEST, DPI_LOWEST, DPI_STAGES, REPORT_RATES, dpi_fits
+from .onboard import DPI_HIGHEST, DPI_LOWEST, DPI_STAGES, dpi_fits
+from .wording import whole, written
 
-# STATIC and PER_KEY are config.py's (an M profile has a mode too), re-exported; so
-# is onboard.py's REPORT_RATES, the rates a game profile can hold, those onboard profile 1
-# can store, and apps.py's MAX_PROGRAM_BYTES, the longest program name a profile holds.
-__all__ = ["FOLDER_UNLISTED", "LIGHTING_FIELDS", "MAX_PROCESSES", "MAX_PROGRAM_BYTES",
-           "PER_KEY", "REPORT_RATES", "STATIC", "VERSION", "GameProfile", "Library",
-           "MouseTuning", "check_programs", "profiles_dir"]
-
-VERSION = 1
+# STATIC and PER_KEY are config.py's (an M profile has a mode too), re-exported; so are its
+# REPORT_RATES, the rates a game profile can hold, those onboard profile 1 can store, and
+# apps.py's MAX_PROGRAM_BYTES, the longest program name a profile holds.
+__all__ = ["FOLDER_UNLISTED", "MAX_PROCESSES", "MAX_PROGRAM_BYTES", "PER_KEY", "REPORT_RATES",
+           "STATIC", "GameProfile", "Library", "MouseTuning", "check_programs", "profiles_dir"]
 
 #: The most programs a game profile may load for: the daemon's scan compares each with every
 #: running program every five seconds, on the thread that carries the G keys and macros.
 MAX_PROCESSES = 64
 
-#: A game profile's lighting fields: what a pack profile holds besides name and programs.
-LIGHTING_FIELDS = ("mode", "effect", "speeds", "direction", "base", "background", "keys")
-
 #: Why a file in the profiles folder was not read while the folder could not be listed, by
-#: the OSError's reason in words (Library.folder_why).
+#: the OSError's reason in words (Library.why_unread).
 FOLDER_UNLISTED = "its folder cannot be listed: {}"
 
 
 def profiles_dir() -> Path:
     return config_dir() / "profiles"
+
+
+def profile_backup(path: Path) -> Callable[[int], Path]:
+    """Where a game profile's bytes in an older format are kept (config.keep_old_version),
+    under its own file name, in a folder for each format."""
+    return lambda version: backup_dir() / f"profiles.v{version}" / path.name
 
 
 TUNING_FIELDS = ("dpi_stages", "default", "shift", "report_rate")
@@ -87,8 +95,9 @@ TUNING_FIELDS = ("dpi_stages", "default", "shift", "report_rate")
 @dataclass(frozen=True)
 class MouseTuning:
     """A game profile's DPI stages and report rate for one mouse model, in force while the
-    profile is loaded and the mouse is in HOST mode. Either part left None falls to onboard
-    profile 1; `default` and `shift` need `dpi_stages`."""
+    profile is loaded and the mouse is in HOST mode. Stages left None fall to onboard profile
+    1's, a rate left None to the rate in force without a game profile (Dpi.rate_for);
+    `default` and `shift` need `dpi_stages`."""
 
     dpi_stages: tuple[int, ...] | None = None
     #: Each one of `dpi_stages`: the DPI the profile loads at, and the one the paddle drops to.
@@ -118,8 +127,8 @@ class MouseTuning:
                               f"{', '.join(TUNING_FIELDS)}")
         rate = data.get("report_rate")
         if rate is not None and not (whole(rate) and rate in REPORT_RATES):
-            raise ConfigError(f"{where}.report_rate: must be one of "
-                              f"{', '.join(map(str, REPORT_RATES))} Hz, not {written(rate)}")
+            raise ConfigError(f"{where}.report_rate: must be one of {RATE_CHOICES} Hz, "
+                              f"not {written(rate)}")
         stages = data.get("dpi_stages")
         if stages is None:
             for name in ("default", "shift"):
@@ -150,24 +159,11 @@ class MouseTuning:
 def read_tuning(raw: object, where: str) -> dict[str, MouseTuning]:
     """Read `mouse_tuning`, keyed by mouse product id in four lowercase hex digits
     (config.mouse_dpi's keys); absent or null is none, and an empty entry is dropped."""
-    if raw is None:
-        return {}
-    expect(raw, dict, where, "an object of mouse product ids")
-    raw = cast(dict, raw)       # expect raised for anything else
-    out: dict[str, MouseTuning] = {}
-    # Not `out`, which drops empty entries, so a duplicate is refused in any key order.
-    seen: set[str] = set()
-    for key, value in raw.items():
-        product = key.strip().lower()
-        if len(product) != 4 or not all(c in string.hexdigits for c in product):
-            raise ConfigError(f"{where}: {key!r} is not a mouse product id like '4099'")
-        if product in seen:
-            raise ConfigError(f"{where}: {key!r} names a mouse another key names")
-        seen.add(product)
-        tuning = MouseTuning.from_json(value, f"{where}.{key}")
-        if not tuning.empty:
-            out[product] = tuning
-    return out
+    if raw is not None:
+        expect(raw, dict, where, "an object of mouse product ids")
+    tunings = by_model(raw, where, MouseTuning.from_json, "a mouse product id like '4099'",
+                       "mouse")
+    return {product: tuning for product, tuning in tunings.items() if not tuning.empty}
 
 
 def check_programs(processes: object, where: str) -> list[str]:
@@ -192,31 +188,40 @@ def check_programs(processes: object, where: str) -> list[str]:
     return programs
 
 
+def game_lighting(data: object, where: str) -> Lighting:
+    """One keyboard model's lighting as a game profile's file writes it: config.Lighting's
+    fields with its Static color as `base`, and no `params`, which only an M profile has."""
+    return Lighting.from_json(data, where, color_field="base", with_params=False)
+
+
+def lighting_json(entry: Lighting) -> dict:
+    """`entry` as a game profile's file writes it (game_lighting), its keys sorted."""
+    return {
+        "mode": entry.mode,
+        "effect": entry.effect,
+        "speeds": dict(entry.speeds),
+        "direction": entry.direction,
+        "base": format_color(entry.color),
+        "background": format_color(entry.background),
+        "keys": {k: format_color(v) for k, v in sorted(entry.keys.items())},
+    }
+
+
 @dataclass
 class GameProfile:
     name: str
     #: Process names that auto-load this profile. Empty means manual only.
     processes: list[str] = field(default_factory=list)
-    mode: str = STATIC
-    #: The zone effect, as an M profile's: an animation (lighting.ANIMATIONS) shows in place of
-    #: `mode` and leaves it alone; "static" shows the mode (the owner's decision of 2026-09-24).
-    effect: str = "static"
-    #: Each animation's speed in milliseconds and the wave's direction, as config.Lighting's.
-    speeds: dict[str, int] = field(default_factory=dict)
-    direction: str | None = None
-    #: The Static color: the whole keyboard in static mode.
-    base: int = DEFAULT_COLOR
-    #: Per-key colors by key name, used in per-key mode.
-    keys: dict[str, int] = field(default_factory=dict)
-    #: What an unpainted key shows in per-key mode, kept apart from `base` (the owner's
-    #: decision of 2026-09-23).
-    background: int = DEFAULT_BACKGROUND
-    #: G-key bindings, None meaning unbound.
-    bindings: dict[str, str | None] = field(default_factory=lambda: dict.fromkeys(G_KEYS))
-    shift: dict[str, str | None] = field(default_factory=lambda: dict.fromkeys(G_KEYS))
-    #: The mouse's G4-G9: a built-in action, a key spec or a macro.
-    mouse: dict[str, str] = field(default_factory=lambda: dict(MOUSE_DEFAULTS))
-    #: Its own DPI stages and report rate by mouse product id; a mouse with none runs profile 1's.
+    #: Its lighting by keyboard model, as an M profile's (config.Profile.lighting), no `params`.
+    lighting: dict[str, Lighting] = field(default_factory=dict)
+    #: G-key bindings by config.BINDABLE_KEYS' names, None meaning unbound.
+    bindings: dict[str, str | None] = field(default_factory=lambda: dict.fromkeys(BINDABLE_KEYS))
+    shift: dict[str, str | None] = field(default_factory=lambda: dict.fromkeys(BINDABLE_KEYS))
+    #: Its mouse bindings by mouse model, each by button name, as an M profile's
+    #: (config.Profile.mouse).
+    mouse: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: Its own DPI stages and report rate by mouse product id; a mouse with none runs profile 1's
+    #: stages and the rate in force without a game profile (Dpi.rate_for).
     mouse_tuning: dict[str, MouseTuning] = field(default_factory=dict)
     #: Where it was loaded from, so save() can overwrite in place.
     path: Path | None = field(default=None, compare=False)
@@ -228,99 +233,66 @@ class GameProfile:
     #: was; None once it is written.
     unreadable: str | None = field(default=None, compare=False, repr=False)
 
-    @property
-    def color(self) -> int:
-        """`base` by the name config.Lighting gives its Static color, so that code which edits
-        the lighting layer in force (daemon.games.Games.lighting_layer) reads and writes it by
-        one name. Not a field: the file's key stays `base`."""
-        return self.base
-
-    @color.setter
-    def color(self, value: int) -> None:
-        self.base = value
-
-    def mode_color(self) -> int:
-        """`base` under an animation or in static mode, `background` in per-key mode: the color
-        that shows, except that the disabled effect shows black."""
-        return layer_color(self.effect, self.mode, self.base, self.background)
-
     def binding(self, key: str, shifted: bool) -> str | None:
         """A G key's binding, the MR layer's when `shifted` and it has one, as an M profile's
         (config.layer_binding)."""
         return layer_binding(self.bindings, self.shift, key, shifted)
 
-    def settings(self, effect: str | None = None) -> dict[str, int]:
-        """What this profile saved for `effect`, its own by default, as
-        set_effect parameters (config.effect_settings)."""
-        return effect_settings(effect or self.effect, self.speeds, self.direction)
-
     def tuning(self, keys: list[str]) -> MouseTuning | None:
         """Its own stages and rate for the mouse `keys` name, its own product
         id first and then the same model's on its other route
-        (daemon.mice.attached.dpi_keys), or None."""
-        return next((self.mouse_tuning[key] for key in keys if key in self.mouse_tuning), None)
+        (daemon.mice.attached.dpi_keys), or None (config.entry_under)."""
+        return entry_under(self.mouse_tuning, keys)
 
     def set_tuning(self, keys: list[str], tuning: MouseTuning) -> None:
         """Keep `tuning` under the first of `keys` and drop the others, the
-        same mouse on its other route; an empty one drops them all."""
-        for key in keys:
-            self.mouse_tuning.pop(key, None)
-        if not tuning.empty:
-            self.mouse_tuning[keys[0]] = tuning
+        same mouse on its other route (config.keep_under); an empty one drops them all."""
+        if tuning.empty:
+            for key in keys:
+                self.mouse_tuning.pop(key, None)
+        else:
+            keep_under(self.mouse_tuning, keys, tuning)
 
     def to_json(self) -> dict:
         return {
             "version": VERSION,
             "name": self.name,
             "processes": list(self.processes),
-            "mode": self.mode,
-            "effect": self.effect,
-            "speeds": dict(self.speeds),
-            "direction": self.direction,
-            "base": format_color(self.base),
-            "background": format_color(self.background),
-            "keys": {k: format_color(v) for k, v in sorted(self.keys.items())},
-            "bindings": dict(self.bindings),
-            "shift": dict(self.shift),
-            "mouse": dict(self.mouse),
+            "lighting": {model: lighting_json(entry)
+                         for model, entry in sorted(self.lighting.items())},
+            "bindings": layer_json(self.bindings),
+            "shift": layer_json(self.shift),
+            "mouse": mouse_json(self.mouse),
             "mouse_tuning": {k: t.to_json() for k, t in sorted(self.mouse_tuning.items())},
         }
 
     @classmethod
     def from_json(cls, data: object, where: str) -> GameProfile:
+        """A game profile from its file's JSON: version 1's lighting, at the top of the file
+        with its defaults for any field it lacks, is V1_KEYBOARD's, and an older format's mouse
+        bindings are config.read_mouse_bindings'."""
         if not isinstance(data, dict):
             raise ConfigError(f"{where}: profile must be a JSON object")
-        check_version(data, where, VERSION)
-        mode = read_mode(data, where)
-
+        version = check_version(data, where, VERSION, FIRST_VERSION)
+        if version == FIRST_VERSION:
+            lighting = {V1_KEYBOARD: game_lighting(data, where)}
+        else:
+            lighting = by_model(data.get("lighting"), f"{where}.lighting", game_lighting,
+                                KEYBOARD_MODEL, "keyboard")
         # Only null is the default, as in config.json: false, 0 or "" is a wrong type, which
         # read as the default would be saved over the hand edit.
         processes = data.get("processes")
         if processes is None:
             processes = []
         check_programs(processes, f"{where}.processes")
-        keys = data.get("keys")
-        if keys is None:
-            keys = {}
-        expect(keys, dict, f"{where}.keys", "an object of key names and colors")
         name = read_name(data, where, "game profile")
-        base = parse_color(data.get("base", DEFAULT_COLOR), f"{where}.base")
-        effect = data.get("effect", "static")
-        expect(effect, str, f"{where}.effect", "an effect name")
         return cls(
             name=name,
             processes=[p.strip() for p in processes],
-            mode=mode,
-            effect=effect,
-            speeds=read_speeds(data.get("speeds"), f"{where}.speeds"),
-            direction=read_direction(data.get("direction"), f"{where}.direction"),
-            base=base,
-            background=parse_color(data.get("background", DEFAULT_BACKGROUND),
-                                   f"{where}.background"),
-            keys={k: parse_color(v, f"{where}.keys.{k}") for k, v in keys.items()},
+            lighting=lighting,
             bindings=g_key_layer(data.get("bindings"), f"{where}.bindings"),
             shift=g_key_layer(data.get("shift"), f"{where}.shift"),
-            mouse=mouse_layer(data.get("mouse"), f"{where}.mouse"),
+            mouse=read_mouse_bindings(data.get("mouse"), f"{where}.mouse", version),
             mouse_tuning=read_tuning(data.get("mouse_tuning"), f"{where}.mouse_tuning"),
         )
 
@@ -369,6 +341,7 @@ class GameProfile:
         if self.path is None and target.exists(follow_symlinks=False):
             refuse_taken(target, GameProfile.load, "game profile")
         target.parent.mkdir(parents=True, exist_ok=True)
+        keep_old_version(target, profile_backup(target))
         write_json(target, self.to_json(), ".profile-")
         self.path, self.disk_stamp, self.unreadable = target, file_stamp(target), None
         return target
@@ -391,6 +364,9 @@ class GameProfile:
         try:
             GameProfile.from_json(self.to_json(), target.name)
             target.parent.mkdir(parents=True, exist_ok=True)
+            # Before the write: a rename in place writes over the file it leaves, and one to
+            # another file name deletes it.
+            keep_old_version(old, profile_backup(old))
             write_json(target, self.to_json(), ".profile-")
         except BaseException:
             self.name = was
@@ -400,6 +376,11 @@ class GameProfile:
             old.unlink(missing_ok=True)
             sync_removal(old)
         return target
+
+
+def layer_in_force(overlay: GameProfile | None, profile: Profile) -> GameProfile | Profile:
+    """The layer in force: the loaded game profile `overlay`, else the active M profile."""
+    return overlay if overlay is not None else profile
 
 
 class Library:
@@ -440,12 +421,15 @@ class Library:
     def get(self, name: str) -> GameProfile | None:
         return by_name(self.all(), name)
 
-    def folder_why(self) -> str | None:
-        """Why a file in the folder was not read, in words, when the last `all()` could not
-        list the folder; else None. A message that names the file holds the folder's path, so
-        this gives only the reason."""
-        why = self.unlisted_reason
-        return None if why is None else FOLDER_UNLISTED.format(why)
+    def why_unread(self, file: str | None) -> str | None:
+        """Why the last `all()` did not read `file`, in words: its entry in `unread()`, else,
+        while the folder could not be listed, FOLDER_UNLISTED's; else None, as for a file it
+        read, one shadowed or one not there. A message that names the file holds the folder's
+        path, so the folder's part gives only the reason."""
+        why = None if file is None else dict(self.unread()).get(file)
+        if why is None and self.unlisted_reason is not None:
+            why = FOLDER_UNLISTED.format(self.unlisted_reason)
+        return why
 
     def delete(self, name: str) -> bool:
         profile = self.get(name)

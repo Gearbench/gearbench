@@ -13,7 +13,7 @@ Build-Depends: debhelper-compat (= 13),
                libgtk-4-bin <!nocheck>,
                dbus-daemon <!nocheck>
 Standards-Version: 4.7.2
-Homepage: https://github.com/wmuschetto/gearbench
+Homepage: https://github.com/gearbench/gearbench
 X-Python3-Version: >= 3.14
 
 Package: gearbench
@@ -36,39 +36,52 @@ Depends: ${misc:Depends},
 Recommends: python3-gi,
             gir1.2-gtk-4.0,
             gir1.2-adw-1
-Description: control for the Logitech G915, G502 X PLUS, G305 and Astro A50 Gen 4
- Gearbench drives the Logitech G915 keyboard and the G502 X PLUS and G305
- mice over their vendor HID++ 2.0 interfaces, on a cable or through a
- LIGHTSPEED receiver, and probes what each one can do from its own feature
- table. It remaps the G keys and the MR shift layer, sets
- per-key and zone lighting, records and replays macros through a uinput
- virtual keyboard, binds the G502 X PLUS's six extra buttons, and sets each
- mouse's DPI, report rate and DPI stages.
+Description: control for Logitech G keyboards and mice, the G432 and the Astro A50 Gen 4
+ Gearbench drives Logitech G keyboards and mice over their vendor HID++ 2.0
+ interfaces, on a cable or through a LIGHTSPEED receiver, and probes what
+ each one can do from its own feature table. The README's table lists the
+ models. Those not yet checked on the hardware are trials: the G515
+ LIGHTSPEED TKL, G915 TKL and G815 keyboards and the G502 X, G502 X
+ LIGHTSPEED, G502 X PLUS MILLENNIUM FALCON, G502 LIGHTSPEED, PRO X
+ SUPERLIGHT, PRO WIRELESS and G903 LIGHTSPEED HERO mice. It remaps the G
+ keys and the MR shift layer, sets per-key and zone lighting, records and
+ replays macros through a uinput virtual keyboard, binds the extra buttons
+ of each mouse but the G305, and sets each mouse's DPI and report rate and,
+ on the G502 X PLUS, G305 and G502 HERO, its DPI stages.
  .
  It also drives the Astro A50 Gen 4 base station over its own vendor HID
  interface, which is not HID++: microphone level, sidetone, noise gate and
  mic EQ, the three EQ presets (Astro Command Center's .astroeq files too),
  the stream port mix and the base station's own settings, and it reads the
- headset's battery. It lists the A50's Game and Chat as two outputs, and adds
- Astro A50 Spatial, a 7.1 output for games rendered for headphones with
- SADIE II's measured heads, which is off until switched on.
+ headset's battery. It lists the A50's Game and Chat as two outputs.
+ .
+ For the Logitech G432 it sets the sidetone, and adds an equalizer output
+ and noise suppression for its microphone. Gearbench Spatial, a 7.1 output
+ for games rendered for headphones with SADIE II's measured heads, plays to
+ either headset and is off until switched on.
  .
  A user systemd service owns the devices and holds the keyboard's software
  lighting claim; the command line and the GTK 4 window are front ends that talk
  to it over a unix socket. Nothing runs as root. Device access comes from
- four udev rule files that tag nodes with uaccess, which grants them to the
- user of the active seat: the vendor interface of the keyboard, of the
- cabled G502 X PLUS and of the A50's base station, and each mouse's own
- hidraw node through its receiver. That node carries the mouse's motion and
- buttons too and, going by the kernel's source, would carry the keystrokes
- of a keyboard paired to the same receiver after the mouse, so pair nothing
- else there. A fifth file does the same for /dev/uinput, the line
- steam-devices ships. With it any program that user runs can create a
- virtual input device. The G502 X PLUS's own event nodes are the gearbench
- group's to read, which the package creates; with host mode off, the extra
- buttons need the user's account in it.
+ udev rule files that tag nodes with uaccess, which grants them to the user
+ of the active seat: the control interface of each keyboard, on its cable
+ or its receiver, of each cabled mouse, of the A50's base station and of
+ the G432's adapter, and the node a receiver gives a device paired to it.
+ A mouse's node carries its motion and buttons too and, going by the
+ kernel's source, would carry the keystrokes of a keyboard paired to the
+ same receiver after the mouse, so pair nothing else there. The G815's
+ control interface and the nodes of the G515 LIGHTSPEED TKL and G915 TKL
+ behind their receivers carry what is typed on them, and the G502 HERO's
+ and G502 X's control interfaces the keys their buttons are bound to type,
+ so with those rules any program that user runs can read them. A program
+ that opened such a node keeps reading it after another account takes the
+ seat, and so reads what that account types. Another file tags /dev/uinput
+ too, the line steam-devices ships. With it any program that user runs can
+ create a virtual input device. The G502 X PLUS's own event nodes are the
+ gearbench group's to read, which the package creates; with host mode off,
+ the extra buttons need the user's account in it.
  .
  The keyboard's onboard profile is never written. Five mouse commands do write
  a mouse's onboard profile 1, each backing up every profile sector first and
- reading the sector back after. The headset's settings reach the base
- station's flash only when saved.
+ reading the sector back after. The A50's settings reach its base station's
+ flash only when saved.

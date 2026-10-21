@@ -1,4 +1,5 @@
-"""Lighting for the G915: 0x8071 zone effects, 0x8081 per-key, 0x8040 brightness.
+"""Lighting for the keyboards and the G502 X PLUS: 0x8071 zone effects, 0x8081 per-key,
+0x8040 brightness.
 
 The rules here come from the device and from a capture of G HUB's USB traffic; where the two
 disagree, this follows the device.
@@ -16,6 +17,7 @@ Nothing here writes a non-volatile persistence flag or touches 0x8100 ONBOARD_PR
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -23,6 +25,9 @@ from itertools import batched, groupby
 from typing import ClassVar, TypedDict, cast
 
 from .hidpp import Feature, Hidpp, HidppError, HidppFailure, HidppTimeout
+from .wording import counted
+
+log = logging.getLogger("gearbench")
 
 F_RGB = 0x8071
 F_PERKEY = 0x8081
@@ -102,6 +107,10 @@ SETTLE_AFTER_CLAIM = 0.15
 # walk always asks for one: the default 1 s with two retries would hold the daemon's only
 # thread 3 s at a mouse reconnect.
 PROBE_TIMEOUT = 0.1
+#: The most clusters (0x8071) or zones (0x8070), and effects in one, a walk reads, whatever
+#: a count byte says, as hidpp.ENTITIES_MAX for the firmware entities: a byte the device
+#: gets wrong cannot set how many reads follow.
+CLUSTERS_MAX, EFFECTS_MAX = 16, 32
 
 # The FrameEnd after a failed per-key write; an answering keyboard replies in milliseconds.
 COMMIT_TIMEOUT = 0.25
@@ -109,9 +118,10 @@ COMMIT_TIMEOUT = 0.25
 #: Effect id -> (name, {parameter: byte offsets}). Offsets index the 10 parameter bytes after
 #: the cluster and effect-index bytes of a setEffectByIndex payload, most significant byte
 #: first. They are per byte because COLORWAVE splits its period: LSB at [6], MSB at [9]. The
-#: layouts are G HUB's, checked field by field against a capture of its writes. Only the ids
-#: this firmware reports are listed; an unknown id is still settable by its id, with every
-#: parameter byte zero.
+#: G915's and the G502 X PLUS's layouts are G HUB's, checked field by field against a capture
+#: of its writes. A name can have more than one id, and a cluster runs it by the one it
+#: reports (Cluster.effect). An unknown id is still settable by its id, with every parameter
+#: byte zero, but no front end offers one (offered_effects).
 EFFECTS: dict[int, tuple[str, dict[str, tuple[int, ...]]]] = {
     0x00: ("disabled", {}),
     0x01: ("static", {"color": (0, 1, 2), "ramp": (3,)}),
@@ -125,11 +135,40 @@ EFFECTS: dict[int, tuple[str, dict[str, tuple[int, ...]]]] = {
     0x0C: ("custom", {}),
     0x0F: ("snipe-pulse", {"rate": (6,), "intensity": (7,)}),
     0x10: ("neural-wave", {"rate": (6,), "intensity": (7,)}),
+    # COLOR_CYCLE_S, COLORWAVE_S and RIPPLE_S, the G515 TKL's cycle, wave and ripple, from G
+    # HUB's encoders, read in its agent, and the x8071 v4 spec's table, which agree; no capture
+    # of them yet. Each has a saturation byte: at 0, where the classic cycle's layout leaves
+    # it, the board showed near-white (2026-10-17). Ripple's [4] is its startup-animation flag,
+    # left 0 as G HUB sends it for the onboard profile.
+    0x15: ("cycle", {"saturation": (1,), "period": (6, 7), "intensity": (8,)}),
+    0x16: ("wave", {"saturation": (1,), "period": (6, 7), "intensity": (8,),
+                    "direction": (9,)}),
+    0x17: ("ripple", {"color": (0, 1, 2), "saturation": (3,), "period": (6, 7)}),
 }
+
+#: Effect name -> the ids that run it, in EFFECTS' order.
+EFFECT_IDS: dict[str, tuple[int, ...]] = {
+    name: tuple(eid for eid, (named, _) in EFFECTS.items() if named == name)
+    for name, _ in EFFECTS.values()
+}
+
+#: (effect id, parameter) -> the largest value it takes, where that is less than its bytes
+#: hold: COLORWAVE_S's directions, 0 for its default to 8 center-in (the x8071 v4 spec).
+PARAM_LIMITS = {(0x16, "direction"): 8}
+
+#: The saturation an effect with one runs at, G HUB's default.
+FULL_SATURATION = 0xFF
+
+#: The intensity an effect that has one runs at.
+FULL_INTENSITY = 100
+
+#: The parameter bytes between an effect write's cluster and effect index and its persistence
+#: byte.
+PARAMETER_BYTES = 10
 
 
 class EffectParams(TypedDict, total=False):
-    """An effect's parameters by name, as Lighting.effect_params answers them and set_effect
+    """An effect's parameters by name, as default_params answers them and set_effect
     takes them by keyword. The names are those of EFFECTS' layouts."""
 
     color: int
@@ -139,15 +178,18 @@ class EffectParams(TypedDict, total=False):
     direction: int
     form: int
     rate: int
+    saturation: int
 
 
 #: The rate byte of the two signature effects: G HUB's one captured write of either carries
 #: 0x20 (neural-wave), and its device database marks both fixedRate. The mouse's records hold 0.
 SIGNATURE_RATE = 0x20
 
-#: Default periods in ms: cycle and wave as G HUB stores them in the G915's onboard M1 profile,
-#: the others as G HUB was seen sending them. fn 0's effect info has no period to read.
-DEFAULT_PERIODS = {0x03: 2100, 0x04: 2100, 0x0A: 3000, 0x0B: 1000}
+#: Default periods in ms, by the name EFFECTS gives the effect's id, whichever of a name's ids
+#: runs it and whatever a model calls it: cycle and wave as G HUB stores them in the G915's
+#: onboard M1 profile, the others as G HUB was seen sending them. fn 0's effect info has no
+#: period to read.
+DEFAULT_PERIODS = {"cycle": 2100, "wave": 2100, "breathe": 3000, "ripple": 1000}
 
 #: The animations a profile can show in place of Static or Per-key, in the
 #: order the window lists them. Each has a speed; wave has a direction.
@@ -155,18 +197,25 @@ ANIMATIONS = ("breathe", "cycle", "wave", "ripple")
 
 #: Each animation's period range in ms, (fastest, slowest): G HUB's speed slider runs 1000 to
 #: 20000. Ripple runs 100 to 1000, the owner's choice of 2026-09-24 after watching it on the G915.
-SPEEDS = {0x0A: (1000, 20000), 0x03: (1000, 20000), 0x04: (1000, 20000),
-          0x0B: (100, 1000)}
+SPEEDS = {"breathe": (1000, 20000), "cycle": (1000, 20000), "wave": (1000, 20000),
+          "ripple": (100, 1000)}
 
-#: COLORWAVE direction byte, by G HUB's names, as its capture sent them and its protobuf enum
-#: numbers them. The enum's 4 INWARD, 5 OUTWARD, 7 REVERSE_VERTICAL and 8 CENTER_IN were never
-#: sent and are left out. On the G915, watched by the owner on 2026-09-24: horizontal runs left
-#: to right, reverse-horizontal right to left, vertical top to bottom, center-out from the middle.
+#: COLORWAVE's direction byte, by G HUB's window labels, as its protobuf enum numbers them and
+#: its capture sent 1, 2, 3 and 6; COLORWAVE_S numbers them the same (the x8071 v4 spec). The
+#: enum's 4 INWARD and 5 OUTWARD are left out, as no model takes them: G HUB's window offers
+#: them on no device, the G915's firmware image refuses both, and on a wired G515 TKL, where
+#: the six ran as named, each turned the whole board dark, no wave (the owner, 2026-10-18).
+#: Which ones a keyboard takes is its model's (keyboard.KeyboardModel.wave_directions). On the
+#: G915, watched by the owner on 2026-09-24: horizontal runs left to right, reverse-horizontal
+#: right to left, vertical top to bottom, center-out from the middle; and on 2026-10-18:
+#: reverse-vertical bottom to top, center-in from the edges in.
 WAVE_DIRECTIONS = {
     "horizontal": 1,
     "vertical": 2,
     "center-out": 3,
     "reverse-horizontal": 6,
+    "reverse-vertical": 7,
+    "center-in": 8,
 }
 
 
@@ -177,44 +226,35 @@ def effect_layout(effect: int) -> dict[str, tuple[int, ...]]:
 
 
 def param_max(effect: int, key: str) -> int:
-    """The largest value parameter `key` of effect id `effect` holds: its bytes in
-    effect_layout."""
-    return (1 << 8 * len(effect_layout(effect)[key])) - 1
+    """The largest value parameter `key` of effect id `effect` takes: its PARAM_LIMITS, or
+    what its bytes in effect_layout hold."""
+    return PARAM_LIMITS.get((effect, key), (1 << 8 * len(effect_layout(effect)[key])) - 1)
 
 
 def fits(effect: int, key: str, value: int) -> bool:
-    """Whether `value` fits the bytes the effect's `key` parameter takes (param_max)."""
+    """Whether `value` is one the effect's `key` parameter takes (param_max)."""
     return 0 <= value <= param_max(effect, key)
 
 
-def speed_range(name: str) -> tuple[int, int]:
-    """The periods an animation takes, in milliseconds: (fastest, slowest)."""
-    return SPEEDS[NAME_TO_EFFECT[name]]
+#: Effects whose color the firmware renders as a flat wash, by name. Per-key paint is only
+#: visible on top of one of these; an animating effect overwrites it.
+STATIC_EFFECTS = frozenset({"disabled", "static"})
 
-
-def default_speed(name: str) -> int:
-    """The period an animation runs at when its profile saved none."""
-    return DEFAULT_PERIODS[NAME_TO_EFFECT[name]]
-
-#: Effects whose color the firmware renders as a flat wash. Per-key paint is
-#: only visible on top of one of these; an animating effect overwrites it.
-STATIC_EFFECTS = frozenset({0x00, 0x01})
-
-#: Zone effects the G915 offers, by name, for front ends: EFFECTS also holds the mouse's
-#: signature effects and `custom`, the per-key mode. The device is still enumerated at runtime,
-#: and a cluster without an effect falls back to static.
+#: The zone effects a keyboard can be offered, by name, for front ends: EFFECTS also holds the
+#: mouse's signature effects and `custom`, the per-key mode. A keyboard is offered those its
+#: clusters report (offered_effects), and a cluster without one falls back to static.
 KEYBOARD_EFFECTS = ("static", "breathe", "cycle", "wave", "ripple", "disabled")
 
-NAME_TO_EFFECT = {name: eid for eid, (name, _) in EFFECTS.items()}
+
+def has_color(name: str, names: Mapping[int, str] | None = None) -> bool:
+    """Whether the effect `name` takes a color: the EFFECTS layout of one of its ids has one.
+    Its ids are those a device model calls `name` in `names` (Lighting's), else EFFECT_IDS',
+    which must have it."""
+    ids = [eid for eid, own in (names or {}).items() if own == name] or EFFECT_IDS[name]
+    return any("color" in effect_layout(eid) for eid in ids)
 
 
-def has_color(name: str) -> bool:
-    """Whether the effect `name`, one of NAME_TO_EFFECT's, takes a color: its EFFECTS layout
-    has one."""
-    return "color" in effect_layout(NAME_TO_EFFECT[name])
-
-
-#: The animations with no color of their own: their EFFECTS layout has none.
+#: The animations with no color of their own: no EFFECTS layout of theirs has one.
 COLORLESS = tuple(name for name in ANIMATIONS if not has_color(name))
 
 #: The lighting level every repaint goes through. Dim is half of every color, or of an effect's
@@ -234,7 +274,7 @@ class LightingError(RuntimeError):
 NO_BRIGHTNESS = "this device has no brightness control"
 
 
-def _need(reply: bytes, length: int, what: str) -> bytes:
+def need_reply(reply: bytes, length: int, what: str) -> bytes:
     """The reply, if long enough to decode; a short one raises LightingError.
 
     Decoding it would read a wrong value, or raise IndexError, which the CLI does not catch.
@@ -249,11 +289,26 @@ class Effect:
     cluster: int
     index: int
     id: int
+    #: The device model's own name for this id, in place of EFFECTS' (Lighting's `names`), or
+    #: None for EFFECTS' name.
+    own_name: str | None = None
 
     @property
     def name(self) -> str:
+        if self.own_name is not None:
+            return self.own_name
         known = EFFECTS.get(self.id)
         return known[0] if known else f"effect-0x{self.id:04x}"
+
+    def runs(self, which: str | int) -> bool:
+        """Whether `which` is this effect: its id, its own name where it has one, else a name
+        whose ids in EFFECT_IDS hold its id. An id with a name of its own answers to no other
+        name: EFFECTS' for it is another model's."""
+        if not isinstance(which, str):
+            return which == self.id
+        if self.own_name is not None:
+            return which == self.own_name
+        return self.id in EFFECT_IDS.get(which, ())
 
 
 @dataclass(frozen=True)
@@ -276,24 +331,72 @@ class Cluster:
         return self.LOCATIONS.get(self.location, f"cluster-{self.index}")
 
     def has_effect(self, which: str | int) -> bool:
-        eid = NAME_TO_EFFECT.get(which) if isinstance(which, str) else which
-        return any(e.id == eid for e in self.effects)
+        return any(e.runs(which) for e in self.effects)
 
     def effect(self, which: str | int) -> Effect:
-        """Resolve an effect name or id to this cluster's own entry.
+        """Resolve an effect name or id to this cluster's own entry: for a name, the first of
+        the cluster's effects that runs it (Effect.runs), so cycle is 0x03 on the G915 and
+        0x15 on the G515 TKL.
 
         Indices differ between clusters (cluster 0 has Cycle before Breathe, cluster 1 after),
         so never cache one across clusters.
         """
-        eid = NAME_TO_EFFECT.get(which) if isinstance(which, str) else which
         for e in self.effects:
-            if e.id == eid:
+            if e.runs(which):
                 return e
         has = ", ".join(e.name for e in self.effects)
-        if eid is None:
+        if isinstance(which, str) and which not in EFFECT_IDS:
             raise LightingError(f"unknown effect {which!r}; this cluster has {has}")
         raise LightingError(
             f"cluster {self.index} ({self.name}) has no effect {which!r}; it has {has}")
+
+
+def offered_effects(clusters: tuple[Cluster, ...]) -> tuple[str, ...]:
+    """The KEYBOARD_EFFECTS one of `clusters` reports, in KEYBOARD_EFFECTS' order: what a
+    keyboard is offered. An id this build has no name for is never one of them."""
+    return tuple(name for name in KEYBOARD_EFFECTS if any(c.has_effect(name) for c in clusters))
+
+
+def default_params(chosen: Effect, color: int,
+                   overrides: Mapping[str, int] | None = None) -> EffectParams:
+    """The parameters effect `chosen` takes, with defaults, and `overrides` (a profile's saved
+    settings, config.effect_settings) on top, for 0x8071's clusters and 0x8070's zones alike.
+
+    Passing cycle a color is an error, so a caller handing every effect the same kwargs
+    falls back instead of animating. Wave runs horizontal by default, the direction in the
+    G915's onboard M1 record, and an effect with a saturation at FULL_SATURATION.
+    """
+    takes = effect_layout(chosen.id)
+    given = {"color": color, "saturation": FULL_SATURATION,
+             **({"period": DEFAULT_PERIODS[EFFECTS[chosen.id][0]]} if "period" in takes else {}),
+             "intensity": FULL_INTENSITY, "direction": WAVE_DIRECTIONS["horizontal"],
+             "rate": SIGNATURE_RATE, **(overrides or {})}
+    # Every key is a name from the effect's layout in EFFECTS, which EffectParams lists.
+    return cast("EffectParams", {key: value for key, value in given.items() if key in takes})
+
+
+def effect_parameters(chosen: Effect, params: Mapping[str, int]) -> bytes:
+    """The ten parameter bytes of a write of effect `chosen`: each of `params` at its EFFECTS
+    offsets, most significant byte first, zeros elsewhere, and STATIC_RAMP for a static that
+    `params` gives no ramp. A parameter the effect lacks, or a value it does not take (fits),
+    raises LightingError."""
+    takes = effect_layout(chosen.id)
+    if chosen.id == 0x01 and "ramp" not in params:
+        params = {**params, "ramp": STATIC_RAMP}
+    body = bytearray(PARAMETER_BYTES)
+    for key, value in params.items():
+        if key not in takes:
+            raise LightingError(
+                f"{chosen.name} has no parameter {key!r}: it takes "
+                f"{', '.join(sorted(takes)) or 'none'}"
+            )
+        if not fits(chosen.id, key, value):
+            raise LightingError(
+                f"{chosen.name} {key} {value} outside 0..{param_max(chosen.id, key)}")
+        offsets = takes[key]
+        for offset, byte in zip(offsets, value.to_bytes(len(offsets), "big"), strict=True):
+            body[offset] = byte
+    return bytes(body)
 
 
 def _rgb(color: int) -> bytes:
@@ -306,8 +409,12 @@ def snap_brightness(levels: tuple[int, ...], level: int) -> int:
 
 
 class Lighting:
-    def __init__(self, dev: Hidpp, per_key_cluster: bool = False) -> None:
+    def __init__(self, dev: Hidpp, per_key_cluster: bool = False,
+                 names: Mapping[int, str] | None = None) -> None:
         self.dev = dev
+        #: The device model's own name for an effect id, where it has one (Effect.own_name):
+        #: mouse.EFFECT_NAMES' for a mouse.
+        self._names = dict(names or {})
         self._rgb = dev.require(F_RGB, "RGB_EFFECTS")
         # Optional: only per-key painting needs 0x8081, and zonal keyboards do not have it.
         self._perkey = dev.feature(F_PERKEY)
@@ -323,12 +430,13 @@ class Lighting:
         self.discover()
 
     @classmethod
-    def find(cls, dev: Hidpp, per_key_cluster: bool = False) -> Lighting | None:
+    def find(cls, dev: Hidpp, per_key_cluster: bool = False,
+             names: Mapping[int, str] | None = None) -> Lighting | None:
         """`dev`'s lighting, or None when it has no 0x8071 or its 0x8071 lists no cluster:
-        nothing to claim or paint."""
+        nothing to claim or paint. `names` are its model's own effect names (__init__)."""
         if dev.feature(F_RGB) is None:
             return None
-        found = cls(dev, per_key_cluster)
+        found = cls(dev, per_key_cluster, names)
         return found if found.clusters else None
 
     # -- discovery -------------------------------------------------------
@@ -342,9 +450,9 @@ class Lighting:
         # (OpenLogi's x8071 page): 5 on the G502 X PLUS, 0 on the G915.
         multi = info[7] if len(info) > 7 else 0
         clusters = []
-        for c in range(count):
+        for c in range(min(count, CLUSTERS_MAX)):
             reply = self.dev.request(self._rgb.index, 0, bytes([c, 0xFF, 0x00]))
-            _need(reply, 5, f"0x8071 fn 0 cluster {c} info")
+            need_reply(reply, 5, f"0x8071 fn 0 cluster {c} info")
             clusters.append(Cluster(c, int.from_bytes(reply[2:4], "big"),
                                     self._read_effects(c, reply[4])))
         if self._per_key_cluster:
@@ -388,16 +496,18 @@ class Lighting:
         return Cluster(index, 0x0000, tuple(effects))
 
     def _read_effects(self, cluster: int, count: int) -> tuple[Effect, ...]:
-        """Effects 0 to count - 1 of a cluster, asked for one at a time."""
+        """Effects 0 to count - 1 of a cluster, EFFECTS_MAX at most, asked for one at a time."""
         return tuple(self._effect(self.dev.request(self._rgb.index, 0, bytes([cluster, e, 0x00])),
                                   f"cluster {cluster} effect {e}")
-                     for e in range(count))
+                     for e in range(min(count, EFFECTS_MAX)))
 
-    @staticmethod
-    def _effect(reply: bytes, what: str) -> Effect:
-        """One effect-info reply: [cluster, index, id uint16 BE, caps uint32 BE]."""
-        _need(reply, 8, what)
-        return Effect(cluster=reply[0], index=reply[1], id=int.from_bytes(reply[2:4], "big"))
+    def _effect(self, reply: bytes, what: str) -> Effect:
+        """One effect-info reply: [cluster, index, id uint16 BE, caps uint32 BE], named by the
+        model where it names the id."""
+        need_reply(reply, 8, what)
+        effect_id = int.from_bytes(reply[2:4], "big")
+        return Effect(cluster=reply[0], index=reply[1], id=effect_id,
+                      own_name=self._names.get(effect_id))
 
     def cluster(self, which: str | int) -> Cluster:
         for c in self.clusters:
@@ -449,8 +559,9 @@ class Lighting:
         Required on exit: per-key paint has no persistence flag, but nothing reclaims a cluster
         that is not animating, so the keyboard would keep showing the last paint.
 
-        The keyboard and the mice alike are left `01 00 06` (SW_FIRMWARE), which also gives
-        back power saving and sleep. With `01 03 06` the keyboard never slept, and the G502 X
+        The keyboard and the mice with 0x8071 alike are left `01 00 06` (SW_FIRMWARE), which
+        also gives back power saving and sleep; a mouse with 0x8070's zones is released by
+        ZoneLighting.release. With `01 03 06` the keyboard never slept, and the G502 X
         PLUS would get its lighting back only through a 0x0020 cookie clear, which a stop does
         not send (daemon.mice.MOUSE_COOKIE).
         """
@@ -529,55 +640,18 @@ class Lighting:
 
     def _effect_payload(self, cluster: str | int, effect: str | int,
                         params: Mapping[str, int]) -> bytes:
-        """fn 1's parameters: the cluster, the effect and its encoded parameters."""
+        """fn 1's parameters: the cluster, the effect and its encoded parameters
+        (effect_parameters)."""
         target = self.cluster(cluster)
         chosen = target.effect(effect)
-        takes = effect_layout(chosen.id)
-        if chosen.id == 0x01 and "ramp" not in params:
-            params = {**params, "ramp": STATIC_RAMP}
-        body = bytearray(10)
-        for key, value in params.items():
-            if key not in takes:
-                raise LightingError(
-                    f"{chosen.name} has no parameter {key!r}: it takes "
-                    f"{', '.join(sorted(takes)) or 'none'}"
-                )
-            offsets = takes[key]
-            if not fits(chosen.id, key, value):
-                raise LightingError(
-                    f"{chosen.name} {key} {value} outside 0..{param_max(chosen.id, key)}")
-            for offset, byte in zip(offsets, value.to_bytes(len(offsets), "big")):
-                body[offset] = byte
-        return bytes([target.index, chosen.index, *body, PERSIST_VOLATILE])
+        return bytes([target.index, chosen.index, *effect_parameters(chosen, params),
+                      PERSIST_VOLATILE])
 
     def effect_params(
         self, cluster: str | int, effect: str | int, color: int, overrides: Mapping[str, int] | None = None
     ) -> EffectParams:
-        """The parameters an effect takes, with defaults, and `overrides` (a profile's `period`
-        and `direction`) on top.
-
-        Passing cycle a color is an error, so a caller handing every effect the same kwargs
-        falls back instead of animating. Wave runs horizontal by default, the direction in the
-        G915's onboard M1 record.
-        """
-        chosen = self.cluster(cluster).effect(effect)
-        takes = effect_layout(chosen.id)
-        params: dict[str, int] = {}
-        if "color" in takes:
-            params["color"] = color
-        if "period" in takes:
-            params["period"] = DEFAULT_PERIODS[chosen.id]
-        if "intensity" in takes:
-            params["intensity"] = 100
-        if "direction" in takes:
-            params["direction"] = WAVE_DIRECTIONS["horizontal"]
-        if "rate" in takes:
-            params["rate"] = SIGNATURE_RATE
-        for key, value in (overrides or {}).items():
-            if key in takes:
-                params[key] = value
-        # Every key is a name from the effect's layout in EFFECTS, which EffectParams lists.
-        return cast("EffectParams", params)
+        """The parameters a cluster's effect takes (default_params)."""
+        return default_params(self.cluster(cluster).effect(effect), color, overrides)
 
     # -- per-key ---------------------------------------------------------
 
@@ -652,7 +726,10 @@ class Lighting:
         self._frame_end_at = time.monotonic()
 
     def _write_frames(self, perkey: Feature, reports: list[tuple[int, bytes]]) -> None:
-        """Zone writes, a FrameEnd after each MAX_REPORTS_PER_FRAME of them."""
+        """Zone writes, a FrameEnd after each MAX_REPORTS_PER_FRAME of them, each frame said
+        at debug with the time since the last FrameEnd was answered: on the G515 TKL a drag's
+        preview frames showed only once the drag ended (2026-10-17), and the line tells its
+        hardware test whether they went out and at what pace."""
         for frame in batched(reports, MAX_REPORTS_PER_FRAME):
             self._settle_frame()
             for n, (function, payload) in enumerate(frame, 1):
@@ -668,7 +745,11 @@ class Lighting:
                 except HidppFailure:
                     self._commit_anyway(perkey)
                     raise
+            last = self._frame_end_at
             self.frame_end()
+            log.debug("per-key frame of %s committed, %s", counted(len(frame), "write"),
+                      "the first" if last == float("-inf")
+                      else f"{(self._frame_end_at - last) * 1000:.0f} ms after the last")
 
     def paint(self, colors: Mapping[int, int]) -> None:
         """Set individual zones to 0xrrggbb colors and commit the frame."""

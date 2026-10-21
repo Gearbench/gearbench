@@ -10,19 +10,18 @@ nothing unasked.
 
 from __future__ import annotations
 
-import configparser
 import errno
 import logging
 import os
 import re
-import stat
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from .config import both_ends, counted, escaped, number, whole, word_list, written
 from .hidpp import GONE_ERRNOS, HidrawNode, find_attached
+from .wording import counted, escaped, number, whole, word_list, written
 
 log = logging.getLogger("gearbench")
 
@@ -93,6 +92,10 @@ FREQ_RANGE = (80, 15000)
 WIDTH_RANGE = (0.1, 3.0)
 WIDTH_SCALE = 4096
 NAME_BYTES = (1, 49)
+#: How long a front end waits, in seconds, in place of send_command's 3 s, for a request
+#: that is tens of round trips to the base station, one at a time: a full read, an EQ
+#: write, a revert.
+SLOW_REQUEST_WAIT = 10.0
 LEVEL_RANGE = (0, 100)    # the sliders and the alert volume, in percent
 BALANCE_RANGE = (0, 255)  # 0 all Voice, 255 all Game
 #: The settings that take a whole number from a range, each with its range; auto shut-off
@@ -169,6 +172,17 @@ class EqPreset:
     gains: tuple[int, int, int, int, int]
     freqs: tuple[int, int, int, int, int]
     widths: tuple[float, float, float]
+
+    @classmethod
+    def of_bands(cls, name: str, gains: Sequence[int], bands: Sequence[Band]) -> EqPreset:
+        """The preset of `name`, a gain and a Band for each of BANDS, band 1 first, as
+        `bands` gives them back: each band's frequency, and the width of each but SHELVES."""
+        # The caller gives five gains and five bands, BANDS' count.
+        return cls(name, cast("tuple[int, int, int, int, int]", tuple(gains)),
+                   cast("tuple[int, int, int, int, int]", tuple(band.freq for band in bands)),
+                   cast("tuple[float, float, float]", tuple(
+                       band.width for number, band in zip(BANDS, bands, strict=True)
+                       if number not in SHELVES)))
 
     def bands(self) -> list[Band]:
         return [Band(self.freqs[band - 1], None if band in SHELVES else self.widths[band - 2])
@@ -619,126 +633,3 @@ def band_width(band: object, freq: object, width: object) -> int:
         raise ValueError(f"Band {band}'s width must be {low} to {high}, not {written(width)}.")
     # Truncated, as Command Center does: 1.7 is 6963.
     return int(width * WIDTH_SCALE)
-
-
-# How Qt 5's QSettings writes a string: quoted when it holds , ; = or an edge
-# space, \" and \\ escaped, non-ASCII as UTF-16 \xNNNN units, a leading @
-# doubled.
-_QT_ESCAPE = re.compile(r'\\(?:x([0-9A-Fa-f]+)|([0-7]+)|(.)|\Z)|"([ \t]*)', re.DOTALL)
-_QT_CHARS = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
-             '"': '"', "?": "?", "'": "'", "\\": "\\"}
-
-
-def _qt_string(raw: str) -> str:
-    """A string value as QSettings reads it back."""
-    quoted = False
-
-    def one(match: re.Match[str]) -> str:
-        nonlocal quoted
-        hexa, octal, char, spaces = match.groups()
-        if hexa is not None:
-            return chr(int(hexa, 16) & 0xFFFF)
-        if octal is not None:
-            return chr(int(octal, 8) & 0xFFFF)
-        if char is not None:
-            return _QT_CHARS.get(char, "")  # Qt drops an unknown escape
-        if spaces is None:  # a backslash that ends the value, which Qt drops
-            return ""
-        # A quote, dropped; Qt skips the spaces and tabs after a closing one.
-        quoted = not quoted
-        return spaces if quoted else ""
-
-    text = _QT_ESCAPE.sub(one, raw)
-    text = text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
-    return text[1:] if text.startswith("@@") else text
-
-
-_INI_PROBLEMS = (
-    (configparser.DuplicateOptionError, "repeats a key"),
-    (configparser.DuplicateSectionError, "repeats a section"),
-    (configparser.MissingSectionHeaderError, "comes before any [section]"),
-)
-
-
-def read_astroeq(text: str) -> EqPreset:
-    """Parse an .astroeq file: Qt INI, a BOM and CRLF are fine. Raises
-    ValueError naming the line that is not INI, or the key that is missing
-    or out of range."""
-    parser = configparser.ConfigParser(interpolation=None, delimiters=("=",))
-    # Qt's keys are case-sensitive. The ignore: typeshed has a method here, and
-    # configparser's documentation assigns to it.
-    parser.optionxform = str  # type: ignore[method-assign, assignment]
-    try:
-        parser.read_string(text.removeprefix("\ufeff"))
-    except configparser.Error as exc:
-        # configparser's own text names the source '<string>' and runs over several lines.
-        errors = getattr(exc, "errors", None)
-        line = getattr(exc, "lineno", None) or (errors[0][0] if errors else "?")
-        what = next((w for kind, w in _INI_PROBLEMS if isinstance(exc, kind)), "is not key=value")
-        raise ValueError(f"Not an .astroeq file: line {line} {what}.") from None
-
-    def value(section: str, key: str) -> str:
-        if not parser.has_option(section, key):
-            raise ValueError(f"The file has no {key} in [{section}].")
-        return parser.get(section, key).strip()
-
-    def number[N: (int, float)](key: str, kind: type[N], low: float, high: float) -> N:
-        raw = value("Eq_Bands", key)
-        try:
-            got = kind(raw)
-        except ValueError:
-            raise ValueError(f"{key} is {raw!r}, "
-                             f"not a {'whole ' if kind is int else ''}number.") from None
-        if not low <= got <= high:
-            raise ValueError(f"{key} is {raw}; it must be {low} to {high}.")
-        return got
-
-    name = _qt_string(value("General", "Name"))
-    preset_name(name, "Name")
-    # EqPreset's lengths: a gain and a frequency for each of BANDS, and a width for each that
-    # is not in SHELVES.
-    return EqPreset(
-        name=name,
-        gains=cast("tuple[int, int, int, int, int]",
-                   tuple(number(f"Eq_Band_{b}", int, *GAIN_RANGE) for b in BANDS)),
-        freqs=cast("tuple[int, int, int, int, int]",
-                   tuple(number(f"Eq_Freq_Band_{b}", int, *FREQ_RANGE) for b in BANDS)),
-        widths=cast("tuple[float, float, float]",
-                    tuple(number(f"Eq_Bandwidth_{b}", float, *WIDTH_RANGE)
-                          for b in BANDS if b not in SHELVES)),
-    )
-
-
-#: The largest .astroeq file read. Command Center's own are under 300 bytes.
-#: configparser's work on a line without "=" grows with the square of a run of white
-#: space inside it, and on a run of bad lines with the square of their count.
-ASTROEQ_MAX = 16 << 10
-
-
-def load_astroeq(path: str | os.PathLike[str]) -> EqPreset:
-    """`read_astroeq` on a file. Raises OSError when it cannot be opened, and
-    ValueError for anything but a regular file of at most ASTROEQ_MAX bytes:
-    a FIFO would block the read, and /dev/zero never ends. O_NOCTTY, since a
-    reader that leads its session with no terminal, as a service does, would
-    take a terminal no session holds as its own."""
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ValueError("Not an .astroeq file: it is not a regular file.")
-        with open(fd, "rb", closefd=False) as file:
-            data = file.read(ASTROEQ_MAX + 1)
-    finally:
-        os.close(fd)
-    if len(data) > ASTROEQ_MAX:
-        raise ValueError(f"Not an .astroeq file: it is larger than {ASTROEQ_MAX >> 10} KiB.")
-    try:
-        decoded = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"Not an .astroeq file: it is not UTF-8 text "
-                         f"({exc.reason} at byte {exc.start}).") from None
-    try:
-        return read_astroeq(decoded)
-    except ValueError as exc:
-        # The message repeats the refused name or value, which can be most of
-        # the file; the window's dialog or a stderr line gets both ends.
-        raise ValueError(both_ends(str(exc), 200)) from None

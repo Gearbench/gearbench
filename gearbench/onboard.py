@@ -28,8 +28,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import config_dir, counted, escaped, reason, replace_file, sync_directory
+from .config import RATE_CHOICES, REPORT_RATES, backup_dir, replace_synced
 from .hidpp import Feature, Hidpp
+from .wording import counted, escaped, reason
 
 log = logging.getLogger("gearbench")
 
@@ -77,11 +78,9 @@ NAME_UNITS = 24
 #: (set_aside, from Mouse._set_aside_unchanged); newest_backup never picks one.
 UNCHANGED = ".unchanged"
 
-#: Report rate byte: the period in milliseconds.
-RATE_BYTES = {1: 1000, 2: 500, 4: 250, 8: 125}
+#: Report rate byte: the period in milliseconds, for each of config's REPORT_RATES.
+RATE_BYTES = {1000 // hz: hz for hz in REPORT_RATES}
 RATE_TO_BYTE = {hz: byte for byte, hz in RATE_BYTES.items()}
-#: The rates the byte can hold, the fastest first, as a message lists them.
-REPORT_RATES = tuple(sorted(RATE_TO_BYTE, reverse=True))
 
 # Button entry forms, all verified by writing them to the mouse on Windows.
 ENTRY_MACRO = 0x00
@@ -167,6 +166,35 @@ def entry_mouse_button(entry: bytes) -> int | None:
     return mask.bit_length()
 
 
+#: What the first five mouse buttons do, as a mouse's own entry sends them, in words.
+MOUSE_BUTTON_JOBS = {1: "left click", 2: "right click", 3: "middle click", 4: "back",
+                     5: "forward"}
+
+
+def entry_job(entry: bytes) -> str:
+    """What an entry has the mouse do, in a reader's words, for a row that shows the onboard
+    profile's buttons: back for mouse button 4, a function by its name alone, a keystroke for
+    any key, a media key for any consumer control, a macro for any macro and several mouse
+    buttons for a mask of more than one; describe_entry's words for anything else."""
+    if entry == NOOP:
+        return "nothing"
+    button = entry_mouse_button(entry)
+    if button in MOUSE_BUTTON_JOBS:
+        return MOUSE_BUTTON_JOBS[button]
+    if entry[0] == ENTRY_FUNCTION and entry[1] in FUNCTION_NAMES:
+        return FUNCTION_NAMES[entry[1]]
+    if entry[0] == ENTRY_HID and entry[1] == HID_KEYSTROKE:
+        return "a keystroke"
+    if entry[0] == ENTRY_HID and entry[1] == HID_CONSUMER:
+        return "a media key"
+    if entry[0] == ENTRY_MACRO:
+        return "a macro"
+    mask = int.from_bytes(entry[2:4], "big")
+    if entry[0] == ENTRY_HID and entry[1] == HID_MOUSE and mask & (mask - 1):
+        return "several mouse buttons"
+    return describe_entry(entry)
+
+
 def describe_entry(entry: bytes) -> str:
     if entry == UNUSED:
         return "unused"
@@ -240,7 +268,7 @@ class ProfileImage:
     @report_rate.setter
     def report_rate(self, hz: int) -> None:
         if hz not in RATE_TO_BYTE:
-            raise OnboardError(f"{hz} Hz is not one of {', '.join(map(str, REPORT_RATES))} Hz")
+            raise OnboardError(f"{hz} Hz is not one of {RATE_CHOICES} Hz")
         self.data[OFF_RATE] = RATE_TO_BYTE[hz]
 
     # -- DPI -----------------------------------------------------------------
@@ -379,10 +407,6 @@ class OnboardInfo:
             profile_count=reply[3], rom_profile_count=reply[4], button_count=reply[5],
             sector_count=reply[6], sector_size=int.from_bytes(reply[7:9], "big"),
         )
-
-
-def backup_dir() -> Path:
-    return config_dir() / "backup"
 
 
 class OnboardProfiles:
@@ -528,12 +552,11 @@ class OnboardProfiles:
 
     # -- backups -------------------------------------------------------------
 
-    def backup(self, device: str, sector: int, image: bytes,
-               directory: Path | None = None) -> Path:
+    @staticmethod
+    def backup(device: str, sector: int, image: bytes, directory: Path | None = None) -> Path:
         """Write one sector image to a new file, never over an existing one: `.bin` when its CRC
         verifies, else `.bad-read`, kept as evidence where no restore picks it."""
         target_dir = directory or backup_dir()
-        target_dir.mkdir(parents=True, exist_ok=True)
         suffix = ".bin" if sector_crc_ok(image) else ".bad-read"
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         stem = f"{device}-sector-{sector:04X}-{stamp}"
@@ -546,8 +569,7 @@ class OnboardProfiles:
         # On disk before the flash write it protects. Written straight to its final name, a full
         # disk would leave a truncated .bin and a power loss a zero-length one, and newest_backup
         # picks a .bin by name.
-        replace_file(path, image, ".backup-", ".tmp")
-        sync_directory(target_dir)
+        replace_synced(path, image, ".backup-", ".tmp")
         return path
 
     def backup_all(self, device: str, directory: Path | None = None) -> dict[int, bytes]:

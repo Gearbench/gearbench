@@ -1,37 +1,41 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "The Binding of Isaac: Rebirth",
   "processes": [
     "isaac.x64",
     "isaac-ng.exe"
   ],
-  "mode": "perkey",
-  "effect": "static",
-  "base": "#ff0000",
-  "background": "#121212",
-  "keys": {
-    "A": "#ff0000",
-    "D": "#ff0000",
-    "DOWN": "#8a00ff",
-    "E": "#8a00ff",
-    "ESC": "#0050ff",
-    "F": "#ff00b0",
-    "G1": "#ffe000",
-    "G2": "#ffe000",
-    "G3": "#ffe000",
-    "G4": "#ffe000",
-    "G5": "#ffe000",
-    "LEFT": "#8a00ff",
-    "LEFT CTRL": "#8a00ff",
-    "M": "#ff00b0",
-    "P": "#0050ff",
-    "Q": "#8a00ff",
-    "R": "#ff00b0",
-    "RIGHT": "#8a00ff",
-    "S": "#ff0000",
-    "SPACE": "#8a00ff",
-    "TAB": "#0050ff",
-    "UP": "#8a00ff",
-    "W": "#ff0000"
+  "lighting": {
+    "c33e": {
+      "mode": "perkey",
+      "effect": "static",
+      "base": "#ff0000",
+      "background": "#121212",
+      "keys": {
+        "A": "#ff0000",
+        "D": "#ff0000",
+        "DOWN": "#8a00ff",
+        "E": "#8a00ff",
+        "ESC": "#0050ff",
+        "F": "#ff00b0",
+        "G1": "#ffe000",
+        "G2": "#ffe000",
+        "G3": "#ffe000",
+        "G4": "#ffe000",
+        "G5": "#ffe000",
+        "LEFT": "#8a00ff",
+        "LEFT CTRL": "#8a00ff",
+        "M": "#ff00b0",
+        "P": "#0050ff",
+        "Q": "#8a00ff",
+        "R": "#ff00b0",
+        "RIGHT": "#8a00ff",
+        "S": "#ff0000",
+        "SPACE": "#8a00ff",
+        "TAB": "#0050ff",
+        "UP": "#8a00ff",
+        "W": "#ff0000"
+      }
+    }
   }
 }

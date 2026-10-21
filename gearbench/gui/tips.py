@@ -24,7 +24,9 @@ def explain_choices(dropdown: Gtk.DropDown | Adw.ComboRow, tips: Sequence[str]) 
     entry's accessible description.
 
     `dropdown` is a `Gtk.DropDown` or an `Adw.ComboRow` on a `Gtk.StringList`.
-    `tips` holds one tooltip for each entry, in the model's order.
+    `tips` holds one tooltip for each entry, in the model's order. It is read as each entry
+    is drawn, not copied: a caller that gives `dropdown` a new model changes `tips` in place
+    to match.
     """
     factory = Gtk.SignalListItemFactory()
     #: The bound entries and their checks. GTK keeps them bound between openings

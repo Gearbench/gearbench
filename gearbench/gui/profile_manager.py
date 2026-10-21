@@ -13,11 +13,20 @@ from typing import TYPE_CHECKING
 from gi.repository import Adw, Gtk
 
 from ..apps import LAUNCHERS, launcher_warning, wanted_forms
-from ..config import unread_reason, word_list
+from ..config import unread_reason
 from ..profiles import GameProfile
+from ..wording import word_list
 from . import pack_dialog
 from .import_dialog import FILTER_HINT, NO_MATCH, Picker, search_text
-from .style import LeftOutRows, confirm, holds_focus, plain_row, weakly
+from .style import (
+    LIST_DIALOG_HEIGHT,
+    LIST_DIALOG_WIDTH,
+    LeftOutRows,
+    confirm,
+    holds_focus,
+    plain_row,
+    weakly,
+)
 from .worker import DaemonWorker, Reply, unreachable
 
 if TYPE_CHECKING:                       # pragma: no cover
@@ -109,8 +118,8 @@ class ProfileManager:
         self.nav = Adw.NavigationView()
         self.nav.add(Adw.NavigationPage(child=view, title=TITLE, tag="profiles"))
         self.toasts = Adw.ToastOverlay(child=self.nav)
-        self.dialog = Adw.Dialog(title=TITLE, content_width=560, content_height=640,
-                                 child=self.toasts)
+        self.dialog = Adw.Dialog(title=TITLE, content_width=LIST_DIALOG_WIDTH,
+                                 content_height=LIST_DIALOG_HEIGHT, child=self.toasts)
         self.refresh()
 
     def _is_open(self) -> bool:

@@ -1,8 +1,7 @@
 """The keyboard's subcommands: the M profile, the brightness, the color, its preview and
 the effect, `bind` for a G key, `keys`, which lists the names a binding may use, and
-`probe`, the one subcommand whose handler opens a device itself (`daemon` runs the daemon,
-which opens them): it reads the keyboard's node, writes nothing, and refuses beside a
-running daemon unless forced.
+`probe`, whose handler opens the keyboard's node itself: it writes nothing, and refuses
+beside a running daemon unless forced.
 """
 
 from __future__ import annotations
@@ -13,12 +12,13 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..config import G_KEYS, PROFILE_IDS, ConfigError, counted, reason, validate_binding, word_list
+from ..config import BINDABLE_KEYS, F_ROW_KEYS, G_KEYS, PROFILE_IDS, ConfigError, validate_binding
 from ..daemon import BUSY, DOWN, UNKNOWN, failure, socket_path, use_invoking_users_runtime_dir
 from ..hidpp import NO_RULE, HidppError, HidppFailure, open_device
 from ..keyboard import (
+    G915_TKL,
+    MODEL_OF as KEYBOARDS,
     MODELS as KEYBOARD_MODELS,
-    WITNESS as KEYBOARD_WITNESS,
     capabilities as keyboard_capabilities,
     find_attached_keyboard,
     name as keyboard_name,
@@ -27,15 +27,17 @@ from ..lighting import (
     ANIMATIONS,
     F_RGB,
     KEYBOARD_EFFECTS,
+    SPEEDS,
     SW_STATES,
     WAVE_DIRECTIONS,
     Lighting,
     LightingError,
-    speed_range,
 )
 from ..onboard import F_ONBOARD, MODE_NAMES, read_mode
+from ..report import untested, untested_note
 from ..uinput import KEY_NAMES, MODIFIERS
-from .output import CLEAR_WORDS, Subcommands, print_json, print_reply, send
+from ..wording import counted, reason, word_list
+from .output import CLEAR_WORDS, PROBE_WAIT, Subcommands, print_json, print_reply, send
 
 if TYPE_CHECKING:
     from ..hidpp import Hidpp
@@ -55,6 +57,8 @@ def _print_probe(found: dict) -> None:
     """Probe's dump as text; --json prints `found` whole."""
     print(f"device:       {found['device']}  {found['name']} "
           f"({found['product']}, device index {found['device_index']})")
+    if found["untested"]:
+        print(f"              {untested_note(found['name'])}")
     print(f"capabilities: {', '.join(found['capabilities']) or 'none this build drives'}")
     if found["onboard_mode"] is not None:
         print(f"onboard mode: {found['onboard_mode']} "
@@ -82,7 +86,7 @@ def _daemon_beside() -> int | None:
     # does BUSY: a daemon is slowest when busy on the device. UNKNOWN says nothing either
     # way.
     try:
-        send({"command": "status"}, timeout=0.5)
+        send({"command": "status"}, timeout=PROBE_WAIT)
     except (OSError, json.JSONDecodeError) as exc:
         kind = failure(exc)
         if kind == DOWN:
@@ -111,7 +115,8 @@ def _open_keyboard() -> tuple[Path, int, Hidpp, int] | None:
         return None
     path, product, derived = found_device
     try:
-        opened = open_device(path, KEYBOARD_WITNESS, prefer=derived)
+        opened = open_device(path, KEYBOARDS[product].probe, prefer=derived,
+                             long_only=KEYBOARDS[product].long_only)
     except PermissionError:
         print(f"error: cannot open {path}: {NO_RULE}", file=sys.stderr)
         return None
@@ -137,8 +142,10 @@ def _read_keyboard(dev: Hidpp, path: Path, product: int, index: int) -> dict:
         "device": str(path),
         "name": keyboard_name(product),
         "product": f"{product:04x}",
+        # A model not yet run on, whose note asks for a device report (report.untested).
+        "untested": untested(product),
         "device_index": f"0x{index:02x}",
-        "capabilities": keyboard_capabilities(dev),
+        "capabilities": keyboard_capabilities(dev, KEYBOARDS[product]),
         # A keyboard without onboard profiles has no mode, and None names nothing:
         # dict.get takes a None key, and typeshed's does not.
         "onboard_mode": MODE_NAMES.get(mode, mode),  # type: ignore[arg-type]
@@ -250,7 +257,7 @@ def speed_ranges() -> str:
     1000 to 20000, ripple 100 to 1000"."""
     groups: dict[tuple[int, int], list[str]] = {}
     for name in ANIMATIONS:
-        groups.setdefault(speed_range(name), []).append(name)
+        groups.setdefault(SPEEDS[name], []).append(name)
     return ", ".join(f"{word_list(names, 'and')} {fastest} to {slowest}"
                      for (fastest, slowest), names in groups.items())
 
@@ -287,16 +294,21 @@ def add_lighting_and_bind(sub: Subcommands) -> None:
 
     e = sub.add("effect", help="set the lighting effect, saved to the loaded game profile or "
                                "else the M profile")
-    e.add_argument("name", choices=sorted(KEYBOARD_EFFECTS))
+    e.add_argument("name", choices=sorted(KEYBOARD_EFFECTS),
+                   help="one the attached keyboard has, which `status` lists on its effects line")
     e.add_argument("--speed", type=int, metavar="MS",
                    help=f"how long one cycle takes, in milliseconds; lower is faster: "
                         f"{speed_ranges()}")
     e.add_argument("--direction", choices=list(WAVE_DIRECTIONS),
-                   help="wave only; horizontal until one is chosen")
+                   help="wave only, one the keyboard takes, which a refusal names; horizontal "
+                        "until one is chosen")
     e.set_defaults(func=cmd_effect)
 
     bind = sub.add("bind", help="bind a G key, e.g. `bind G1 ctrl+f15`")
-    bind.add_argument("key", type=str.upper, choices=G_KEYS)
+    bind.add_argument("key", type=str.upper, choices=BINDABLE_KEYS, metavar="KEY",
+                      help=f"{G_KEYS[0]} to {G_KEYS[-1]}, or {F_ROW_KEYS[0]} to "
+                           f"{F_ROW_KEYS[-1]} on the {G915_TKL.name}, where an unbound one "
+                           "types its own key")
     bind.add_argument("binding",
                       help="a key spec like ctrl+shift+f5, a modifier alone like shift, "
                            "keys held together like a+b, 'macro:<name>' to run a macro, "

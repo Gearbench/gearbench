@@ -7,10 +7,11 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from ..config import escaped, file_stamp
+from ..config import PROFILE_IDS, file_stamp, profile_label
 from ..desktop import APP_NAME
-from ..keyboard import CABLED_IDS as KEYBOARD_CABLED, name as keyboard_name
+from ..keyboard import CABLED_IDS as KEYBOARD_CABLED, m_profiles_in_menu, name as keyboard_name
 from ..tray import Battery, Model, Snapshot, Stages, TrayMenu, build
+from ..wording import escaped
 from .shared import on_or_off, switch_refusal
 
 if TYPE_CHECKING:
@@ -77,13 +78,13 @@ class Tray:
         reading = kb.keyboard_battery()
         # Asked after the read: one that went unanswered marks it, and one that found the
         # keyboard gone, or on its cable, dropped it.
-        if kb.dev is not None:
+        if kb.dev is not None and "battery" in kb.keyboard_able:
             batteries.append(Battery.of(
                 "keyboard", keyboard_name(kb.keyboard_product), reading,
                 answering=kb.keyboard_answering(),
                 cabled=kb.keyboard_product in KEYBOARD_CABLED))
         batteries += [Battery.of(f"{m.product:04x}", m.name, m.battery, answering=not m.silent)
-                      for m in mice.attached]
+                      for m in mice.attached if "battery" in m.mouse.capabilities]
         headset = self.d.headset
         # Only while linked: the base's 7C goes stale while the headset is off.
         if headset.linked and headset.battery is not None:
@@ -96,6 +97,7 @@ class Tray:
             if in_force:
                 stages = Stages(f"{current.product:04x}", tuple(in_force),
                                 mice.dpi.known_dpi(current))
+        pickable = kb.dev is not None and m_profiles_in_menu(kb.keyboard_able)
         overlay = self.d.games.overlay
         return Snapshot(
             batteries=tuple(batteries),
@@ -103,6 +105,9 @@ class Tray:
             stages=stages,
             profiles=self.profile_names(),
             loaded=overlay.name if overlay is not None else None,
+            m_profiles=(tuple((number, profile_label(number, config.profiles[number].name))
+                              for number in PROFILE_IDS) if pickable else ()),
+            active=config.active,
             keep_loaded=self.d.games.keep_loaded,
             lock_lights=config.lights_off_when_locked,
             dpi_notices=config.dpi_notices,

@@ -155,8 +155,8 @@ def banner_text(source: str | None, info: dict | None, refused: str | None,
 
 
 class ExtensionBanner:
-    """The banner, up while game profiles cannot follow every window for want of the
-    extension and the Shell has it, with Turn on while it is off.
+    """The banner, up while game profiles cannot follow every window because the extension
+    is installed and not running, with Turn on while it is off.
 
     `connect` makes the Shell, given the call to make when its state changes, or gives
     None where no session bus is, which keeps the banner down.

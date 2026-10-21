@@ -1,21 +1,26 @@
 """Command line for Gearbench.
 
 Most commands go through the daemon's control socket: the daemon holds the 0x8071
-claim, and a second process writing lighting would fight it. `probe`, `keys`,
-`config`, `gui`, `daemon`, `headset-spatial`, and `import-ghub` and `import-pack`
-with `--list` or `--dry-run` need no daemon. `probe` is read-only and reads the
-keyboard directly; `headset-spatial` runs systemctl, pw-dump and pw-cli in this
-process, so the daemon's sandbox never has to allow them.
+claim, and a second process writing lighting would fight it. `probe`, `report`, `keys`,
+`config`, `gui`, `daemon`, `headset-spatial`, `g432-eq`, `g432-noise`,
+`headset-import --library`, and `import-ghub` and `import-pack` with `--list` or
+`--dry-run` need no daemon, and `headset-library` needs it only to read or write a slot.
+`probe` is read-only and reads the keyboard directly; `report` is read-only too, and sends
+nothing to a node the daemon holds, to one of a model this build drives while a daemon runs
+or may, or to one on a held node's USB device; `headset-spatial` runs systemctl, pw-dump and
+pw-cli in this process, so the daemon's sandbox never has to allow them.
 
 This module has `build_parser` and `main`. A group of subcommands is a module with its
 handlers and the functions that add its subcommands to the parser:
 
 - `output`: what the groups share: the request to the daemon, the printing of a reply,
   and `Subcommands`, which each group adds its own to.
-- `headset`: the headset, and `headset-spatial`.
+- `headset`: the A50, and `headset-spatial`.
+- `g432`: the Logitech G432.
 - `keyboard`: the M profile, the lighting, `bind`, `keys` and `probe`.
 - `library`: the game profiles, the macros, the running programs and the two imports.
 - `mouse`: the mouse.
+- `report`: `report`, the device report.
 - `service`: `daemon` and `gui`.
 - `status`: `status`, `save`, `reload`, the lock and tray switches, `idle` and `config`.
 """
@@ -31,9 +36,9 @@ import traceback
 from typing import NoReturn, cast
 
 from .. import __version__
-from ..config import escaped, reason
 from ..daemon import BUSY, DOWN, UNREAD, failure, socket_path
-from . import headset, keyboard, library, mouse, output, service, status
+from ..wording import escaped, reason
+from . import g432, headset, keyboard, library, mouse, output, report, service, status
 from .output import Subcommands
 
 
@@ -50,9 +55,9 @@ class _Parser(argparse.ArgumentParser):
 def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(
         prog="gearbench-ctl",
-        description="Control the Logitech G915 keyboard, G502 X PLUS and G305 mice and "
-                    "Astro A50 Gen 4 headset: G key remapping, lighting, DPI, macros and "
-                    "headset settings.",
+        description="Control Logitech G keyboards and mice, the Logitech G432 headset and "
+                    "the Astro A50 Gen 4 headset: G key remapping, lighting, DPI, macros "
+                    "and headset settings.",
         epilog="The keyboard's onboard profile is never written. The mouse-* commands that "
                "say so rewrite onboard profile 1, backed up first to "
                "~/.config/gearbench/backup/. Only headset-save writes the base station's "
@@ -71,11 +76,13 @@ def build_parser() -> argparse.ArgumentParser:
     library.add_lists_and_macros(sub)
     mouse.add_mouse(sub)
     headset.add_headset(sub)
+    g432.add_g432(sub)
     status.add_switches_and_idle(sub)
     library.add_game_profiles_and_imports(sub)
     status.add_config(sub)
     service.add_gui(sub)
     keyboard.add_probe_and_keys(sub)
+    report.add_report(sub)
     return parser
 
 

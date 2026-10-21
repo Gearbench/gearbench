@@ -1,63 +1,26 @@
 """The writes that put the lighting on the keyboard: the lit board (the brightness, then the
 layer in force), Disabled on one cluster, a zone effect, a flat color with its per-key fill
-and overrides, and the dark that keeps the claim. Each write is given the `Lighting` it writes
-to, by a caller that has checked there is one.
-
-And what the controller and its command handlers both read: how long the M and MR LEDs wait
-after an effect write, and the words for a change the keyboard does not show or cannot take."""
+and overrides, cut to the keyboard's own keys where its model says so, and the dark that keeps
+the claim. Each write is given the `Lighting` it writes to, by a caller that has checked there
+is one."""
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
-from ...config import escaped
-from ...keycodes import ZONES
-from ...lighting import NAME_TO_EFFECT, STATIC_EFFECTS, Cluster, Lighting, LightingError, fits
-from ..shared import scaled, unreachable
+from ...keyboard import MODEL_OF as KEYBOARDS, name as keyboard_name
+from ...keycodes import LOGO, ZONE_NAMES, ZONES
+from ...lighting import EFFECT_IDS, STATIC_EFFECTS, Cluster, Lighting, LightingError, fits
+from ...wording import escaped, word_list
+from ..shared import scaled
 
 if TYPE_CHECKING:
     from .. import Daemon
     from . import Keyboard
 
 log = logging.getLogger("gearbench")
-
-# Delay from an apply's last lighting write to the M/MR LED writes: the firmware acknowledges an
-# effect write before applying it, and applying it clears the indicator LEDs, so an LED write
-# inside that window is lost. A loop deadline (Keyboard.write_due_leds), not a sleep.
-LED_SETTLE = 0.2
-
-# Why the keyboard does not show what was applied: status's `last_apply_error`, a reply's `note`.
-KEYBOARD_AWAY = "the keyboard is away; the change is saved and shows when it is back"
-
-KEYBOARD_SILENT = ("the keyboard is not answering; the change is saved and shows "
-                   "when it is back")
-
-#: The same, from a failed write: its receiver cannot reach the keyboard, or nothing answered.
-KEYBOARD_OFF = ("the keyboard is switched off or out of range; the change is saved "
-                "and shows when it is back")
-
-KEYBOARD_NO_REPLY = ("the keyboard did not answer; the change is saved and shows "
-                     "when it is back")
-
-#: A failed write on the receiver after which the cable look found the keyboard's cable and
-#: dropped the receiver route: the cable's connect applies what is saved.
-KEYBOARD_ON_CABLE = ("the keyboard moved to its cable; the change is saved and shows once "
-                     "it is set up there")
-
-#: What is said of a keyboard attached without lighting (`Keyboard.lighting` None): the refusal
-#: and the start of the notes saved with it.
-NO_LIGHTING = "Gearbench cannot drive this keyboard's lighting"
-
-
-def unanswered_note(exc: BaseException, moved: bool) -> str:
-    """The note for a write that went unanswered (`unanswered`), after the cable look it starts:
-    `moved` when that look found the cable and dropped the receiver route."""
-    if moved:
-        return KEYBOARD_ON_CABLE
-    return KEYBOARD_OFF if unreachable(exc) else KEYBOARD_NO_REPLY
-
 
 class Paint:
     """What puts the lighting in force on the keyboard."""
@@ -68,6 +31,10 @@ class Paint:
         #: (profile, effect, refusal) of each saved parameter write_zone_effect has said at
         #: warning.
         self._params_said: set[tuple[int, str, str]] = set()
+        #: The models board_zones has said at info that it cut a paint for.
+        self._cut_said: set[str] = set()
+        #: (model, effect) of each saved effect say_missing_effect has said at info.
+        self._effect_said: set[tuple[str, str]] = set()
 
     def shows_static(self, effect_name: str) -> bool:
         """Whether this effect renders as a flat color plus per-key overrides.
@@ -77,30 +44,34 @@ class Paint:
         no cluster has.
         """
         lighting = self.keyboard.lighting
-        known = (effect_name in NAME_TO_EFFECT if lighting is None
+        known = (effect_name in EFFECT_IDS if lighting is None
                  else any(c.has_effect(effect_name) for c in lighting.clusters))
-        return NAME_TO_EFFECT.get(effect_name) in STATIC_EFFECTS or not known
+        return effect_name in STATIC_EFFECTS or not known
 
     def write_lit(self, lighting: Lighting, effect_name: str, color: int,
                   per_key: Mapping[str, int], extra_params: Mapping[str, int],
                   shown: int, dim: bool) -> None:
         """The board with its lights up, at full or dimmed with `dim`: the brightness, then the
         layer in force, which is `effect_name`, `color`, `per_key` and `extra_params`
-        (Games.active_lighting), and `shown`, the color around the per-key overrides
+        (PerKeyboard.active_lighting), and `shown`, the color around the per-key overrides
         (Keyboard.shown_color).
 
-        A static color goes through write_static. An animation is Disabled then the effect, so
-        the per-key buffer does not show through. A failed write goes to the caller.
+        A static color goes through write_static, and so does an effect no cluster reports,
+        which the journal says (say_missing_effect). An animation is Disabled then the effect,
+        so the per-key buffer does not show through. A failed write goes to the caller.
         """
+        brightness, own = self.d.per_keyboard.brightness_in_force()
         if lighting.brightness_levels:
-            written = lighting.set_brightness(self.d.config.brightness)
-            if written != self.d.config.brightness:
+            written = lighting.set_brightness(brightness)
+            # A copy another model's level gave it is sent, never saved: attaching saves no copy.
+            if written != brightness and own:
                 # Set while the keyboard was away, when its levels were not known.
-                log.info("brightness %d is %d on this keyboard; saving that",
-                         self.d.config.brightness, written)
-                self.d.config.brightness = written
-                self.d.persist()
+                log.info("brightness %d is %d on this keyboard; saving that", brightness,
+                         written)
+                self.d.per_keyboard.keep_brightness(written)
         known = any(c.has_effect(effect_name) for c in lighting.clusters)
+        if not known:
+            self.say_missing_effect(effect_name)
         static = self.shows_static(effect_name)
         overrides = (
             {ZONES[name]: value for name, value in per_key.items() if name in ZONES}
@@ -109,7 +80,7 @@ class Paint:
         log.debug(
             "apply_profile: overlay=%s effect=%s color=#%06x overrides=%d brightness=%d%s",
             escaped(self.d.games.overlay.name) if self.d.games.overlay else None,
-            escaped(effect_name), color, len(overrides), self.d.config.brightness,
+            escaped(effect_name), color, len(overrides), brightness,
             ", dimmed" if dim else "",
         )
         if static:
@@ -122,6 +93,17 @@ class Paint:
                                        dim=dim)
             if per_key:
                 log.info("per-key colors are not shown under the %s effect", effect_name)
+
+    def say_missing_effect(self, effect_name: str) -> None:
+        """Say that the attached keyboard shows static in place of `effect_name`, an effect the
+        layer in force saved and none of its clusters reports, such as wave saved on a G915 and
+        shown on a G515: at info the first time for each model and effect, at debug after."""
+        model = keyboard_name(self.keyboard.keyboard_product)
+        said = (model, effect_name)
+        log.log(logging.DEBUG if said in self._effect_said else logging.INFO,
+                "the %s has no %s effect; it shows static in its place", model,
+                escaped(effect_name))
+        self._effect_said.add(said)
 
     def darken(self, lighting: Lighting, mouse: bool = True) -> None:
         """Turn every cluster off and keep the claim, and with `mouse` turn a synced mouse black.
@@ -164,7 +146,7 @@ class Paint:
             # shows static would animate dimmed.
             key: Literal["color", "intensity"] | None = (
                 "color" if "color" in params else "intensity" if "intensity" in params else None)
-            if dim and key is not None and fits(NAME_TO_EFFECT[effect_name], key, params[key]):
+            if dim and key is not None and fits(cluster.effect(effect_name).id, key, params[key]):
                 params[key] = (scaled(params[key], 50) if key == "color"
                                else params[key] // 2 or params[key])
             lighting.set_effect(cluster.index, effect_name, **params)
@@ -185,11 +167,42 @@ class Paint:
                     log.warning("profile %d's lighting params do not fit %s (%s); the keyboard "
                                 "shows static", self.d.config.active, effect_name, exc)
 
+    def board_zones(self, zones: Mapping[int, int]) -> Mapping[int, int]:
+        """`zones` without the ones the attached keyboard lacks, where its model is cut to its
+        board (KeyboardModel.cut_to_board), so that a write naming one, which its firmware
+        might refuse whole, is never sent. Said at info the first time for each model, and at
+        debug after that."""
+        # Set by connect before it finds the lighting each caller holds. Nothing checks the cast.
+        model = KEYBOARDS[cast("int", self.keyboard.keyboard_product)]
+        if not model.cut_to_board:
+            return zones
+        cut = sorted(zone for zone in zones if zone not in model.board.zones)
+        if not cut:
+            return zones
+        names = word_list([ZONE_NAMES.get(zone, f"zone {zone}") for zone in cut])
+        said = "the color for it is" if len(cut) == 1 else "the colors for them are"
+        log.log(logging.DEBUG if model.name in self._cut_said else logging.INFO,
+                "the %s has no %s to light; %s left out of what it is sent", model.name, names,
+                said)
+        self._cut_said.add(model.name)
+        return {zone: color for zone, color in zones.items() if zone in model.board.zones}
+
+    def preview_last(self) -> int:
+        """The last zone of a preview's fill: the logo, as on the G915, or, on a model cut to
+        its board that has no logo, its own highest zone below it. The G515 TKL refused a
+        range ending at the logo whole, invalid argument, and took one ending at 254
+        (measured once, 2026-10-18)."""
+        model = KEYBOARDS[cast("int", self.keyboard.keyboard_product)]
+        if not model.cut_to_board or LOGO in model.board.zones:
+            return LOGO
+        return max(zone for zone in model.board.zones if zone < LOGO)
+
     def write_static(self, lighting: Lighting, color: int, overrides: Mapping[int, int],
                      effect_name: str = "static", *, extra_params: Mapping[str, int],
                      dim: bool) -> None:
         """A flat color over the whole board, then the per-key overrides, every color halved
-        with `dim`. Shared by a static apply and `paint`, so the two cannot drift.
+        with `dim`. Shared by a static apply and `paint`, so the two cannot drift. The
+        overrides are cut to the keyboard's board first (board_zones).
 
         On a per-key board the zone effect alone does not render the keys in HOST mode, so the
         per-key fill over every key is what shows, and with overrides the clusters are Disabled
@@ -197,6 +210,7 @@ class Paint:
         content.
         """
         per_key = lighting.per_key
+        overrides = self.board_zones(overrides)
         for cluster in lighting.clusters:
             if overrides and per_key:
                 self.disable_cluster(lighting, cluster)

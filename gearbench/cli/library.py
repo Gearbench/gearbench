@@ -11,11 +11,12 @@ from pathlib import Path
 
 from .. import ghub, ghub_plan, import_plan, pack
 from ..apps import launcher_warning
-from ..config import MACRO_PREFIX, counted, escaped as _escaped
+from ..config import MACRO_PREFIX
 from ..ghub import MAX_DOCUMENT_BYTES
 from ..lighting import ANIMATIONS
 from ..macros import MAX_PLAY_DELAY, PLAY_DELAY, TOGGLE, macros_dir, repeat_summary
 from ..profiles import profiles_dir
+from ..wording import counted, escaped as _escaped
 from .output import Subcommands, print_json, print_reply, send
 
 #: import-ghub --all on a file whose profiles are all desktop defaults, which --all leaves out.
@@ -211,7 +212,7 @@ def cmd_import_ghub(args: argparse.Namespace) -> int:
         if not args.list:
             print("\nImport with --profile NAME (repeatable) or --all, which leaves out the "
                   "desktop default: its bindings replace those of your M1, M2 and M3, and "
-                  "their lighting if it has any. Each loads by hand unless "
+                  "the G915's lighting if it has any. Each loads by hand unless "
                   "--with-programs; one that replaces yours keeps your programs.",
                   file=sys.stderr)
         return 0
@@ -372,8 +373,8 @@ def add_game_profiles_and_imports(sub: Subcommands) -> None:
     ig.add_argument("--list", action="store_true", help="show what the file holds; write nothing")
     ig.add_argument("--profile", action="append", default=[], metavar="NAME",
                     help="import this profile, as --list names it; repeatable. The desktop "
-                         "default's bindings replace those of M1, M2 and M3, and their "
-                         "lighting if it has any")
+                         "default's bindings replace those of M1, M2 and M3, and the "
+                         "G915's lighting if it has any")
     ig.add_argument("--all", action="store_true",
                     help="import every game profile; not the desktop default")
     ig.add_argument("--dry-run", action="store_true",

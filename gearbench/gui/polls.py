@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from gi.repository import GLib
 
 if TYPE_CHECKING:                       # pragma: no cover
-    from gi.repository import Adw, GObject
+    from gi.repository import Adw, GObject, Gtk
 
     from .window import Window
 
@@ -61,9 +61,10 @@ class Polls:
         Mutter suspends it.
 
         A poll started again reads at once, and so does the window becoming active again, the
-        mouse or the headset asked if its tab shows, even with an unasked read still out; the
-        headset not while a save runs (HeadsetPage.poll). The first show or activation reads
-        nothing more.
+        mouse or the A50 asked if its tab shows, even with an unasked read still out; the
+        A50 not while a save runs (HeadsetPage.poll). The Spatial sound group and the G432's
+        page wait for the read they have out. The first show or activation reads nothing
+        more.
         """
         shown = self.win.get_mapped() and not self.win.is_suspended()
         active = shown and self.win.is_active()
@@ -87,6 +88,7 @@ class Polls:
                 and not self.win.dragging):
             self.win.headset.poll()
             self.win.spatial.tick()
+            self._g432_tick()
         elif headset or (back and "headset" in self._timers):
             self._headset_tick()
 
@@ -120,13 +122,21 @@ class Polls:
     def on_tab(self, _stack: Adw.ViewStack, _pspec: GObject.ParamSpec) -> None:
         """Read the mouse or the headset as its tab comes up: off it, the
         poll asks the daemon only for what it already holds. The Headset tab
-        asks as HeadsetPage.poll says; its Spatial sound group reads every
-        time."""
+        asks as HeadsetPage.poll says; the Spatial sound group, and the G432's page while one is
+        attached (_g432_tick), read unless a read of theirs is out."""
         if self.on_mouse_tab():
             self.win.mouse.refresh()
         elif self.on_headset_tab():
             self.win.headset.poll()
             self.win.spatial.refresh()
+            self._g432_tick()
+
+    def on_page(self, _stack: Gtk.Stack, _pspec: GObject.ParamSpec) -> None:
+        """On the Headset tab, read the Spatial sound group as the page that comes up shows
+        it, and the G432's page while one is attached, as on_tab does."""
+        if self.on_headset_tab():
+            self.win.spatial.refresh()
+            self._g432_tick()
 
     def _status_poll(self) -> bool:
         """The 3 s status poll, which leaves status to the macro banner's one-second watch
@@ -147,7 +157,20 @@ class Polls:
         # Only on its tab: every read runs systemctl and pw-dump.
         if self.on_headset_tab():
             self.win.spatial.tick()
+        self._g432_tick()
         return True
+
+    def _g432_tick(self) -> None:
+        """The G432's page while status says one is attached: on the tab with the page
+        showing, G432Page.tick, some of whose reads run systemctl and pw-dump; elsewhere only
+        the daemon's answer from what it holds, which sends the headset nothing."""
+        tab = self.win.headset_tab
+        if not tab.g432_attached:
+            return
+        if self.on_headset_tab() and tab.showing_g432:
+            self.win.g432.tick()
+        else:
+            self.win.g432.refresh()
 
     def take_away(self, status: dict) -> None:
         """Take `session_locked` and `screen_blanked`: the device polls stop while either

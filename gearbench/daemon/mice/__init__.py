@@ -24,7 +24,6 @@ from ...hidpp import (
     HidppError,
     HidppFailure,
 )
-from ...lighting import Lighting
 from ...mouse import (
     CABLED_IDS as MOUSE_CABLED,
     COOKIE_MODELS,
@@ -33,10 +32,10 @@ from ...mouse import (
     WHEEL_HIRES,
     Mouse,
     MouseError,
-    buttons_enabled,
-    buttons_fallback,
+    SwitchRefused,
     find_attached_mice,
     host_why,
+    other_profile_words,
     profile_words,
     runs_another_profile,
     stuck_in_host,
@@ -48,6 +47,7 @@ from ..shared import (
     MOUSE_PROBE,
     MOUSE_SILENT_RECHECK,
     REAPPLY_INTERVAL,
+    failure_reason,
     name_text,
     node_denied,
     on_or_off,
@@ -180,10 +180,10 @@ class Mice:
         whose mouse does not answer is kept open (keep_waiting) and used again here.
 
         Every request to the mouse before its handles are published is inside a guard, the
-        lighting claim among them outside HOST mode. What follows can tear the mouse down again,
+        lighting claim among them (claim_at_attach). What follows can tear the mouse down again,
         so the answer is whether it is attached at the end.
 
-        A mouse with a measured spy (spy.SPY_MODELS) is set up in HOST mode while
+        A mouse with a spy HOST mode drives (spy.SPY_MODELS) is set up in HOST mode while
         `mouse_host_mode` is on (setup_host), its claim after the arm as G HUB orders it; any
         other in ONBOARD mode on profile 1 (_setup_onboard).
         """
@@ -231,18 +231,15 @@ class Mice:
                              else None)
             spy = self.find_spy(mouse)
             host = self.d.config.mouse_host_mode and spy is not None
-            # Lighting only with 0x8071 and clusters that enumerate: the G305 advertises 0x8070,
-            # accepts a color write and has no lights.
-            lighting = Lighting.find(dev, per_key_cluster=True)
-            if lighting is not None and not host:
+            lighting = self.color.find_lighting(mouse)
+            if not host:
                 # Inside the guard: a mouse asleep since the probe would otherwise raise out
                 # of the retry and end the daemon. In HOST mode it comes after the arm.
-                lighting.claim()
+                self.color.claim_at_attach(mouse, lighting)
         except (OSError, HidppFailure, RuntimeError, IndexError) as exc:
             # At info: a mouse found and not set up would otherwise be dropped without a word.
             # IndexError is a reply cut short, behind the transport's own length check.
-            log.info("found %04x on %s but could not set it up: %s",
-                     product, path, exc)
+            log.info("found %04x on %s but could not set it up: %s", product, path, exc)
             dev.close()
             self.d.note_slow(started, f"mouse connect on {path}", f"could not set it up: {exc}",
                            repeats=str(path))
@@ -267,10 +264,7 @@ class Mice:
             # Or the chosen mouse back, on the route it left or the other: a route _left_route
             # dropped is torn down by now, so its id counts as away.
             self.selected = product
-        log.info("%s connected on %s (%04x): %s; %s", mouse.name, path, product,
-                 ", ".join(mouse.capabilities) or "nothing this build drives",
-                 "says when it is switched on" if wireless
-                 else "cannot say when it is switched on (no 0x1D4B)")
+        log.info("%s", attached.connected_words(path))
         if host:
             # The evdev node too: it carries G4 to G9 until the arm lands, and whenever it
             # does not take.
@@ -313,8 +307,11 @@ class Mice:
     def switch_to_onboard(self, attached: AttachedMouse) -> None:
         """ensure_onboard_mode on the probe's budget through mouse_call: G HUB can leave the
         mouse in HOST mode, where no profile runs. A mode write, not a profile write, and what
-        the mouse boots into anyway. A mouse without a spy that does not answer it is owed it
-        (`owed_onboard`); one that refused answered."""
+        the mouse boots into anyway: volatile, measured on the G502 X PLUS (the G502 HERO's
+        firmware also writes its lighting records on leaving HOST mode, as the comment on
+        mouse.G502HERO says), and sent to a model whose writes are not tested too. A mouse
+        without a spy that does not answer it is owed it (`owed_onboard`); one that refused
+        answered."""
         try:
             switched = self.mouse_call(lambda: attached.mouse.ensure_onboard_mode(**MOUSE_PROBE),
                                        target=attached)
@@ -336,10 +333,10 @@ class Mice:
         if self.mouse_answering(attached):
             self.switch_to_onboard(attached)
         if attached.spy is not None and attached.silent:
-            # Not answering the spy stop or the switch, it may be in HOST mode with G4 to G9 and
-            # the DPI buttons dead, as a crashed run leaves it: counted there, nothing more goes
-            # now (the owner's decision of 2026-09-28), and its next setup hands it back
-            # (leave_host), the owner's decision of 2026-10-03. One that refused answered.
+            # Not answering the spy stop or the switch, it may be in HOST mode with its
+            # programmable buttons dead, as a crashed run leaves it: counted there, nothing
+            # more goes now (the owner's decision of 2026-09-28), and its next setup hands it
+            # back (leave_host), the owner's decision of 2026-10-03. One that refused answered.
             attached.host = True
         # G HUB can leave it on another profile too.
         profile = self.mouse_answering(attached) and self.run_profile_one(attached)
@@ -359,7 +356,9 @@ class Mice:
 
         True when profile 1 runs, or there is nothing to run. A switch that fails or does not
         take is logged at warning and kept as `profile_error` for `problems`, unless the mouse
-        went away with it.
+        went away with it. One not sent (SwitchRefused) is logged in words that say what to do,
+        and kept as none: `problems` words it from the sector (other_profile_words), so a restore
+        that mends profile 1 ends it.
         """
         mouse = attached.mouse
         if mouse.onboard is None:
@@ -375,7 +374,7 @@ class Mice:
         if found == PROFILE_SECTOR:
             attached.profile_error = None
             return True
-        running = found
+        running, kept = found, True
         if found == 0:
             why = "it did not go back to onboard mode, where a profile runs"
         else:
@@ -385,7 +384,8 @@ class Mice:
             except MouseError as exc:
                 if attached not in self.attached:
                     return False        # gone, as mouse_call said: no profile to warn of
-                why = f"the switch to profile 1 failed: {exc}"
+                kept = not isinstance(exc, SwitchRefused)
+                why = f"the switch to profile 1 failed: {exc}" if kept else str(exc)
             else:
                 if running == PROFILE_SECTOR:
                     attached.profile_error = None
@@ -393,7 +393,7 @@ class Mice:
                              attached.name, profile_words(found))
                     return True
                 why = "the switch to profile 1 was answered and did not take"
-        attached.profile_error = why
+        attached.profile_error = why if kept else None
         log.warning("%s runs %s, not profile 1: %s", attached.name, profile_words(running), why)
         return False
 
@@ -405,11 +405,10 @@ class Mice:
             return
         stages, rate = mouse.profile.dpi_stages, mouse.profile.report_rate
         default, shift = stage_dpi(stages, mouse.profile.default_dpi_index), mouse.shift_dpi
-        # Only a model in BUTTON_MODELS has G4 to G9: another's entries are not those buttons.
-        buttons = ("" if "buttons" not in mouse.capabilities
-                   else ", extra buttons enabled" if buttons_enabled(mouse.profile)
-                   else ", extra buttons set to the fallback" if buttons_fallback(mouse.profile)
-                   else ", extra buttons not enabled")
+        # Only a model with a button table has G4 to G9: another's entries are not those
+        # buttons.
+        table = mouse.button_table
+        buttons = "" if table is None else f", {table.state_words(mouse.profile)}"
         # A rate byte other than 1, 2, 4 or 8 reads as None (ProfileImage.report_rate). No stage
         # is 0 (ProfileImage.dpi_slot), so only no stages leaves the default and shift unknown.
         log.info("%s profile 1: %s, DPI stages %s, default %s, shift %s%s", mouse.name,
@@ -677,14 +676,9 @@ class Mice:
 
         running = attached.mouse.running_profile
         if runs_another_profile(running) and not attached.host:
-            add("mouse_other_profile", f"{name} runs {profile_words(running)}, not profile 1, so "
-                f"Gearbench's writes to profile 1 are not in effect; "
-                # One not answering is set up in full once it answers (tend_mice), the switch
-                # with it; one left in host mode (0) stays there until a power-on.
-                + (f"{attached.profile_error}. " + ("Gearbench tries again once the mouse answers"
-                   if attached.silent and running else "Switch the mouse off and on to try again")
-                   if attached.profile_error
-                   else "it switches back when the mouse is next switched on"))
+            add("mouse_other_profile", other_profile_words(
+                name, running, attached.mouse.switch_refusal(), attached.profile_error,
+                attached.silent))
         if self.wants_host(attached) and not attached.host and attached.host_error:
             # Profile 1 only where the last read found it: mouse_other_profile names another.
             runs = "; it runs onboard profile 1" if running == PROFILE_SECTOR else ""
@@ -721,9 +715,9 @@ class Mice:
         try:
             result = what(*args)
         except DeviceGone as exc:
-            log.info("%s went away: %s", target.name, exc)
+            log.info("%s went away: %s", target.name, failure_reason(exc))
             self.teardown_mouse(target)
-            raise MouseError(f"the mouse went away: {exc}") from exc
+            raise MouseError(f"the mouse went away: {failure_reason(exc)}") from exc
         except HidppFailure as exc:
             if not unanswered(exc):
                 if not isinstance(exc, HidppError):
@@ -973,7 +967,8 @@ class Mice:
     # -- HOST mode and the spy -----------------------------------------------
 
     def wants_host(self, attached: AttachedMouse) -> bool:
-        """Whether this mouse is to run in HOST mode: the switch is on and it has a measured spy."""
+        """Whether this mouse is to run in HOST mode: the switch is on and it has a spy HOST mode
+        drives (spy.SPY_MODELS)."""
         return self.d.config.mouse_host_mode and attached.spy is not None
 
     def runs_host(self, attached: AttachedMouse) -> bool:
@@ -1018,10 +1013,11 @@ class Mice:
         ONBOARD mode (host_refused); a refused first mode read is taken as ONBOARD, and a
         refused table read is only logged. `host` takes what the first answered mode read
         finds and is set before the HOST write, so an arm cut short at any step is still taken
-        back to ONBOARD mode when host mode is turned off.
+        back to ONBOARD mode when host mode is turned off. `armed` is cleared at the start and
+        set when the arm took.
         """
-        mouse, spy = attached.mouse, attached.its_spy
-        model = spy.model
+        mouse, spy, model = attached.mouse, attached.its_spy, attached.its_spy.model
+        attached.armed = False
 
         if not self._mode_before_arm(attached, moved):
             return False
@@ -1064,14 +1060,14 @@ class Mice:
         if why is not None:
             self.host_refused(attached, why)
             return False
-        attached.host_error = None
-        attached.spy_mask = 0
+        attached.host_error, attached.armed = None, True
         log.info("%s in host mode, its button spy armed (%d controls)", attached.name, count)
         return True
 
     def _mode_before_arm(self, attached: AttachedMouse, moved: bool) -> bool:
-        """arm_host's first mode read, on the probe's budget: `host` takes what it finds, a
-        refused read is taken as ONBOARD, and a mouse in ONBOARD mode runs profile 1 first, so
+        """arm_host's first mode read, on the probe's budget: `host` takes what it finds, and is
+        set when the read gets no answer, since a crashed run can leave the mouse in HOST mode;
+        a refused read is taken as ONBOARD, and a mouse in ONBOARD mode runs profile 1 first, so
         profile 1 is the fallback. False when the mouse stopped answering or went away."""
         # Counted in HOST mode by this run, attached (`host`) or torn down so (_left_in_host):
         # only a mouse found there otherwise blames another driver.
@@ -1104,12 +1100,13 @@ class Mice:
 
     def host_refused(self, attached: AttachedMouse, why: str) -> None:
         """Stop the spy and put the mouse back in ONBOARD mode (0x8110 fn 2, 0x8100 fn 1 `01`)
-        on profile 1: left in HOST mode, its G4 to G9 would be dead. `why` is kept as
-        `host_error` for `problems`. HOST mode is tried again at the mouse's next power-on,
-        recheck, resume or attach, and at `mouse_host_mode on`. It counts as in host mode until
-        its ONBOARD write lands."""
+        on profile 1, or on the profile it runs where its model's writes are not tested
+        (run_profile_one): left in HOST mode, its programmable buttons would be dead. `why` is
+        kept as `host_error` for `problems`. HOST mode is tried again at the mouse's next
+        power-on, recheck, resume or attach, and at `mouse_host_mode on`. It counts as in host
+        mode until its ONBOARD write lands."""
         attached.host_error = why
-        log.warning("%s: host mode did not take (%s); switching it to onboard profile 1",
+        log.warning("%s: host mode did not take (%s); switching it back to onboard mode",
                     attached.name, why)
         for what, send in (("the button spy's stop", lambda: attached.its_spy.stop(**MOUSE_PROBE)),
                            ("onboard mode", lambda: attached.mouse.set_mode(MODE_ONBOARD,
@@ -1149,25 +1146,27 @@ class Mice:
 
     def hand_back(self, attached: AttachedMouse, release: bool = False, *, held: int | None
                   ) -> tuple[list[str], list[str], BaseException | None, int | None]:
-        """Give HOST mode back, in G HUB's order: spy fn 2, with `release` the lighting
-        released, ONBOARD mode (0x8100 fn 1 `01`), onboard profile 1 (a read, and fn 3 `00 01`
-        for a mouse on another; a read of no profile is a mouse still in HOST mode, sent no
-        fn 3), and the DPI. The mode write moves the DPI, so it is put back through set_dpi
-        without its stage's level byte: a DPI put back never flashes. That DPI is the one
-        outside a game profile's own stages (desktop_dpi), else `held`, the DPI under a held
-        paddle, else the one read before the mode write.
+        """Give HOST mode back, in G HUB's order: spy fn 2, with `release` a lighting claim it
+        holds or may hold released (held_lighting), ONBOARD mode (0x8100 fn 1 `01`), onboard
+        profile 1 (a read, and fn 3 `00 01` for a mouse on another; a read of no profile is a
+        mouse still in HOST mode, sent no fn 3; a model whose writes are not tested keeps the
+        profile it runs, read and sent no fn 3), and the DPI. The mode write moves the DPI, so
+        it is put back through set_dpi without its stage's level byte: a DPI put back never
+        flashes. That DPI is the one outside a game profile's own stages (desktop_dpi), else
+        `held`, the DPI under a held paddle, else the one read before the mode write.
 
         Each on the probe's budget, and direct calls, not mouse_call: teardown_mouse runs this.
         A step that gets no answer, or finds the node gone, skips the ones after it; when the
         first gets no answer, the whole is asked once more, since a mouse asleep wakes at a
         request and answers 0.42 to 1.63 s after it (the owner's decision of 2026-09-27). The
-        mouse counts as in HOST mode until the switch to ONBOARD mode lands, and again when the
-        switch to profile 1 leaves no profile running, so its next setup finishes the
-        hand-back. Answers what was done, what was not, the failure that stopped it or None,
-        and the DPI put back or None.
+        mouse is not `armed` from the first step on. It counts as in HOST mode until the switch
+        to ONBOARD mode lands, and again when the switch to profile 1 leaves no profile running,
+        so its next setup finishes the hand-back. Answers what was done, what was not, the
+        failure that stopped it or None, and the DPI put back or None.
         """
         # The mode change may disturb what the mouse shows (inferred).
         attached.forget_showing()
+        attached.armed = False
         steps, dpi = self._hand_back_steps(attached, release, held)
         for attempt in (1, 2):
             done: list[str] = []
@@ -1209,11 +1208,8 @@ class Mice:
 
         def onboard() -> None:
             mouse.set_mode(MODE_ONBOARD, **MOUSE_PROBE)
-            # Profile 1 runs from here: a game profile's own stages and rate are out of force.
             attached.host = False
-            attached.tuning = attached.dpi_before_tuning = attached.live_rate = None
-            attached.dpi_before_edit = None
-            attached.owed_tuning = False
+            self.dpi.out_of_force(attached)
 
         def read_dpi() -> None:
             dpi["wanted"] = mouse.get_dpi(**MOUSE_PROBE)
@@ -1227,8 +1223,9 @@ class Mice:
             first = running = mouse.current_profile(**MOUSE_PROBE)
             # A first read of 0 is an ONBOARD write that did not land, answered or not, so no
             # fn 3. Relies on a read right after a switch that landed naming a profile; "Host
-            # mode off and on again" step 2 checks it.
-            if first and runs_another_profile(first):
+            # mode off and on again" step 2 checks it. A model whose writes are not tested is
+            # sent no fn 3 (Mouse.switch_refusal) and keeps the profile it runs.
+            if first and runs_another_profile(first) and not keeps:
                 # The read named a sector, so the mouse has 0x8100 and this is not None
                 # (Mouse.switch_to_profile_one).
                 running = cast(int, mouse.switch_to_profile_one(**MOUSE_PROBE))
@@ -1240,18 +1237,20 @@ class Mice:
                 attached.host = True
                 raise MouseError("the switch left no profile running" if first
                                  else f"it runs {profile_words(running)}")
-            if runs_another_profile(running):
+            if runs_another_profile(running) and not keeps:
                 raise MouseError(f"it runs {profile_words(running)}")
 
+        keeps = mouse.flash_refusal is not None
         steps: list[tuple[str, Callable[[], object]]] = [
             ("button spy stopped", lambda: attached.its_spy.stop(**MOUSE_PROBE))]
-        lighting = attached.lighting
+        lighting = attached.held_lighting
         if release and lighting is not None:
             steps.append(("lighting released", lambda: lighting.release(**MOUSE_PROBE)))
         has_dpi = "dpi" in mouse.capabilities
         if has_dpi and dpi["wanted"] is None:
             steps.append(("DPI read", read_dpi))
-        steps += [("onboard mode", onboard), ("profile 1", profile_one)]
+        steps += [("onboard mode", onboard),
+                  ("the profile it runs" if keeps else "profile 1", profile_one)]
         if has_dpi:
             steps.append(("DPI", put_dpi))
         return steps, dpi
@@ -1265,8 +1264,7 @@ class Mice:
         # hand_back clears `host` only once the ONBOARD write lands.
         log.info("%s %s (%s): %s%s", attached.name,
                  "still in host mode" if attached.host else "out of host mode", why,
-                 ", ".join(done) or "nothing done",
-                 f"; not {', '.join(missed)}" if missed else "")
+                 ", ".join(done) or "nothing done", f"; not {', '.join(missed)}" if missed else "")
         if isinstance(stopped, DeviceGone | OSError):
             self.teardown_mouse(attached)
         elif stopped is not None:
@@ -1304,8 +1302,8 @@ class Mice:
             self.reapply_mouse(attached, "linked")
 
     def host_mode_changed(self, on: bool) -> None:
-        """Act on the host mode switch set `on` or off on each mouse with a measured spy that is
-        answering. On arms it (setup_host); off hands it back to ONBOARD mode on profile 1
+        """Act on the host mode switch set `on` or off on each mouse with a spy HOST mode drives
+        that is answering. On arms it (setup_host); off hands it back to ONBOARD mode
         (leave_host) and claims and paints its lighting again. A mouse not answering, or that
         stops answering part way, gets it in full once it answers (cut_short): its cookie is not
         trusted after a change of mode. Turned on, a mouse already `host` is sent nothing unless
@@ -1371,10 +1369,12 @@ class Mice:
 
         `keep_dark`, at a power-off with color sync on, keeps the lighting claimed: released,
         the mouse would go back to its own lighting, which the black written before was to stop.
-        The release is `01 00 06` (SW_FIRMWARE); the cookie stays (MOUSE_COOKIE). A mouse in
-        HOST mode is handed back first (hand_back); one in ONBOARD mode under a held DPI shift
-        gets the DPI under it back after the release. One not answering is sent nothing: left
-        in HOST mode, its G4 to G9 are dead until its next power cycle or the next start.
+        The release is 0x8071's `01 00 06` (SW_FIRMWARE) or 0x8070's fn 8 `00`; the cookie stays
+        (MOUSE_COOKIE). One that shows its own lighting is sent no release, unless a claim
+        that failed may have landed (held_lighting). A mouse in HOST mode is handed back first
+        (hand_back); one in ONBOARD mode under a held DPI shift gets the DPI under it back after
+        the release. One not answering is sent nothing: left in HOST mode, its programmable
+        buttons are dead until its next power cycle or the next start.
         """
         # Through a receiver the evdev node outlives the mouse: a reader left open would sit
         # beside the next one when it is back, and every press would act twice. The call answers
@@ -1389,20 +1389,19 @@ class Mice:
         if going.host and not going.silent:
             # The release in its place in G HUB's order; a synced mouse at a power-off was
             # handed back before its black (ready_for_dark).
-            done, missed, _stopped, _put = self.hand_back(
-                going, release=not keep_dark, held=held)
+            done, missed, _stopped, _put = self.hand_back(going, release=not keep_dark, held=held)
             said = f"{going.name} let go: {', '.join(done) or 'nothing done'}"
             if missed:
                 said += f"; not {', '.join(missed)}"
-        elif going.host:
-            said = f"{going.name} not answering, left in host mode, its lighting not released"
-        elif going.lighting is not None and going.silent:
-            said = f"{going.name} not answering, its lighting not released"
-        elif going.lighting is not None and keep_dark:
+        elif going.host or (going.silent and going.held_lighting is not None):
+            said = f"{going.name} not answering" + (", left in host mode" if going.host else "")
+            if going.held_lighting is not None:
+                said += ", its lighting not released"
+        elif going.held_lighting is not None and keep_dark:
             said = f"{going.name} left dark with the keyboard, its lighting claim held"
-        elif going.lighting is not None:
+        elif going.held_lighting is not None:
             try:
-                going.lighting.release()
+                going.held_lighting.release()
             except (HidppFailure, OSError) as exc:
                 said = f"{going.name} let go, its lighting not released ({exc})"
         if shifted is not None:
@@ -1425,11 +1424,13 @@ class Mice:
 
     # -- the commands and their helpers --------------------------------------
 
-    def mouse_for(self, request: dict) -> AttachedMouse:
-        """The mouse a write request is for: `device`, a product id, else the selected mouse,
-        as the CLI means. The window always sends `device`, since the shared selection can move
-        under a page still showing the old mouse. MouseError when there is no such mouse: a
-        write never goes to another; a `device` neither text nor a number is refused (name_text)."""
+    def mouse_for(self, request: dict, *, write: bool = True) -> AttachedMouse:
+        """The mouse a request is for: `device`, a product id, else the selected mouse, as the
+        CLI means. The window always sends `device` with a write, since the shared selection
+        can move under a page still showing the old mouse, and the device report with the
+        `mouse` read of a mouse beside the selected one. MouseError when there is no such
+        mouse, which says for a `write` that nothing was written: a request never goes to
+        another; a `device` neither text nor a number is refused (name_text)."""
         wanted = request.get("device")
         if wanted is None:
             if self.current is None:
@@ -1441,7 +1442,7 @@ class Mice:
                 return attached
         model = {f"{product:04x}": name for product, name in MOUSE_MODELS.items()}.get(wanted)
         said = f"the {model} ({wanted})" if model else f"the mouse this was for ({wanted!r})"
-        raise MouseError(f"{said} is not attached; nothing was written")
+        raise MouseError(f"{said} is not attached{'; nothing was written' if write else ''}")
 
     def _cmd_mouse_select(self, request: dict) -> dict:
         """Choose the mouse the window shows and a command without `device` means; every
@@ -1458,12 +1459,11 @@ class Mice:
         return {"ok": False, "error": f"no mouse {wanted!r} is attached; attached: {attached_now}"}
 
     def _cmd_mouse_host_mode(self, request: dict) -> dict:
-        """HOST mode on or off for the mice with a measured spy: a setting, saved and in effect
-        at once. The reply's note names a mouse the switch did not take on."""
+        """HOST mode on or off for the mice with a spy HOST mode drives: a setting, saved and in
+        effect at once. The reply's note names a mouse the switch did not take on."""
         value = on_or_off(request.get("value"))
         if value is None:
-            return {"ok": False, "error": switch_refusal("mouse_host_mode",
-                                                         request.get("value"))}
+            return {"ok": False, "error": switch_refusal("mouse_host_mode", request.get("value"))}
         self.d.save_setting(mouse_host_mode=value)
         self.host_mode_changed(value)
         reply = {"ok": True, "mouse_host_mode": value,

@@ -1,7 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: gearbench
 Upstream-Contact: wmuschetto <113629853+wmuschetto@users.noreply.github.com>
-Source: https://github.com/wmuschetto/gearbench
+Source: https://github.com/gearbench/gearbench
 Comment: The HID++ wire formats were learned by reading Solaar
  (GPL-2.0-or-later) and from a Windows G HUB capture made for this project.
  No Solaar code is in this tree, and two of its zone ids are corrected here
@@ -12,7 +12,7 @@ Files: *
 Copyright: 2026 wmuschetto <113629853+wmuschetto@users.noreply.github.com>
 License: GPL-3.0-or-later
 
-Files: desktop/io.github.wmuschetto.Gearbench.metainfo.xml
+Files: desktop/io.github.gearbench.Gearbench.metainfo.xml
 Copyright: 2026 wmuschetto <113629853+wmuschetto@users.noreply.github.com>
 License: CC0-1.0
  On Debian systems the full text of the CC0 1.0 Universal license can be

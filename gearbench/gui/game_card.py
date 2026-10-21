@@ -12,9 +12,10 @@ from typing import TYPE_CHECKING, cast
 
 from gi.repository import Adw, GLib, GObject, Gtk
 
-from ..config import unread_reason, word_list
+from ..config import unread_reason
 from ..focus import FOLLOWED, SHELL, held_until
 from ..profiles import GameProfile
+from ..wording import word_list
 from .profile_manager import programs_text
 from .style import LeftOutRows, confirm
 

@@ -18,7 +18,7 @@ from typing import cast
 
 from gi.repository import Adw, Gdk, GObject, Gtk
 
-from ..config import MACRO_PREFIX, counted, reason
+from ..config import MACRO_PREFIX
 from ..macros import (
     MAX_STEPS,
     MacroRecorder,
@@ -35,6 +35,7 @@ from ..uinput import (
     resolve,
     spec_for_keys,
 )
+from ..wording import counted, reason
 from .style import held_while_shown, plain_row, pointer_button, weakly
 from .worker import (
     BUSY,

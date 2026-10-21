@@ -12,9 +12,10 @@ import re
 import sys
 from pathlib import Path
 
-from ..config import config_dir, escaped as _escaped
+from ..config import config_dir
 from ..daemon import Daemon
 from ..desktop import GREETER, session_class
+from ..wording import escaped as _escaped
 from .output import Subcommands
 
 
@@ -31,7 +32,7 @@ def cmd_gui(args: argparse.Namespace) -> int:
         )
         return 1
     # GApplication reads its own option: D-Bus starts the window as a service
-    # and then asks it to open (desktop/io.github.wmuschetto.Gearbench.service).
+    # and then asks it to open (desktop/io.github.gearbench.Gearbench.service).
     return gui_main(["gearbench-ctl", "--gapplication-service"] if args.gapplication_service
                     else [])
 

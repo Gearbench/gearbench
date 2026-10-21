@@ -2,7 +2,7 @@
 
 Two sources, the first in force wins:
 
-1. Gearbench's GNOME Shell extension (gnome-shell/gearbench-focus@wmuschetto.github.io),
+1. Gearbench's GNOME Shell extension (gnome-shell/gearbench-focus@gearbench.github.io),
    through desktop.py: the pid of Mutter's focused window, native Wayland windows
    included, which SDL3 games open under GNOME for its Wayland fifo protocol.
 2. Xwayland's _NET_ACTIVE_WINDOW (xfocus.py): X11 windows only, a Proton game's among

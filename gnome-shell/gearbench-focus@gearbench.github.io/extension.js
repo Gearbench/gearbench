@@ -17,10 +17,10 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {ExtensionState} from 'resource:///org/gnome/shell/misc/extensionUtils.js';
 
-const PATH = '/io/github/wmuschetto/Gearbench/Focus';
-const INTERFACE_NAME = 'io.github.wmuschetto.Gearbench.Focus';
+const PATH = '/io/github/gearbench/Gearbench/Focus';
+const INTERFACE_NAME = 'io.github.gearbench.Gearbench.Focus';
 const INTERFACE = `<node>
-  <interface name="io.github.wmuschetto.Gearbench.Focus">
+  <interface name="io.github.gearbench.Gearbench.Focus">
     <method name="Subscribe"><arg type="u" direction="out" name="pid"/></method>
     <signal name="FocusChanged"><arg type="u" name="pid"/></signal>
     <signal name="Stopped"/>

@@ -11,4 +11,11 @@ then
     udevadm trigger --subsystem-match=misc --sysname-match=uinput --action=add || true
 fi
 
+# Gearbench 1.0.1 and earlier gave gearbench-spatial-login.service a deb-systemd-helper
+# record, and the package no longer has that unit, so debhelper's purge lines below do not
+# name it.
+if [ "$1" = "purge" ] && [ -z "$DPKG_ROOT" ] && [ -x /usr/bin/deb-systemd-helper ]; then
+    deb-systemd-helper --user purge gearbench-spatial-login.service >/dev/null || true
+fi
+
 #DEBHELPER#

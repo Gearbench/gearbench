@@ -1,7 +1,9 @@
 """The keyboard's commands: the M profile switch and its name, the brightness, the color, the
 effect, a drag's preview, the layout editor's paint, the saved colors and the idle dimming.
 With them the digest of the lighting in force and the saved colors as the front ends want
-them, and the keyboard's entries in `status` and its problem for `problems`."""
+them, the keyboard's entries in `status` and its problem for `problems`, the journal's line
+at its connect (`connected_words`), and the keyboard set up again after a resume
+(`recheck_after_resume`)."""
 
 from __future__ import annotations
 
@@ -24,22 +26,32 @@ from ...config import (
     speed_shown,
 )
 from ...hidpp import NO_RULE, HidppFailure
-from ...keyboard import CABLED_IDS, find_attached_keyboard, name as keyboard_name
-from ...keycodes import LOGO, ZONE_NAMES
+from ...keyboard import (
+    CABLED_IDS,
+    find_attached_keyboard,
+    key_name,
+    name as keyboard_name,
+    typed_words,
+    wave_directions,
+)
+from ...keycodes import ZONE_NAMES
 from ...lighting import (
     ANIMATIONS,
+    DARK,
+    DIM,
     KEYBOARD_EFFECTS,
+    LIT,
     MAX_ZONE,
     MIN_ZONE,
     Lighting,
     LightingError,
+    offered_effects,
     snap_brightness,
 )
 from ...profiles import PER_KEY, STATIC
+from ...report import untested, untested_note
+from ...wording import word_list
 from ..shared import (
-    DARK,
-    DIM,
-    LIT,
     NOT_AN_M_PROFILE,
     digest,
     name_text,
@@ -50,13 +62,27 @@ from ..shared import (
     whole_number,
     with_note,
 )
-from .paint import LED_SETTLE, NO_LIGHTING, unanswered_note
+from .notes import LED_SETTLE, NO_LIGHTING, unanswered_note
+from .onboard_hold import kept_onboard_words
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from .. import Daemon
     from . import Keyboard
 
 log = logging.getLogger("gearbench")
+
+
+def connected_words(product: int, path: Path, index: int, able: list[str]) -> str:
+    """The journal's line for the keyboard set up on `path` at device index `index`: its
+    model, its id and what this build drives on it, `able`, and for a model not yet run on
+    (report.untested) the note that asks for a device report from it."""
+    name = keyboard_name(product)
+    said = (f"{name} connected on {path} ({product:04x}, device index 0x{index:02x}): "
+            f"{', '.join(able) or 'nothing this build drives'}")
+    return f"{said}; {untested_note(name)}" if untested(product) else said
+
 
 #: Said of a keyboard with zone lighting alone.
 NO_PER_KEY = "this keyboard has no per-key lighting"
@@ -133,6 +159,7 @@ class KeyboardCommands:
             return {"ok": False, "error": NO_LIGHTING}
         if not 0 <= level <= 100:
             return {"ok": False, "error": f"brightness {level} outside 0..100"}
+        self.d.per_keyboard.check_model()
         self.d.check_config_writable()
         # The wake paints at full first: the brightness write alone would leave a board woken
         # from its idle dim at half its colors.
@@ -140,7 +167,6 @@ class KeyboardCommands:
         failed = detail = None
         if (self.keyboard.lighting is not None and self.keyboard.keyboard_answering()
                 and self.keyboard.lights == LIT):
-            before = self.d.config.brightness
             try:
                 with self.keyboard.keyboard_writing():
                     written = self.keyboard.lighting.set_brightness(level)
@@ -153,9 +179,12 @@ class KeyboardCommands:
                 failed = unanswered_note(exc, self.keyboard.dev is None)
                 detail = str(exc)
             else:
-                self.d.config.brightness = written
-                self.commit_lighting(lambda: setattr(self.d.config, "brightness", before),
-                                     to_config=True)
+                try:
+                    self.d.save_setting(brightness=self.d.per_keyboard.with_brightness(written))
+                except BaseException:
+                    # apply_profile writes nothing to a keyboard marked not answering.
+                    self.keyboard.apply_profile()
+                    raise
                 self.d.mice.color.sync_mouse_color(self.keyboard.shown_color())
                 return {"ok": True, "requested": level, "applied": written,
                         "levels": list(self.keyboard.lighting.brightness_levels)}
@@ -165,7 +194,7 @@ class KeyboardCommands:
         # keyboard keeps.
         levels = self.keyboard.lighting.brightness_levels if self.keyboard.lighting else ()
         applied = snap_brightness(levels, level)
-        self.d.save_setting(brightness=applied)
+        self.d.save_setting(brightness=self.d.per_keyboard.with_brightness(applied))
         unreached = self.keyboard.change_unreached()
         # A synced mouse shows the saved level (at_level), the keyboard away or not.
         self.d.mice.color.sync_mouse_color(self.keyboard.shown_color())
@@ -184,7 +213,7 @@ class KeyboardCommands:
         static = request.get("mode") == STATIC
         self.check_preview_writable()
         was = self.lighting_digest()
-        layer = self.d.games.lighting_layer()
+        layer, made = self.d.per_keyboard.edited()
         before = (layer.color, layer.background, layer.mode, layer.effect)
         if static:
             layer.color, layer.mode, layer.effect = color, STATIC, "static"
@@ -195,6 +224,7 @@ class KeyboardCommands:
 
         def undo() -> None:
             layer.color, layer.background, layer.mode, layer.effect = before
+            made()
 
         return self.show_layer_change({"ok": True, "color": format_color(color)}, undo, was)
 
@@ -205,12 +235,16 @@ class KeyboardCommands:
         `speed`, an animation's period in milliseconds, and wave's `direction` are saved for
         that animation, so an effect named without them runs at what was saved, or the
         default. The mode is left alone: `effect static` brings back whichever of Static and
-        Per-key the layer was on.
+        Per-key the layer was on. An effect the attached keyboard does not report is refused
+        (missing_effect), with the ones it does, and a direction the keyboard model in force
+        does not take (missing_direction), with the ones it takes.
         """
         name = name_text(request["value"], "effect")
         if name not in KEYBOARD_EFFECTS:
             return {"ok": False, "error": f"no effect named {name!r}; the keyboard "
                                           f"effects are {', '.join(KEYBOARD_EFFECTS)}"}
+        if (missing := self.missing_effect(name)) is not None:
+            return {"ok": False, "error": missing}
         speed, direction = request.get("speed"), request.get("direction")
         if speed is not None and (problem := speed_problem(name, speed)) is not None:
             return {"ok": False, "error": problem}
@@ -219,9 +253,11 @@ class KeyboardCommands:
                 return {"ok": False, "error": f"only wave has a direction; {name} has none"}
             if (problem := direction_problem(direction)) is not None:
                 return {"ok": False, "error": problem}
+            if (missing := self.missing_direction(direction)) is not None:
+                return {"ok": False, "error": missing}
         self.d.check_layer_writable()
         was = self.lighting_digest()
-        layer = self.d.games.lighting_layer()
+        layer, made = self.d.per_keyboard.edited()
         before = (layer.effect, dict(layer.speeds), layer.direction)
         layer.effect = name
         if speed is not None:
@@ -231,6 +267,7 @@ class KeyboardCommands:
 
         def undo() -> None:
             layer.effect, layer.speeds, layer.direction = before
+            made()
 
         reply: dict = {"ok": True, "effect": name}
         if name in ANIMATIONS:
@@ -239,6 +276,31 @@ class KeyboardCommands:
             if name == "wave":
                 reply["direction"] = direction_shown(settings)
         return self.show_layer_change(reply, undo, was)
+
+    def missing_effect(self, name: str) -> str | None:
+        """Why the attached keyboard is not offered the effect `name`: its clusters do not
+        report it (offered_effects). None when they do, or when no keyboard's lighting is known,
+        and the effect is saved for the keyboard that comes."""
+        lighting = self.keyboard.lighting
+        if lighting is None:
+            return None
+        has = offered_effects(lighting.clusters)
+        if name in has:
+            return None
+        listed = word_list(has, "and") if has else "none Gearbench can set"
+        return (f"the {keyboard_name(self.keyboard.keyboard_product)} has no {name} effect; "
+                f"it has {listed}")
+
+    def missing_direction(self, direction: str) -> str | None:
+        """Why wave does not run in `direction`, a name direction_problem passed, on the keyboard
+        model in force, with the directions it takes; None when it takes it. Before any
+        keyboard, the refusal of a lighting change then (PerKeyboard.check_model)."""
+        key = self.d.per_keyboard.check_model()
+        takes = wave_directions(key)
+        if direction in takes:
+            return None
+        return (f"the {key_name(key)} has no {direction} wave direction; its directions are "
+                f"{word_list(takes, 'and')}")
 
     def show_layer_change(self, reply: dict, undo: Callable[[], None], was: str) -> dict:
         """Show and save a change made to the layer in force, and answer `reply` with the overlay
@@ -281,21 +343,23 @@ class KeyboardCommands:
             reply["note"] = self.keyboard.lights_note(saved=False)
         elif (self.keyboard.lighting is not None and self.keyboard.lighting.per_key
               and self.keyboard.keyboard_answering()
-              and self.keyboard.paint.shows_static(self.d.games.active_lighting()[0])):
-            # Every zone, the logo included: a per-key frame does not make the logo re-ramp
-            # and flicker as a zone-effect write does.
+              and self.keyboard.paint.shows_static(self.d.per_keyboard.active_lighting()[0])):
+            # Every zone, the logo included where the board has one (Paint.preview_last): a
+            # per-key frame does not make the logo re-ramp and flicker as a zone-effect
+            # write does.
             with self.keyboard.keyboard_writing():
-                self.keyboard.lighting.fill(color, last=LOGO)
+                self.keyboard.lighting.fill(color, last=self.keyboard.paint.preview_last())
         self.d.mice.color.sync_mouse_color(color, repeat=False)
         return reply
 
     def check_preview_writable(self) -> None:
         """check_layer_writable for a preview and for its release, `color` or `paint`, so a drag
         on a layer that would refuse the release shows no frame nothing can save. A drag with a
-        preview accepted (last_preview), its layer refused since, gets the lighting the daemon
-        holds back first, whether or not that preview showed a frame, and whether the refusal
+        preview accepted (last_preview), its layer refused since, gets back the lighting the
+        daemon holds first, whether or not that preview showed a frame, and whether the refusal
         comes at a later frame or at the release."""
         try:
+            self.d.per_keyboard.check_model()
             self.d.check_layer_writable()
         except ConfigError:
             if self.keyboard.last_preview is not None:
@@ -327,11 +391,12 @@ class KeyboardCommands:
         if self.keyboard.lighting is not None and self.keyboard.lights != LIT:
             reply["note"] = self.keyboard.lights_note(saved=False)
         elif (self.keyboard.lighting is not None and self.keyboard.keyboard_answering()
-              and self.keyboard.paint.shows_static(self.d.games.active_lighting()[0])):
+              and self.keyboard.paint.shows_static(self.d.per_keyboard.active_lighting()[0])):
             # A disabled board is drawn (Paint.shows_static): the release's paint turns it
             # static.
             with self.keyboard.keyboard_writing():
-                self.keyboard.lighting.fill_and_paint(base, zones, last=LOGO)
+                self.keyboard.lighting.fill_and_paint(base, self.keyboard.paint.board_zones(zones),
+                                                      last=self.keyboard.paint.preview_last())
         if mouse:
             self.d.mice.color.sync_mouse_color(base, repeat=False)
         return reply
@@ -355,13 +420,14 @@ class KeyboardCommands:
         self.check_preview_writable()
         was = self.lighting_digest()
         keys = {ZONE_NAMES[z]: c for z, c in zones.items()}
-        layer = self.d.games.lighting_layer()
+        layer, made = self.d.per_keyboard.edited()
         before = (layer.mode, layer.background, layer.keys, layer.effect)
         # `base` is the background. The Static color is kept for the next switch to Static.
         layer.mode, layer.background, layer.keys, layer.effect = PER_KEY, base, keys, "static"
 
         def undo() -> None:
             layer.mode, layer.background, layer.keys, layer.effect = before
+            made()
 
         self.commit_lighting(undo)
         # A drag's release, or a click after it: no drag frame to send again over the saved
@@ -398,18 +464,14 @@ class KeyboardCommands:
         self.d.mice.color.sync_mouse_color(base)
         return reply
 
-    def commit_lighting(self, undo: Callable[[], None], to_config: bool = False) -> None:
+    def commit_lighting(self, undo: Callable[[], None]) -> None:
         """Save the layer a lighting change went to, or undo the change.
 
         A failed save puts memory back and repaints what is saved, or the next unrelated save
-        would write the change; the error goes on to the client. `to_config` saves
-        config.json whatever is loaded: the brightness lives there.
+        would write the change; the error goes on to the client.
         """
         try:
-            if to_config:
-                self.d.save_config()
-            else:
-                self.d.save_layer_file()
+            self.d.save_layer_file()
         except BaseException:
             undo()
             # apply_profile writes nothing to a keyboard marked not answering.
@@ -423,13 +485,15 @@ class KeyboardCommands:
         the window keeps them for the next mode switch and the Speed row. `color`, `effect` and
         `paint` answer with it and with `was`, the digest they were made on: the window takes
         the answer's as seen only when `was` is the one it last read, or a change made
-        elsewhere since then would never be read. What shows (Games.active_lighting) follows
-        from the layer's fields.
+        elsewhere since then would never be read. What shows (PerKeyboard.active_lighting)
+        follows from the layer's fields.
         """
         games = self.d.games
-        layer = games.lighting_layer()
+        layer = self.d.per_keyboard.shown()
+        # The model too: another keyboard attached shows another entry of the same files.
         return digest([
-            games.overlay.name if games.overlay else None, layer.effect,
+            self.d.per_keyboard.model(), games.overlay.name if games.overlay else None,
+            layer.effect,
             sorted(layer.settings().items()), layer.mode, sorted(layer.keys.items()),
             layer.color, layer.background, sorted(layer.speeds.items()), layer.direction])
 
@@ -462,12 +526,15 @@ class KeyboardCommands:
         lighting = self.keyboard.lighting
         return {
             "connected": self.keyboard.dev is not None,
-            # A keyboard switched off behind its receiver stays connected.
+            # A keyboard switched off behind its receiver stays connected until another one
+            # that answers is connected in its place (PerKeyboard.hand_over).
             "answering": self.keyboard.keyboard_answering(),
             "device": str(self.keyboard.dev.path) if self.keyboard.dev else None,
             "name": keyboard_name(self.keyboard.keyboard_product),
             "product": (f"{self.keyboard.keyboard_product:04x}"
                         if self.keyboard.keyboard_product else None),
+            # A model not yet run on, whose note asks for a device report (report.untested).
+            "untested": untested(self.keyboard.keyboard_product),
             # The window shows only these sections. `lighting` needs its clusters to enumerate:
             # a feature id does not prove it.
             "capabilities": list(self.keyboard.keyboard_able),
@@ -477,8 +544,14 @@ class KeyboardCommands:
             "claimed": bool(lighting and lighting.claimed),
             "sw_control": sw_control,
             "diverted": bool(self.keyboard.keys and self.keyboard.keys.diverted),
+            # What Gearbench types for the unbound G keys of a keyboard whose G keys are keys
+            # of its own, "F1 to F12" on the G915 TKL; else None.
+            "typed": (typed_words(self.keyboard.keyboard_product)
+                      if self.keyboard.dev is not None else None),
             "last_apply_error": self.keyboard.last_apply_error,
             "clusters": [c.name for c in lighting.clusters] if lighting else [],
+            # What `effect` takes on it, which the window's Mode row and `status` list.
+            "effects": list(offered_effects(lighting.clusters)) if lighting else [],
             # The level shown: the darker of the lock's and `idle_lights`.
             "lights": self.keyboard.lights,
             "idle_lights": self.keyboard.idle_lights,
@@ -497,9 +570,17 @@ class KeyboardCommands:
             return [("keyboard_not_answering",
                      (f"the {keyboard_name(self.keyboard.keyboard_product)} is not answering: "
                       f"asleep or switched off"))]
-        node = find_attached_keyboard()
+        node = self.d.per_keyboard.find_keyboard()
         if node is None:
             return [("keyboard_no_node", "no keyboard found; plug in its cable or its receiver")]
+        # Ahead of the permission, since while the session is not active the node is the seat's,
+        # and of another model's node found first, as one switched off that the held one stood
+        # in for (PerKeyboard.stand_in). From sysfs: it counts while it is still plugged in.
+        kept = self.keyboard.hold.kept_onboard
+        if kept is not None:
+            held = self.keyboard.hold.untyped()
+            if held is not None and find_attached_keyboard(same_model_as=kept[1]) == kept:
+                return [("keyboard_kept_onboard", kept_onboard_words(kept[1], held))]
         if node_denied(node[0]):
             return [("keyboard_no_permission",
                      f"no permission to open {node[0]}, the keyboard's node; {NO_RULE}")]
@@ -510,6 +591,20 @@ class KeyboardCommands:
         return [("keyboard_no_answer",
                  (f"the {keyboard_name(node[1])} does not answer its receiver on {node[0]}: "
                   f"asleep, switched off or out of range"))]
+
+    def recheck_after_resume(self) -> None:
+        """After a resume (Session.woke_up): the link notices again, then the keyboard asked
+        and, if it answers, set up again in full, or its profile applied where
+        REAPPLY_INTERVAL keeps the setup from running."""
+        # A receiver that lost power in the suspend may keep its node and lose register 0x00.
+        self.keyboard.turn_on_link_notices()
+        # Asked now, as the mice and the headsets are: a mark set before the suspend, its own
+        # probe's included, outlives it, since time.monotonic() stops while the machine sleeps.
+        self.keyboard.mark_keyboard_answering(quiet=True)
+        if not self.keyboard.keyboard_answers():
+            return          # away or off: set up when it is back
+        if not self.keyboard.reconfigure_keyboard():
+            self.keyboard.apply_profile()
 
     def _cmd_idle(self, request: dict) -> dict:
         """Idle dimming: `dim_after` and `off_after` in seconds and `never_dim`, any of them,

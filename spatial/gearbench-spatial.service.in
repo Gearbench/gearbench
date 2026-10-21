@@ -1,14 +1,10 @@
 [Unit]
-Description=Gearbench - Astro A50 Spatial, a 7.1 output for headphones on Astro A50 Game
-# Runs only while the A50's base station is plugged in: this is the user
-# manager's device unit for /dev/snd/by-id/usb-Astro_Gaming_Astro_A50-00,
-# which systemd's own rules make for every sound card. Its WantedBy= starts
-# it when the base station is plugged in; gearbench-spatial-login.service
-# starts it at login when the base station already is. Enabled by the
-# window's Headset tab or `gearbench-ctl headset-spatial on`, never at
-# install.
-BindsTo=dev-snd-by\x2did-usb\x2dAstro_Gaming_Astro_A50\x2d00.device
-After=dev-snd-by\x2did-usb\x2dAstro_Gaming_Astro_A50\x2d00.device
+Description=Gearbench - Gearbench Spatial, a 7.1 output for headphones
+# Runs from the login on once switched on, in the window's Headset tab or with
+# `gearbench-ctl headset-spatial on`; an install never switches it on. Its
+# process follows PipeWire and runs the chain only while a headset Gearbench
+# plays to is there, so it needs no device unit: one unit plays to either
+# headset.
 # A client of the session's PipeWire, stopped and restarted with it, as
 # PipeWire's own filter-chain.service is.
 BindsTo=pipewire.service
@@ -20,13 +16,17 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
+# Lets the process say why it runs no chain for a headset that is there, as
+# the unit's status, which the Headset tab and `gearbench-ctl
+# headset-spatial` show.
+NotifyAccess=main
 Environment="PYTHONPATH=@CHECKOUT@"
-# Written at every start from Gearbench's template and the head and room saved
-# in spatial.json: a head change is a restart, and a new template applies at
-# the next start. -s keeps user site-packages off sys.path, so the package's
-# gearbench, or the checkout's on PYTHONPATH, renders the chain.
-ExecStartPre=/usr/bin/python3 -s -P -m gearbench.spatial render %t/gearbench-spatial.conf
-ExecStart=/usr/bin/pipewire -c %t/gearbench-spatial.conf
+# Renders the chain from Gearbench's template, the head, room and headset
+# saved in spatial.json and the output it plays to, and runs it, each time
+# that output changes: a change of the head or the headset is a restart. -s
+# keeps user site-packages off sys.path, so the package's gearbench, or the
+# checkout's on PYTHONPATH, renders the chain.
+ExecStart=/usr/bin/python3 -s -P -m gearbench.spatial_unit run %t/gearbench-spatial.conf
 Restart=on-failure
 RestartSec=2
 SyslogIdentifier=gearbench-spatial
@@ -40,5 +40,4 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 
 [Install]
-WantedBy=dev-snd-by\x2did-usb\x2dAstro_Gaming_Astro_A50\x2d00.device
-Also=gearbench-spatial-login.service
+WantedBy=default.target

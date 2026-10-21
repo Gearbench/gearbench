@@ -1,8 +1,9 @@
 """The rules every library file keeps, a game profile's and a macro's alike.
 
-A name's slug names its file, and every lookup goes by it (`slug`, `by_name`). A save or a
-rename refuses to write over another's file (`refuse_taken`), and a delete that found no
-file says so (`not_deleted`). A file's version and name are checked on the way in
+A name's slug names its file, and every lookup goes by it (`slug`, `by_name`), as does the
+numbering that makes an imported name unique (`Taken`). A save or a rename refuses to write
+over another's file (`refuse_taken`), and a delete that found no file says so
+(`not_deleted`). A file's version and name are checked on the way in
 (`check_version`, `read_name`). A folder is read so that a file that will not load costs
 only itself, a folder that cannot be listed is not an empty one, and of two files of one
 name one is kept (`read_folder`, `list_folder`, `Folder`).
@@ -23,15 +24,15 @@ from .config import (
     SkipWarnings,
     expect,
     link_to_nothing,
-    reason,
     refuse_name,
     shown_path,
     version_problem,
 )
+from .wording import reason
 
-__all__ = ["SLUG_MAX_BYTES", "Folder", "Named", "Titled", "by_name", "check_version",
-           "file_name", "list_folder", "not_deleted", "read_folder", "read_name",
-           "refuse_taken", "slug"]
+__all__ = ["SLUG_MAX_BYTES", "Folder", "Named", "Taken", "Titled", "by_name",
+           "check_version", "file_name", "list_folder", "not_deleted", "read_folder",
+           "read_name", "refuse_taken", "slug"]
 
 
 #: The longest stem in UTF-8 bytes, a long name's hash suffix included: a filename is at
@@ -97,6 +98,36 @@ def by_name[T: Titled](items: Iterable[T], name: str) -> T | None:
     return next((item for item in items if slug(item.name) == wanted), None)
 
 
+class Taken:
+    """Names given so far, as the library compares them, and where `unique`
+    stopped counting for each numbered form. Kept across calls: rebuilt for
+    each name and counted from (2) each time, they would make the G HUB
+    import's parse quadratic in the profiles of one application."""
+
+    def __init__(self, names: Iterable[str] = ()) -> None:
+        self._slugs = {slug(name) for name in names}
+        self._counts: dict[str, int] = {}
+
+    def add(self, name: str) -> None:
+        self._slugs.add(slug(name))
+
+    def unique(self, wanted: str) -> str:
+        """`wanted`, or `wanted (2)`, `(3)`... whichever no name given so far
+        has, compared as the library compares them. The count starts where it
+        stopped for names whose numbered forms share a slug: a Taken only
+        grows, so the names it passed over are still taken."""
+        if slug(wanted) not in self._slugs:
+            return wanted
+        # Keyed by the numbered form, not `wanted`: a name with no letter or digit
+        # slugs as a hash of itself, but "!!! (2)" and "@@@ (2)" both slug as "2".
+        key = slug(f"{wanted} (n)")
+        n = self._counts.get(key, 2)
+        while slug(f"{wanted} ({n})") in self._slugs:
+            n += 1
+        self._counts[key] = n
+        return f"{wanted} ({n})"
+
+
 class Named(Titled, Protocol):
     """A game profile or a macro, as the code their two libraries share reads one."""
 
@@ -128,11 +159,12 @@ def not_deleted(name: str) -> str:
             "delete; look at the list again to see what is there now")
 
 
-def check_version(data: dict, where: str, expected: int) -> None:
-    """Refuse a library file of a format version other than `expected`, in
-    config.version_problem's words."""
-    if (problem := version_problem(data, expected)) is not None:
+def check_version(data: dict, where: str, expected: int, oldest: int | None = None) -> int:
+    """A library file's format version: `expected`, or one from `oldest` where an older one is
+    still read. Any other is refused in config.version_problem's words."""
+    if (problem := version_problem(data, expected, oldest)) is not None:
         raise ConfigError(f"{where}: {problem}")
+    return data.get("version", expected if oldest is None else oldest)
 
 
 def read_name(data: dict, where: str, what: str) -> str:

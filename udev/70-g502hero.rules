@@ -1,0 +1,24 @@
+# Logitech G502 HERO, cabled (046d:c08b) -> uaccess on its HID++ interface, 01.
+#
+# Read off a G502 SE HERO, on the same id, on 2026-10-17: its HID++
+# collection is on interface 01, as Solaar's device descriptors
+# (interface=1) give it. The mouse has no receiver, so its USB identity is
+# its own and the property match below is scoped by interface, as the
+# keyboard's is.
+#
+# Interface 01 also carries the mouse's own key reports: libratbag's log of
+# one lists report ids 01, 03 and 04 beside HID++'s 10 and 11 on that node. A
+# button the mouse's onboard profile binds to a key or a macro sends its
+# keystrokes there, so a program that can read this node reads those
+# keystrokes. It carries no other device's: the mouse has no receiver, so no
+# other device reports through it. The owner granted it for this trial on
+# 2026-10-17, through uaccess, as the other rules do. Interface 00, the
+# pointer, is not granted.
+#
+# The grant crosses accounts, as 70-gearbench-uinput.rules says of
+# /dev/uinput's: a program that opened the node keeps reading it after another
+# account gets the seat, and so reads what that account types with a button
+# bound to a key. On a machine several people use, that file's group grant, in
+# a copy of this file in /etc/udev/rules.d/, limits the node to the group's
+# accounts.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c08b", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"

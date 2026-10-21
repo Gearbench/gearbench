@@ -11,20 +11,9 @@ one.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
-from .config import (
-    G_KEYS,
-    MACRO_PREFIX,
-    MOUSE_BUTTONS,
-    MOUSE_DEFAULTS,
-    MOUSE_LABELS,
-    PER_KEY,
-    PROFILE_IDS,
-    counted,
-    first_of,
-    word_list,
-)
+from .config import BINDABLE_KEYS, MACRO_PREFIX, PER_KEY, PROFILE_IDS, Lighting
 from .ghub import (
     MAX_DOCUMENT_BYTES,
     SHOWN_DEVICES,
@@ -33,8 +22,7 @@ from .ghub import (
     GhubError,
     GhubProfile,
     MacroRef,
-    Taken,
-    g_where,
+    button_label,
     mouse_where,
 )
 from .import_plan import (
@@ -49,13 +37,17 @@ from .import_plan import (
     Plan,
     game_form,
     keepers_last,
+    m_profile_parts,
     macro_form,
     macro_text,
     programs_for,
     step_lines,
 )
-from .library_files import slug
+from .keyboard import G915_KEY
+from .library_files import Taken, slug
+from .mouse import MouseModel, bindings_of, model_named
 from .profiles import GameProfile
+from .wording import counted, first_of, word_list
 
 # -- the same as what is there ---------------------------------------------
 
@@ -66,7 +58,9 @@ def _already_there(profile: GhubProfile, have: str, found: Found, existing: Exis
     Both sides are compared as the daemon keeps them: the body through
     `GameProfile.from_json`, as `import_profile` takes it, and `have` as the library read its
     file. A macro binding is compared by the macro's repeat mode and steps, not its name,
-    which a clash can change.
+    which a clash can change. A mouse model's buttons are compared as they are in force
+    (`game_form`), since a file can leave out the entry of a model at its defaults while the
+    body holds each model it has whole.
     """
     game = existing.games.get(have)
     if game is None:
@@ -88,7 +82,8 @@ def _already_there(profile: GhubProfile, have: str, found: Found, existing: Exis
         mine = existing.macro(name)
         return None if mine is None else existing.form_of(mine)
 
-    return game_form(imported, ours) == game_form(game, theirs)
+    return (game_form(imported, ours, imported.lighting)
+            == game_form(game, theirs, imported.lighting))
 
 
 # -- the plan --------------------------------------------------------------
@@ -186,7 +181,12 @@ def make_plan(found: Found, chosen: Iterable[str], existing: Existing,
                 # may not; the daemon keeps the M profile's own name anyway.
                 body = _body(profile, bank, resolved,
                              name=existing.m_names.get(bank, "").strip())
-                plan.m_profiles.append((bank, body, profile.lighting is not None))
+                # The keys the profile has (ghub._Reader.g_keys): the G915's names always, and
+                # a keyboard's with names of its own only where the profile has a slot of it,
+                # so the keys of one it has none of keep yours, as a mouse model's buttons do
+                # (the owner's decision of 2026-10-19).
+                keys = list(profile.banks[bank][0])
+                plan.m_profiles.append((bank, body, profile.lighting is not None, keys))
         elif not unanswered:
             body = _body(profile, 1, resolved, name=name)
             body["processes"], said = programs.get(name, ([], []))
@@ -308,14 +308,18 @@ def _body(profile: GhubProfile, bank: int, resolved: Callable[[Binding], str | N
     keys, shift = profile.banks.get(bank, ({}, {}))
     game = GameProfile(
         name=name or profile.name,
-        bindings={k: resolved(keys.get(k)) for k in G_KEYS},
-        shift={k: resolved(shift.get(k)) for k in G_KEYS},
-        mouse=MOUSE_DEFAULTS | {button: resolved(binding) or "none"
-                                for button, binding in profile.mouse.items()},
+        bindings={k: resolved(keys.get(k)) for k in BINDABLE_KEYS},
+        shift={k: resolved(shift.get(k)) for k in BINDABLE_KEYS},
+        # Each mouse model's that G HUB has, its defaults where G HUB binds nothing.
+        mouse={model: bindings_of({}, model) | {button: resolved(binding) or "none"
+                                                for button, binding in entry.items()}
+               for model, entry in profile.mouse.items()},
     )
-    if profile.lighting is not None:
-        game.mode, game.keys = PER_KEY, dict(profile.lighting.keys)
-        game.base, game.background = profile.lighting.base, 0x000000
+    # The G915's, the one keyboard G HUB's lighting is read for (ghub.convert_lighting); its
+    # defaults where G HUB has none, which a replace writes.
+    game.lighting[G915_KEY] = (Lighting() if profile.lighting is None else Lighting(
+        mode=PER_KEY, keys=dict(profile.lighting.keys), color=profile.lighting.base,
+        background=0x000000))
     return game.to_json()
 
 
@@ -335,7 +339,7 @@ def summary(profile: GhubProfile) -> str:
                 for value in side.values() if value is not None)
     return ", ".join([
         counted(bound, "G-key binding"),
-        counted(len(profile.mouse), "mouse button"),
+        counted(sum(map(len, profile.mouse.values())), "mouse button"),
         "per-key lighting" if profile.lighting is not None else "no lighting",
         counted(len(profile.macros), "macro"),
     ])
@@ -392,21 +396,24 @@ def details(profile: GhubProfile, found: Found, m_names: Mapping[int, str] | Non
     """The preview of one profile, as (heading, lines) sections.
     `with_programs` is whether G HUB's programs for it come over."""
     sections: list[tuple[str, list[str]]] = []
-    labels = profile.labels
+    labels, at = profile.labels, profile.key_where
     for bank, (keys, shift) in sorted(profile.banks.items()):
-        at = bank if profile.desktop else None
         where = f"M{bank} " if profile.desktop else ""
+        # The keys the profile has (ghub._Reader.g_keys), not every bindable key.
         sections.append((f"{where}G keys", [
-            f"{k}: {binding_text(keys.get(k), found, labels.get(g_where(k, False, at)))}"
-            for k in G_KEYS]))
-        if held := [f"{k}: {binding_text(shift[k], found, labels.get(g_where(k, True, at)))}"
-                    for k in G_KEYS if shift.get(k)]:
+            f"{k}: {binding_text(keys.get(k), found, labels.get(at(k, False, bank)))}"
+            for k in keys]))
+        if held := [f"{k}: {binding_text(shift[k], found, labels.get(at(k, True, bank)))}"
+                    for k in keys if shift.get(k)]:
             sections.append((f"{where}G keys with MR held", held))
-    sections.append(("Mouse buttons", [
-        f"{MOUSE_LABELS[b]}: "
-        + (binding_text(profile.mouse[b], found, labels.get(mouse_where(b)))
-           if b in profile.mouse else f"{MOUSE_DEFAULTS[b]} (Gearbench's default)")
-        for b in MOUSE_BUTTONS]))
+    for key, mouse in profile.mouse.items():
+        # Each mouse the import reads (ghub.mice_in), whose MICE entry names a model.
+        model = cast(MouseModel, model_named(key))
+        sections.append((f"The {model.name}'s buttons", [
+            f"{button_label(model, b)}: "
+            + (binding_text(mouse[b], found, labels.get(mouse_where(model, b)))
+               if b in mouse else f"{default} (Gearbench's default)")
+            for b, default in bindings_of({}, key).items()]))
     if profile.lighting is not None:
         n = len(profile.lighting.keys)
         sections.append(("Lighting", [f"Per-key colors on {counted(n, 'key')}, the rest dark"]))
@@ -424,10 +431,10 @@ def details(profile: GhubProfile, found: Found, m_names: Mapping[int, str] | Non
     if profile.desktop:
         names = m_names or {}
         which = word_list([f"M{i} \"{names.get(i, f'Profile {i}')}\"" for i in PROFILE_IDS], "and")
-        what = ["The G keys", "the MR layer", "the mouse buttons"]
-        if profile.lighting is not None:
-            what.append("the lighting")
-        sections.append(("Replaces", [f"{word_list(what, 'and')} of {which}"]))
+        first, *rest = m_profile_parts(profile.banks[1][0], bool(profile.mouse),
+                                       profile.lighting is not None)
+        what = word_list([f"The {first}", *(f"the {part}" for part in rest)], "and")
+        sections.append(("Replaces", [f"{what} of {which}"]))
     if profile.skipped:
         sections.append(("Not imported", list(profile.skipped)))
     if said := notes(profile, with_programs):

@@ -24,8 +24,9 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
-from .config import ConfigError, escaped, read_capped, reason
+from .config import ConfigError, read_capped
 from .dbusloop import RETRY, RETRY_MAX
+from .wording import escaped, reason
 
 log = logging.getLogger("gearbench")
 

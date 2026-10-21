@@ -1,0 +1,22 @@
+# Logitech G432 headset's USB adapter (046d:0a9c) HID interface -> uaccess for
+# the seat user.
+#
+# The adapter is a USB Audio Class 1 device:
+# interface 00 audio control, 01 the microphone, 02 the headphones, and one
+# HID interface, 03 (a G432's lsusb in a public hardware probe). One owner's
+# report lists four collections on 03: consumer control, which the volume
+# wheel sends, telephony, which the microphone's mute sends, and two
+# vendor pages, 0xFF99 and 0xFF43, the second HID++'s long report. Granting
+# it gives the seat user those reports and HID++ on that one node; they
+# carry no keystrokes. The audio nodes are the sound subsystem, which
+# systemd's 70-uaccess.rules already grants the seat user; this rule adds
+# nothing there.
+#
+# Matched on properties, as 70-g915.rules is, for the reason it gives. The
+# G431 (0a9b) stays out until it is read off the hardware.
+#
+# install.sh puts this in /usr/local/lib/udev/rules.d/; the .deb puts it in
+# /usr/lib/udev/rules.d/. Either way, reload with:
+#   sudo udevadm control --reload
+#   sudo udevadm trigger --subsystem-match=hidraw --action=add
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0a9c", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"

@@ -15,8 +15,9 @@ from typing import TYPE_CHECKING
 from gi.repository import Adw, GObject, Gtk
 
 from ..config import IDLE_DIM_AFTER, IDLE_OFF_AFTER, IDLE_RANGE, format_color
+from ..keyboard import wave_directions
 from ..keycodes import ZONES
-from ..lighting import ANIMATIONS, COLORLESS, default_speed, speed_range
+from ..lighting import ANIMATIONS, COLORLESS, DEFAULT_PERIODS, SPEEDS
 from ..profiles import PER_KEY, STATIC
 from .color import ColorPicker
 from .style import SWATCH_PREFIX, confirm, swatch_class, take_color_class
@@ -30,21 +31,26 @@ if TYPE_CHECKING:                       # pragma: no cover
 
 #: The Lighting mode list: one choice of what the board shows, the owner's
 #: decision of 2026-09-24. An animation keeps the painted keys, hidden, as
-#: Static does, and Per-key brings them back.
+#: Static does, and Per-key brings them back. The Mode row lists the animations
+#: the attached keyboard has (LightingCard.modes).
 LIGHTING_MODES = (STATIC, PER_KEY, *ANIMATIONS)
 MODE_LABELS = ("Static", "Per-key", "Breathe", "Cycle", "Wave", "Ripple")
-#: In the order the Mode row lists them.
+#: In LIGHTING_MODES' order.
 MODE_TIPS = ("One color across the whole board.",
              "Color individual keys on the board below.",
              "The whole board fades in and out in one color.",
              "The whole board runs through every color together.",
              "Colors roll across the board.",
              "A ripple of one color spreads from each key you press.")
-#: Wave's directions in the Direction row's order. The names and codes are G HUB's
-#: (lighting.WAVE_DIRECTIONS); the labels say which way each runs, as the owner
-#: saw on the G915 on 2026-09-24.
-DIRECTIONS = ("horizontal", "reverse-horizontal", "vertical", "center-out")
-DIRECTION_LABELS = ("Left to right", "Right to left", "Top to bottom", "From the center out")
+#: Wave's directions in the Direction row's order, each of lighting.WAVE_DIRECTIONS; the row
+#: lists those the keyboard takes (LightingCard.directions). The labels say which way each
+#: runs: Left to right, Right to left, Top to bottom and From the center out as the owner saw
+#: them on the G915 on 2026-09-24, and all six as the owner saw them on a wired G515 TKL on
+#: 2026-10-18.
+DIRECTIONS = ("horizontal", "reverse-horizontal", "vertical", "reverse-vertical", "center-out",
+              "center-in")
+DIRECTION_LABELS = ("Left to right", "Right to left", "Top to bottom", "Bottom to top",
+                    "From the center out", "From the edges in")
 #: One period of each animation, for the Speed row's subtitle.
 SPEED_UNITS = {"breathe": "breath", "cycle": "cycle", "wave": "wave", "ripple": "ripple"}
 #: The Speed slider's step, in milliseconds.
@@ -77,9 +83,14 @@ def speed_text(mode: str, ms: int) -> str:
     return f"{ms} ms per {SPEED_UNITS[mode]}"
 
 
+def mode_label(mode: str) -> str:
+    """A mode's name as the Mode row lists it."""
+    return MODE_LABELS[LIGHTING_MODES.index(mode)]
+
+
 def snap_speed(mode: str, value: float) -> int:
     """A slider value as a speed `mode` takes: to the step, within its range."""
-    fastest, slowest = speed_range(mode)
+    fastest, slowest = SPEEDS[mode]
     # A half rounds up, not to even as round() does: from a speed off the step
     # (2150, which --speed takes) every arrow key lands on a half, and every
     # other one would snap where the last did and send nothing. int() is floor
@@ -104,7 +115,7 @@ def picker_labels(mode: str, sampling: bool = False) -> tuple[str, str]:
             return "Brush", SAMPLE_HELP
         return "Brush", BRUSH_HELP
     if mode in COLORLESS:
-        return "Color", f"{mode.capitalize()} runs through every color; none to pick"
+        return "Color", f"{mode_label(mode)} runs through every color; none to pick"
     if mode == "breathe":
         return "Color", "Breathe's color, sent when you let go"
     if mode == "ripple":
@@ -179,6 +190,11 @@ class LightingCard:
         #: that cannot paint individual keys clears this, and the Mode, Speed,
         #: Direction, Background and Groups rows go with it.
         self.per_key = True
+        #: What the Mode row lists, in LIGHTING_MODES' order, and each entry's tip (show_mode).
+        self.modes: tuple[str, ...] = LIGHTING_MODES
+        self._mode_tips = list(MODE_TIPS)
+        #: What the Direction row lists, in DIRECTIONS' order (show_effect_rows).
+        self.directions: tuple[str, ...] = DIRECTIONS
 
     def build_lighting(self) -> Adw.PreferencesGroup:
         """The Mode row, the Speed row under an animation and the Direction
@@ -187,7 +203,7 @@ class LightingCard:
             title="Lighting",
             description="Holds only while the daemon runs.")
         self.mode_row = Adw.ComboRow(title="Mode", model=Gtk.StringList.new(MODE_LABELS))
-        explain_choices(self.mode_row, MODE_TIPS)
+        explain_choices(self.mode_row, self._mode_tips)
         self.mode_row.connect("notify::selected", self.on_mode)
         group.add(self.mode_row)
 
@@ -448,11 +464,11 @@ class LightingCard:
             return
         if self._on_defaults():
             with self._loading:
-                row.set_selected(LIGHTING_MODES.index(self.win.lighting.mode))
+                row.set_selected(self.modes.index(self.win.lighting.mode))
             return
         win = self.win
         index = row.get_selected()
-        mode = LIGHTING_MODES[index] if 0 <= index < len(LIGHTING_MODES) else STATIC
+        mode = self.modes[index] if 0 <= index < len(self.modes) else STATIC
         # A speed still settling goes first, for the animation it was set on.
         self._speed.flush()
         if mode != PER_KEY and win.lighting.color != win.lighting.static_color:
@@ -468,13 +484,11 @@ class LightingCard:
         if mode in ANIMATIONS:
             # The effect alone: the daemon keeps the speed and the direction
             # the profile saved, and the painted keys, hidden, for Per-key.
-            win.send_lighting({"command": "effect", "value": mode},
-                              self._read_back_if_refused)
+            win.send_lighting({"command": "effect", "value": mode})
         else:
             self.push_lighting()
         self.show_effect_rows()
-        self._update_board()
-        win.mouse.follow_keyboard()
+        self._draw_lighting()
 
     def show_capabilities(self, able: set[str]) -> None:
         """The rows this keyboard has, from its status's `capabilities`: Mode and the rows
@@ -491,7 +505,8 @@ class LightingCard:
         has them. It runs under the window's loading guard (KeyboardPage.sync), so the
         rows' handlers send nothing."""
         win = self.win
-        self.mode_row.set_selected(LIGHTING_MODES.index(win.lighting.mode))
+        self._list_modes(win.lighting.mode)
+        self.mode_row.set_selected(self.modes.index(win.lighting.mode))
         self.show_effect_rows()
         # Its release commits the color it shows, as on the Mouse tab. A color being
         # typed in the Hex row stays, as there, but a layer switch drops it, as it
@@ -500,6 +515,20 @@ class LightingCard:
         if not picker.dragging and (win.layer != self._color_for or not picker.typing(win)):
             picker.set_color(win.lighting.color)
             self._color_for = win.layer
+
+    def _list_modes(self, mode: str) -> None:
+        """The Mode row's list: Static, Per-key and the animations the attached keyboard has
+        (Window.animations), and `mode`, the one shown, if it is none of those. That is the
+        lighting the window read before a status changed the keyboard's animations, until the
+        files are read again (Window._moved)."""
+        offered = (STATIC, PER_KEY, *self.win.animations, mode)
+        modes = tuple(m for m in LIGHTING_MODES if m in offered)
+        if modes == self.modes:
+            return
+        self.modes = modes
+        # explain_choices reads its tips when an entry is drawn.
+        self._mode_tips[:] = [MODE_TIPS[LIGHTING_MODES.index(m)] for m in modes]
+        self.mode_row.set_model(Gtk.StringList.new([mode_label(m) for m in modes]))
 
     def show_picker(self, sampling: bool) -> None:
         """The picker's title and subtitle for the mode, with Sample on or off
@@ -530,10 +559,10 @@ class LightingCard:
         self.direction_row.set_visible(animated and mode == "wave")
         if not animated:
             return
-        ms = win.lighting.speeds.get(mode, default_speed(mode))
+        ms = win.lighting.speeds.get(mode, DEFAULT_PERIODS[mode])
         settling = self._speed.pending and self._speed_mode == mode
         if not settling:
-            low, high = speed_range(mode)
+            low, high = SPEEDS[mode]
             shown = self.speed_scale.get_adjustment()
             # A new range can move the value, which calls on_speed.
             if (shown.get_lower(), shown.get_upper(), self.speed_scale.get_value()) \
@@ -546,8 +575,22 @@ class LightingCard:
                     self.speed_scale.set_value(ms)
             self._say_speed(speed_text(mode, ms))
         if mode == "wave":
+            self._list_directions(win.lighting.direction)
             self._loading.put_selected(self.direction_row,
-                                       DIRECTIONS.index(win.lighting.direction))
+                                       self.directions.index(win.lighting.direction))
+
+    def _list_directions(self, direction: str) -> None:
+        """The Direction row's list: the directions the keyboard model the lighting shows on
+        takes (keyboard.wave_directions over Window.shown_on), and `direction`, the one shown,
+        if it is none of those: one its own entry in a file holds, which the daemon sends as
+        it is."""
+        offered = (*wave_directions(self.win.shown_on.model), direction)
+        directions = tuple(d for d in DIRECTIONS if d in offered)
+        if directions == self.directions:
+            return
+        self.directions = directions
+        self._loading.put_model(self.direction_row, Gtk.StringList.new(
+            [DIRECTION_LABELS[DIRECTIONS.index(d)] for d in directions]))
 
     def on_speed(self, scale: Gtk.Scale) -> None:
         """The slider moved: say the speed now, and send it once it settles."""
@@ -581,24 +624,23 @@ class LightingCard:
         if ms == self.win.lighting.speeds.get(mode):
             return
         self.win.lighting.speeds[mode] = ms
-        self.win.send_lighting({"command": "effect", "value": mode, "speed": ms},
-                               self._read_back_if_refused)
+        self.win.send_lighting({"command": "effect", "value": mode, "speed": ms})
 
     def on_direction(self, row: Adw.ComboRow, _p: GObject.ParamSpec) -> None:
         """A direction for wave, sent and saved at once."""
         if self._loading.active or self.win.lighting.mode != "wave":
             return
         index = row.get_selected()
-        if not 0 <= index < len(DIRECTIONS) or DIRECTIONS[index] == self.win.lighting.direction:
+        if not 0 <= index < len(self.directions) \
+                or self.directions[index] == self.win.lighting.direction:
             return
         if self._on_defaults():
             with self._loading:
-                row.set_selected(DIRECTIONS.index(self.win.lighting.direction))
+                row.set_selected(self.directions.index(self.win.lighting.direction))
             return
-        self.win.lighting.direction = DIRECTIONS[index]
+        self.win.lighting.direction = self.directions[index]
         self.win.send_lighting({"command": "effect", "value": "wave",
-                                "direction": self.win.lighting.direction},
-                               self._read_back_if_refused)
+                                "direction": self.win.lighting.direction})
 
     def show_background(self) -> None:
         """The Background row in the window's background: the swatch's color rule and its
@@ -615,8 +657,7 @@ class LightingCard:
             return
         self.win.lighting.background = color
         self.push_lighting()
-        self._update_board()
-        self.win.mouse.follow_keyboard()
+        self._draw_lighting()
 
     def on_brightness(self, row: Adw.ComboRow, _p: GObject.ParamSpec) -> None:
         if self._loading.active:
@@ -676,11 +717,10 @@ class LightingCard:
         self.win.lighting.color = color
         if self.win.lighting.mode == PER_KEY:
             return
-        self._update_board()
+        self._draw_lighting()
         # Repaint only, no commit; the worker coalesces these during a drag.
         self.win.preview({"command": "preview", "value": format_color(color)},
                          self.on_preview)
-        self.win.mouse.follow_keyboard()
 
     def _commit(self, color: int) -> None:
         """The picker's release, or a saved color or a hex applied. Held, it
@@ -699,12 +739,11 @@ class LightingCard:
         if self._on_defaults():
             if start is not None and start != self.win.lighting.color:
                 self.win.lighting.color = start
-                self._update_board()
+                self._draw_lighting()
                 # A preview saves nothing: the keyboard and a synced mouse
                 # go back to what they showed before the drag.
                 self.win.preview({"command": "preview", "value": format_color(start)},
                                  self.on_preview, while_held=True)
-                self.win.mouse.follow_keyboard()
             self.picker.set_color(self.win.lighting.color)       # put the picker back
             return
         self.win.lighting.color = color
@@ -713,6 +752,10 @@ class LightingCard:
         # and ripple run in it.
         self.win.lighting.static_color = color
         self.push_lighting()
+        self._draw_lighting()
+
+    def _draw_lighting(self) -> None:
+        """Draw the board, and a synced mouse's color, in the window's lighting."""
         self._update_board()
         self.win.mouse.follow_keyboard()
 
@@ -721,25 +764,18 @@ class LightingCard:
                                             self.win.set_status, self.win.refused)
 
     def push_lighting(self) -> None:
-        """Send what the window shows. A refusal is taken back
-        (Window.send_lighting) and the lighting read back, or what the daemon
-        refused would stay drawn as if saved."""
-        callback = self._read_back_if_refused
+        """Send what the window shows; a refusal is taken back and read back
+        (Window.send_lighting)."""
         state = self.win.lighting
         if state.mode == PER_KEY:
-            self.win.send_lighting(paint_request(state.background, state.per_key), callback)
+            self.win.send_lighting(paint_request(state.background, state.per_key))
         elif state.mode in ANIMATIONS:
             # The Static color, which the animation runs in; with no
             # "mode" the daemon keeps the effect.
-            self.win.send_lighting({"command": "color", "value": format_color(state.color)},
-                                   callback)
+            self.win.send_lighting({"command": "color", "value": format_color(state.color)})
         else:
             # "mode" says this is the Static choice, one color for the whole
             # board: the daemon stops showing a stored per-key layout, and
             # any animation.
             self.win.send_lighting({"command": "color", "value": format_color(state.color),
-                                    "mode": STATIC}, callback)
-
-    def _read_back_if_refused(self, reply: dict | None) -> None:
-        if reply is None:
-            self.win.resync()
+                                    "mode": STATIC})

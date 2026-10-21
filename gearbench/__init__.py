@@ -1,14 +1,16 @@
-"""Gearbench: a Linux control panel for the Logitech G915 keyboard, the G502 X PLUS
-and G305 mice, and the Astro A50 Gen 4 headset.
+"""Gearbench: a Linux control panel for Logitech G keyboards, mice and headsets, and the
+Astro A50 Gen 4 headset.
 
-Only the G915 keyboard, the G502 X PLUS and the G305 attach, by the ids in
-`keyboard.PRODUCT_IDS` and `mouse.PRODUCT_IDS`; a model is added once it is tested on
-the hardware. Each one's abilities are probed from its feature table. The A50 Gen 4's
-base station speaks its own protocol, not HID++ (gearbench.astro).
+Only the ids in `keyboard.PRODUCT_IDS`, `mouse.PRODUCT_IDS`, `g432.PRODUCTS` and the A50's
+attach. A model is added once it is tested on the hardware, but for the wider-devices
+trial's, which attach before their test, for reads and volatile writes, with no flash write
+sent. The HID++ devices' abilities are probed from their feature tables; the A50 Gen 4's
+base station speaks its own protocol, not HID++ (gearbench.astro). The G432's adapter keeps
+the sidetone level it is sent through an unplug (gearbench.g432).
 
 `gearbench.daemon` owns the devices and holds the session's lighting claim;
 `gearbench.cli` and `gearbench.gui` talk to it over a unix socket and, but for
-`gearbench-ctl probe`, never touch hardware themselves.
+`gearbench-ctl probe` and `gearbench-ctl report`, never touch hardware themselves.
 """
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"

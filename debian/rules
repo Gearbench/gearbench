@@ -10,7 +10,6 @@ export PYBUILD_NAME = gearbench
 # usr/lib/systemd/user/gearbench.service.
 UNIT = debian/gearbench.user.service
 SPATIAL_UNIT = debian/gearbench.gearbench-spatial.user.service
-SPATIAL_LOGIN_UNIT = debian/gearbench.gearbench-spatial-login.user.service
 
 %:
 	dh $@ --with python3 --buildsystem=pybuild
@@ -20,7 +19,7 @@ SPATIAL_LOGIN_UNIT = debian/gearbench.gearbench-spatial-login.user.service
 # point in /usr/bin, so WorkingDirectory= has nothing to say and ExecStart= is
 # absolute. Its PYTHONPATH= line becomes an unset of the one the session
 # exported. In the daemon's unit that is a second guard, since its console
-# script runs with -I (below). In the spatial unit, whose ExecStartPre runs
+# script runs with -I (below). In the spatial unit, whose ExecStart runs
 # python3 -s -P, an empty element ("$PYTHONPATH:/opt/x" with none set before)
 # names the working directory, $HOME, which -P leaves on sys.path.
 # The greps are guards: a templated unit that reached a .deb would start a
@@ -39,8 +38,7 @@ execute_after_dh_auto_build:
 	    spatial/gearbench-spatial.service.in > $(SPATIAL_UNIT)
 	! grep -q '@[A-Z_]*@' $(SPATIAL_UNIT)
 	grep -qx 'UnsetEnvironment=PYTHONPATH PYTHONHOME' $(SPATIAL_UNIT)
-	grep -qx 'ExecStartPre=/usr/bin/python3 -s -P -m gearbench.spatial render %t/gearbench-spatial.conf' $(SPATIAL_UNIT)
-	cp spatial/gearbench-spatial-login.service $(SPATIAL_LOGIN_UNIT)
+	grep -qx 'ExecStart=/usr/bin/python3 -s -P -m gearbench.spatial_unit run %t/gearbench-spatial.conf' $(SPATIAL_UNIT)
 
 # The console script, which the unit, the desktop entry and D-Bus start, runs
 # with -I: no PYTHON* variable and no user site-packages from the session,
@@ -52,17 +50,12 @@ override_dh_python3:
 
 # The daemon's unit enabled for every account: at the login
 # screen the daemon exits before it opens a device, where python3-gi lets it
-# read the session's class. The spatial one and its
-# login unit installed off, since the Headset tab switches them on per
-# account, and disabled on purge. This order: a plain call after the named
-# ones would enable all three. dh_installsystemduser follows the spatial
-# unit's Also= into the login unit: before the login unit is installed it
-# refuses, and after, it writes the login unit's scripts a second time. -X
-# leaves them to the login unit's own call.
+# read the session's class. The spatial one installed off, since the Headset
+# tab switches it on per account. This order: a plain call after the named
+# one would enable both.
 override_dh_installsystemduser:
 	dh_installsystemduser
-	dh_installsystemduser --name=gearbench-spatial-login --no-enable
-	dh_installsystemduser --name=gearbench-spatial --no-enable -Xgearbench-spatial-login.service
+	dh_installsystemduser --name=gearbench-spatial --no-enable
 
 # The test suite needs no display (the widget tests start their own broadway
 # server, or skip), and it imports GTK 4 and libadwaita, which Build-Depends

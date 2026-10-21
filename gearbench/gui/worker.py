@@ -6,8 +6,9 @@ file reads. `LoadingGuard` keeps a row the program sets from being read back as
 the user's change, and sets a row's value only when that changes it. `Settle`
 sends once after a run of changes stops. `daemon_down` and `unreachable` read a
 failed round trip through the daemon client's `failure`, as the CLI does, and
-`preview_reply` a preview's reply, the same way for every tab and dialog. Nothing
-here builds a widget, so all of it is testable without a display.
+`preview_reply` a preview's reply, the same way for every tab and dialog.
+`daemon_listening` says whether a daemon accepts on the socket. Nothing here builds a
+widget, so all of it is testable without a display.
 """
 
 from __future__ import annotations
@@ -20,8 +21,8 @@ from typing import TYPE_CHECKING, Never, Protocol, Self
 
 from gi.repository import GLib
 
-from ..config import reason
-from ..daemon import BUSY, DOWN, UNREAD, failure, send_command, socket_path
+from ..daemon import BUSY, DOWN, UNREAD, failure, listening, send_command, socket_path
+from ..wording import reason
 
 if TYPE_CHECKING:                       # pragma: no cover
     from gi.repository import Adw, Gio, Gtk
@@ -64,6 +65,11 @@ NOT_RUNNING = "the daemon is not running"
 def daemon_down(error: BaseException | None) -> bool:
     """Whether a failed round trip means no daemon is running: `failure`'s DOWN."""
     return failure(error) == DOWN
+
+
+def daemon_listening() -> bool:
+    """Whether a daemon accepts on the socket; a file left by a killed daemon refuses."""
+    return listening(socket_path())
 
 
 def unreachable(error: BaseException) -> str:

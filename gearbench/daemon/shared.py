@@ -1,10 +1,6 @@
-"""What more than one of the daemon's controllers uses: the reply helpers, the
-request readers, the failure tests, the headset's failure, the 0x1D4B feature
-id (F_WIRELESS), the budgets they share, the low-battery notices and the form
-of the status digests (digest); and the core's own beside them: the control
-socket's depth check (nested_past), its refusal of what is no request
-(not_a_request), its reader of a request's layer (checked_layer) and the
-replies to a HID++ failure and a mouse's (hidpp_refusal, mouse_refusal)."""
+"""The helpers below the daemon's controllers, among them the reply helpers, the request
+readers, the failure tests, the budgets they share and the low-battery notices; and the core's
+own beside them: its checks of a request and its reply to a mouse's failure."""
 
 from __future__ import annotations
 
@@ -12,11 +8,12 @@ import hashlib
 import json
 import logging
 import os
+import time
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, NamedTuple, TypedDict
 
 from ..battery import BATTERY_WARNINGS
-from ..config import PROFILE_CHOICES, expect, kind_of, number, reason, whole, written
+from ..config import PROFILE_CHOICES, expect
 from ..hidpp import (
     PROBE_RETRIES,
     PROBE_TIMEOUT,
@@ -25,12 +22,16 @@ from ..hidpp import (
     HidppFailure,
     HidppTimeout,
     not_there,
+    open_device,
 )
+from ..keyboard import MODEL_OF as KEYBOARDS
 from ..library_files import slug
 from ..lighting import DARK, DIM, LIT
 from ..mouse import MouseError
+from ..wording import kind_of, number, reason, whole, written
 
 if TYPE_CHECKING:
+    from ..hidpp import Hidpp
     from . import Daemon
 
 log = logging.getLogger("gearbench")
@@ -77,6 +78,10 @@ NOT_AN_M_PROFILE = f"profile must be {PROFILE_CHOICES}"
 #: How long the loop waits before looking for a missing keyboard again.
 RECONNECT_DELAY = 2.0
 
+#: Why a virtual device is missing, after the colon of each problem that says what stops
+#: working without it.
+UINPUT_NOT_OPENED = "/dev/uinput could not be opened"
+
 #: A power-on report comes in pairs; one re-apply per this many seconds answers both.
 REAPPLY_INTERVAL = 2.0
 
@@ -111,11 +116,19 @@ def darker(one: str, other: str) -> str:
 
 
 def scaled(color: int, percent: int) -> int:
-    """Each of a color's red, green and blue at `percent` of itself, rounded down: the keyboard's
-    brightness for a synced mouse, which has none of its own."""
+    """Each of a color's red, green and blue at `percent` of itself, rounded down. A color at
+    the keyboard's brightness goes through PerKeyboard.at_brightness."""
     if percent >= 100:
         return color
     return sum(((color >> shift & 0xFF) * percent // 100) << shift for shift in (16, 8, 0))
+
+
+def said_once(said: dict[str, str], node: str, line: str, level: int) -> None:
+    """Log `line`, an attempt's on the device node `node`, at `level`, or at debug where it is
+    the last line `said` keeps for that node, and keep it there: an attempt is tried again
+    every RECONNECT_DELAY, and two nodes tried in one attempt each keep their own."""
+    log.log(logging.DEBUG if said.get(node) == line else level, "%s", line)
+    said[node] = line
 
 
 def failure_reason(exc: BaseException) -> str:
@@ -244,7 +257,7 @@ DEVICE_REFUSED = "The {} refused that."
 
 
 def hidpp_refusal(device: str, failure: HidppFailure) -> dict:
-    """A HID++ failure's reply, worded for `device`, the keyboard or the mouse."""
+    """A HID++ failure's reply, worded for `device`, the name put in its sentences."""
     if isinstance(failure, DeviceGone):
         return refusal(DEVICE_GONE.format(device), failure)
     if isinstance(failure, HidppTimeout):
@@ -292,8 +305,61 @@ def node_denied(path: Path) -> bool:
     return path.exists() and not os.access(path, os.R_OK | os.W_OK)
 
 
+class Answered(NamedTuple):
+    """A keyboard that answered its probe (open_keyboard)."""
+
+    #: Its node, as keyboard.find_attached_keyboard gives it.
+    found: tuple[Path, int, int]
+    #: The open device, and the index it answered on.
+    opened: tuple[Hidpp, int]
+
+
+def open_keyboard(found: tuple[Path, int, int]) -> tuple[Hidpp, int] | None:
+    """The keyboard at `found`, (node, product id, derived index) as
+    keyboard.find_attached_keyboard gives it, open on the index that answers its model's
+    witness (hidpp.open_device), the derived one first, on MOUSE_PROBE, with that index; None
+    where nothing answers, as on a receiver's node with its keyboard switched off. Raises
+    PermissionError for a node the udev rule did not grant."""
+    path, product, derived = found
+    model = KEYBOARDS[product]
+    return open_device(path, model.probe, prefer=derived, long_only=model.long_only,
+                       **MOUSE_PROBE)
+
+
+class Lookout:
+    """When a controller looks again for its missing device: `first` seconds after a look,
+    twice the last wait after each further look whose node gave no answer, up to `longest`,
+    and at once when that node is gone, since the problem it is reported under asks for an
+    unplug and a replug."""
+
+    def __init__(self, first: float, longest: float) -> None:
+        self.first, self.longest = first, longest
+        #: The node whose probe got no answer, None while none did.
+        self.unanswered: Path | None = None
+        self.retry_at = 0.0
+        #: The wait after the next look.
+        self.wait = first
+
+    def due(self) -> bool:
+        gone = self.unanswered is not None and not self.unanswered.exists()
+        return gone or time.monotonic() >= self.retry_at
+
+    def looked(self) -> None:
+        """Time the next look from the end of this one."""
+        if self.unanswered is not None:
+            wait, self.wait = self.wait, min(self.wait * 2, self.longest)
+        else:
+            wait = self.wait = self.first
+        self.retry_at = time.monotonic() + wait
+
+    def recheck(self) -> None:
+        """After a resume: due at once, since time.monotonic() stops while the machine
+        sleeps."""
+        self.retry_at = min(self.retry_at, time.monotonic())
+
+
 class BatteryNotices:
-    """A device's low-battery notices (warn_battery), the keyboard's (Session) and the
+    """A device's low-battery notices (warn_battery), the keyboard's (KeyboardBattery) and the
     headset's (Headset), one rule for both. A subclass sets the words and battery_names();
     the session's desktop posts the notices."""
 

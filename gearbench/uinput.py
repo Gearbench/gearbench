@@ -22,6 +22,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .hidpp import BUS_USB
+from .wording import reason
 
 UINPUT = "/dev/uinput"
 #: The kernel's BUS_VIRTUAL.
@@ -611,7 +612,7 @@ class _UinputDevice:
         except OSError as exc:
             # The node and the reason only: the daemon's warning adds the rule, getfacl and
             # the uinput module.
-            raise UinputError(f"cannot open {UINPUT}: {exc.strerror}") from exc
+            raise UinputError(f"cannot open {UINPUT}: {reason(exc)}") from exc
 
         set_bit = {EV_KEY: UI_SET_KEYBIT, EV_REL: UI_SET_RELBIT}
         try:
@@ -631,7 +632,7 @@ class _UinputDevice:
         except OSError as exc:
             os.close(self._fd)
             raise UinputError(
-                f"cannot set up {self.name} on {UINPUT}: {exc.strerror or exc}") from exc
+                f"cannot set up {self.name} on {UINPUT}: {reason(exc)}") from exc
         # The kernel needs a moment to publish the node before anything can
         # read from it; events written immediately are otherwise lost.
         time.sleep(0.05)
@@ -648,7 +649,7 @@ class _UinputDevice:
         except OSError as exc:
             if exc.errno == errno.ENODEV:
                 raise UinputError(f"{self.name} vanished") from exc
-            raise UinputError(f"cannot write to {self.name}: {exc.strerror or exc}") from exc
+            raise UinputError(f"cannot write to {self.name}: {reason(exc)}") from exc
 
     def sync(self) -> None:
         self._write(EV_SYN, SYN_REPORT, 0)

@@ -338,7 +338,7 @@ class TrayExport:
         """RegisterStatusNotifierItem by the item's path, from its own connection, whose unique
         name the watcher takes for the item's; once that connection and a tray are there. Under
         GNOME only the Shell's watcher is asked, the rule `_may_be_tray` keeps, as `_from_tray`
-        does: one another program holds is sent nothing. A refusal or a timeout is tried again
+        does: one another program holds gets no registration. A refusal or a timeout is tried again
         on the reconnect's backoff: the AppIndicators extension answers only once the shell has
         started."""
         owner, conn = tray.watcher, tray.link.conn

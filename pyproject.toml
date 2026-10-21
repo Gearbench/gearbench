@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gearbench"
-description = "Key remapping, lighting, DPI and macros for Logitech G keyboards and mice (the G915, G502 X PLUS and G305), and the Astro A50 headset's controls"
+description = "Key remapping, lighting, DPI and macros for Logitech G keyboards and mice, and the settings of the Logitech G432 and Astro A50 headsets"
 readme = "README.md"
 requires-python = ">=3.14"
 license = "GPL-3.0-or-later"
@@ -35,8 +35,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/wmuschetto/gearbench"
-Releases = "https://github.com/wmuschetto/gearbench/releases"
+Homepage = "https://github.com/gearbench/gearbench"
+Releases = "https://github.com/gearbench/gearbench/releases"
 
 [project.scripts]
 # For an installed package, in place of the hand-written desktop/gearbench-ctl

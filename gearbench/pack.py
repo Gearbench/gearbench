@@ -21,20 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-from .config import (
-    DIRECTION_TURNS,
-    PER_KEY,
-    ConfigError,
-    both_ends,
-    counted,
-    format_color,
-    kind_of,
-    read_json,
-    reason,
-    unprefixed,
-    unread_reason,
-    word_list,
-)
+from .config import PER_KEY, ConfigError, format_color, read_json, unprefixed, unread_reason
 from .import_plan import (
     CLASH_MACRO,
     CLASH_PROFILE,
@@ -49,10 +36,12 @@ from .import_plan import (
     programs_for,
     step_lines,
 )
+from .keyboard import own_entry, shown_lighting
 from .library_files import by_name, slug
 from .lighting import ANIMATIONS
 from .macros import Macro, MacroLibrary
-from .profiles import LIGHTING_FIELDS, GameProfile, Library
+from .profiles import GameProfile, Library
+from .wording import DIRECTION_TURNS, both_ends, counted, kind_of, reason, word_list
 
 #: Where the package installs the pack.
 PACKAGED = Path("/usr/share/gearbench/pack")
@@ -179,7 +168,7 @@ def _note_fault(line: object) -> str | None:
 
 
 #: What a pack profile may not hold, by GameProfile field, and why it is refused: every
-#: field but its name, its programs and LIGHTING_FIELDS.
+#: field but its name, its programs and its lighting.
 REFUSED_FIELDS = {"bindings": "binds a G key", "shift": "binds a G key",
                   "mouse": "binds a mouse button",
                   "mouse_tuning": "holds DPI stages or a report rate"}
@@ -196,18 +185,21 @@ def _more_than_lighting(profile: GameProfile) -> str | None:
 # -- saying what it holds --------------------------------------------------
 
 def lighting_text(profile: GameProfile) -> str:
-    """A profile's lighting in a few words."""
-    if profile.effect in ANIMATIONS:
-        return f"{profile.effect.capitalize()} effect"
+    """A profile's lighting in a few words: the first keyboard model's it has, in MODEL_OF's
+    order, the G915's for every profile of the pack (keyboard.shown_lighting before any
+    keyboard)."""
+    light = shown_lighting(profile.lighting, None, None)[0]
+    if light.effect in ANIMATIONS:
+        return f"{light.effect.capitalize()} effect"
     # Disabled darkens the board, and a per-key layout's keys still show over
     # it (keyboard.shown_color).
-    dark = profile.effect == "disabled"
-    if profile.mode == PER_KEY and (profile.keys or not dark):
-        rest = "dark" if dark else format_color(profile.background)
-        return f"Per-key colors on {counted(len(profile.keys), 'key')}, the rest {rest}"
+    dark = light.effect == "disabled"
+    if light.mode == PER_KEY and (light.keys or not dark):
+        rest = "dark" if dark else format_color(light.background)
+        return f"Per-key colors on {counted(len(light.keys), 'key')}, the rest {rest}"
     if dark:
         return "Lights off"
-    return f"Static color {format_color(profile.base)}"
+    return f"Static color {format_color(light.color)}"
 
 
 def programs_text(profile: GameProfile) -> str:
@@ -310,8 +302,12 @@ def replace_choices(pack: Pack, names: Iterable[str],
 # -- the plan --------------------------------------------------------------
 
 def _same_lighting(profile: GameProfile, yours: GameProfile | None) -> bool:
-    return yours is not None and all(getattr(profile, name) == getattr(yours, name)
-                                     for name in LIGHTING_FIELDS)
+    """Whether `yours` has the pack profile's lighting for each keyboard model the pack's has,
+    each under any of its ids (own_entry), the entry merge_under keeps: what a replace would
+    write (Games._import_profile)."""
+    return yours is not None and all(own_entry(yours.lighting, model)
+                                     == own_entry(profile.lighting, model)
+                                     for model in profile.lighting)
 
 
 def make_plan(pack: Pack, profiles: Iterable[str], macros: Iterable[str], existing: Existing,

@@ -8,6 +8,7 @@ import copy
 import logging
 import time
 from collections.abc import Callable, Collection
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -25,18 +26,22 @@ from ..apps import (
     wanted_forms,
 )
 from ..config import (
+    BINDABLE_KEYS,
     PROFILE_IDS,
     ConfigError,
     Lighting,
-    escaped,
     expect,
-    reason,
+    merge_under,
+    not_bindable,
     unread_reason,
 )
 from ..focus import Focus, held_until
+from ..keyboard import keep_entry, model_ids as keyboard_ids
 from ..library_files import file_name, not_deleted
-from ..lighting import ANIMATIONS, WAVE_DIRECTIONS, speed_range
-from ..profiles import LIGHTING_FIELDS, PER_KEY, STATIC, GameProfile, Library
+from ..lighting import ANIMATIONS, SPEEDS, WAVE_DIRECTIONS
+from ..mouse import bindings_of, model_ids as mouse_ids
+from ..profiles import STATIC, GameProfile, Library, layer_in_force
+from ..wording import escaped, reason
 from ..xfocus import XFocus
 from .shared import (
     NOT_AN_M_PROFILE,
@@ -101,12 +106,18 @@ def matching_profile(running: set[str], profiles: list[GameProfile]) -> GameProf
     return None
 
 
-def take_lighting(lighting: Lighting, profile: GameProfile) -> None:
-    """Put a game profile's lighting on an M profile's, its params cleared."""
-    lighting.effect, lighting.color, lighting.params = profile.effect, profile.base, {}
-    lighting.speeds, lighting.direction = dict(profile.speeds), profile.direction
-    lighting.mode, lighting.keys = profile.mode, dict(profile.keys)
-    lighting.background = profile.background
+def _keys_named(value: object) -> tuple[str, ...]:
+    """The keys an `import_m_profile` request's `keys` names, each one of BINDABLE_KEYS, or
+    every one of them for a null or a request without it, as a front end older than the field
+    sends."""
+    if value is None:
+        return BINDABLE_KEYS
+    expect(value, list, "import_m_profile.keys", "a list of key names")
+    keys = tuple(cast(list, value))     # expect raised for anything else
+    for key in keys:
+        if key not in BINDABLE_KEYS:
+            raise ConfigError(f"import_m_profile.keys: {not_bindable(key)}")
+    return keys
 
 
 class Games:
@@ -204,7 +215,10 @@ class Games:
         if why is not None:
             # A profile the library read has its file (GameProfile.load).
             said = self.overlay.unreadable = unread_reason(cast("Path", path).name, why)
-            log.info("game profile %r keeps what it held: its file was not read (%s)", name, said)
+            # Escaped: the error can quote the file's keys as they are, and the journal splits
+            # a record at each newline (cli.service.JournalFormatter).
+            log.info("game profile %r keeps what it held: its file was not read (%s)", name,
+                     escaped(said))
             return {"overlay_error": self.overlay_error()}
         log.info("game profile %r is no longer in the library; unloading it", name)
         self.d.mice.dpi.profile_gone(name)
@@ -216,17 +230,15 @@ class Games:
         """What the library holds for the loaded `overlay`: the profile read for its name, or
         from its file under a name edited there; else why its file was not read, which may
         still hold it; else (None, None), in no file. A directory that cannot be listed may hold
-        the file as it was. A shadowed file is not in unread(): it loaded, and as get() found no
-        profile of this name, holds another's."""
+        the file as it was. A shadowed file has no why_unread(): it loaded, and as get() found
+        no profile of this name, holds another's."""
         path = overlay.path
         fresh = self.library.get(overlay.name)
         if fresh is None and path is not None:
             fresh = next((p for p in self.library.all() if p.path == path), None)
         if fresh is not None:
             return fresh, None
-        why = next((why for file, why in self.library.unread()
-                    if path is not None and file == path.name), self.library.folder_why())
-        return None, why
+        return None, self.library.why_unread(None if path is None else path.name)
 
     def unload_gone(self) -> None:
         """Unload the profile whose file or program has gone: one loaded by hand is no longer
@@ -289,6 +301,13 @@ class Games:
         self.d.persist()
         return None
 
+    def reload(self) -> dict:
+        """`reload`: follow config.json's record (follow_record), then read the loaded profile
+        again (reread), whose answer is what the reply adds. In that order: follow_record leaves
+        to reread what the loaded profile's file holds now."""
+        self.follow_record()
+        return self.reread()
+
     def follow_record(self) -> None:
         """`reload`: follow config.json's `active_game_profile` (remembered), as at a start. A
         profile loaded by hand that it does not name is replaced, or unloaded for a name whose
@@ -325,23 +344,8 @@ class Games:
 
     # -- the layer in force --------------------------------------------------
 
-    def lighting_layer(self) -> GameProfile | Lighting:
-        """The lighting layer in force, which a lighting change edits: the loaded game profile,
-        else the active M profile's lighting. Each names its Static color `color`."""
-        return self.overlay if self.overlay is not None else self.d.config.profile.lighting
-
-    def active_lighting(self) -> tuple[str, int, dict[str, int], dict[str, int]]:
-        """Effect, color, per-key colors and effect params of the layer in force, the overlay
-        first. The color is the background in per-key mode without an animation, the Static
-        color otherwise."""
-        layer = self.lighting_layer()
-        shows_keys = layer.mode == PER_KEY and layer.effect not in ANIMATIONS
-        per_key = dict(layer.keys) if shows_keys else {}
-        return layer.effect, layer.mode_color(), per_key, layer.settings()
-
     def active_binding(self, key: str, shifted: bool) -> str | None:
-        layer = self.overlay if self.overlay is not None else self.d.config.profile
-        return layer.binding(key, shifted)
+        return layer_in_force(self.overlay, self.d.config.profile).binding(key, shifted)
 
     def key_layer(self, shift: bool) -> dict[str, str | None]:
         """The G key bindings in force, MR's layer with `shift`: the loaded game profile's, or
@@ -350,12 +354,18 @@ class Games:
             return self.overlay.shift if shift else self.overlay.bindings
         return self.d.config.profile.shift if shift else self.d.config.profile.keys
 
-    def mouse_bindings(self) -> dict[str, str]:
-        """The mouse bindings in force: the loaded game profile's, or the M profile's."""
-        return (self.overlay if self.overlay is not None else self.d.config.profile).mouse
+    def mouse_entries(self) -> dict[str, dict[str, str]]:
+        """The mouse bindings in force by mouse model: the loaded game profile's, or the M
+        profile's."""
+        return layer_in_force(self.overlay, self.d.config.profile).mouse
 
-    def active_mouse_binding(self, button: str) -> str:
-        return self.mouse_bindings().get(button, "none")
+    def mouse_bindings(self, model: str) -> dict[str, str]:
+        """What the buttons of the mouse model named `model` (mouse.model_key) are bound to in
+        the layer in force (mouse.bindings_of)."""
+        return bindings_of(self.mouse_entries(), model)
+
+    def active_mouse_binding(self, button: str, model: str) -> str:
+        return self.mouse_bindings(model).get(button, "none")
 
     def apply_layer(self) -> str | None:
         """Show the layer in force on the keyboard and the mice; apply_profile's answer."""
@@ -367,14 +377,15 @@ class Games:
     # -- commands ------------------------------------------------------------
 
     def _cmd_profiles(self, request: dict) -> dict:
+        """The game profiles, each with the lighting it shows on the keyboard model in force."""
         return {
             "ok": True,
             "overlay": self.overlay.name if self.overlay else None,
             "auto": self.overlay_auto,
             "profiles": [
-                {"name": p.name, "mode": p.mode, "effect": p.effect,
-                 "processes": p.processes, "keys": len(p.keys)}
-                for p in self.library.all()
+                {"name": p.name, "mode": shown.mode, "effect": shown.effect,
+                 "processes": p.processes, "keys": len(shown.keys)}
+                for p in self.library.all() for shown in (self.d.per_keyboard.shown(p.lighting),)
             ],
         }
 
@@ -399,7 +410,8 @@ class Games:
         failed = self.apply_layer()
         self.d.persist()
         log.info("loaded game profile %r over profile %d", profile.name, self.d.config.active)
-        return with_note({"ok": True, "overlay": profile.name, "mode": profile.mode},
+        return with_note({"ok": True, "overlay": profile.name,
+                          "mode": self.d.per_keyboard.shown(profile.lighting).mode},
                          failed, self.d.keyboard.last_apply_detail)
 
     def suppress_auto(self) -> None:
@@ -409,7 +421,7 @@ class Games:
         if self.overlay is None:
             return
         if self.overlay_auto:
-            # Set with the flag, by a match (follow_match).
+            # Set with the flag, by a match (_take_match).
             process = cast("str", self._auto_process)
         elif self._matched is not None and same_profile(self._matched[0], self.overlay.name):
             process = self._matched[1]
@@ -477,10 +489,9 @@ class Games:
         return {"ok": True, "keep_loaded": value}
 
     def _cmd_save_profile(self, request: dict) -> dict:
-        """Save what shows, overlay or M profile, as a game profile: an
-        animation as it is, a disabled board static and black, any other
-        effect as its color. The stored layout and background go with it,
-        hidden where the source hides them."""
+        """Save what shows, overlay or M profile, as a game profile (_saved_lighting), with the
+        layer's bindings. The lighting is saved for the keyboard model in force alone; a profile
+        saved over keeps its others."""
         # Text, as a profile's file reads its name: str() would name it "None" for a null.
         expect(request["value"], str, "save_profile", "text")
         name = request["value"].strip()
@@ -490,18 +501,7 @@ class Games:
         if wanted is not None:
             # Here, so a refusal names the request: the save's own check names the file.
             wanted = profiles.check_programs(wanted, "save_profile.processes")
-        layer = self.lighting_layer()
-        effect_name, settings = layer.effect, layer.settings()
-        static, background = layer.color, layer.background
-        effect = effect_name if effect_name in ANIMATIONS else "static"
-        if effect_name == "disabled":
-            static = background = 0x000000
-        if effect in ANIMATIONS or self.d.keyboard.paint.shows_static(effect_name):
-            mode = layer.mode
-        else:
-            # An effect a game profile does not keep: its color, the layout
-            # kept and not shown.
-            mode, static = STATIC, self.d.keyboard.shown_color()
+        saved = self._saved_lighting()
         # The loaded profile's own copy, which every overlay edit writes back
         # whole; a library copy would be undone by the next color.
         loaded = self.overlay is not None and same_profile(self.overlay.name, name)
@@ -511,21 +511,12 @@ class Games:
         profile = existing or GameProfile(name=name)
         before = copy.deepcopy(profile)
         profile.name = name
-        profile.mode, profile.effect = mode, effect
-        profile.speeds, profile.direction = dict(layer.speeds), layer.direction
-        # A game profile holds only speeds and direction: an M profile's hand-set period and
-        # direction go there.
-        if effect in ANIMATIONS and "period" in settings:
-            fastest, slowest = speed_range(effect)
-            profile.speeds[effect] = min(max(settings["period"], fastest), slowest)
-        if effect == "wave" and profile.direction is None:
-            profile.direction = next((word for word, code in WAVE_DIRECTIONS.items()
-                                      if code == settings.get("direction")), None)
-        profile.base, profile.background = static, background
-        profile.keys = dict(layer.keys)
+        # Before any keyboard, no lighting shows: the profile keeps what it had, if anything.
+        if (model := self.d.per_keyboard.model()) is not None:
+            keep_entry(profile.lighting, model, saved)
         profile.bindings = dict(self.key_layer(False))
         profile.shift = dict(self.key_layer(True))
-        profile.mouse = dict(self.mouse_bindings())
+        profile.mouse = copy.deepcopy(self.mouse_entries())
         # An M profile has none: profile 1's are the ones in force under it.
         profile.mouse_tuning = dict(self.overlay.mouse_tuning) if self.overlay is not None else {}
         if wanted is not None:
@@ -542,6 +533,37 @@ class Games:
         # As the file reads back, its control-character check passed (GameProfile.from_json).
         profile.processes = [p.strip() for p in profile.processes]
         return {"ok": True, "saved": profile.name, "path": str(path)}
+
+    def _saved_lighting(self) -> Lighting:
+        """What shows on the keyboard model in force, as a game profile keeps it: an animation
+        as it is, a disabled board static and black, any other effect as its color, and no
+        params. The stored layout and background go with it, hidden where the source hides
+        them."""
+        layer = self.d.per_keyboard.shown()
+        effect_name, settings = layer.effect, layer.settings()
+        static, background = layer.color, layer.background
+        effect = effect_name if effect_name in ANIMATIONS else "static"
+        if effect_name == "disabled":
+            static = background = 0x000000
+        if effect in ANIMATIONS or self.d.keyboard.paint.shows_static(effect_name):
+            mode = layer.mode
+        else:
+            # An effect a game profile does not keep: its color, the layout
+            # kept and not shown.
+            mode, static = STATIC, self.d.keyboard.shown_color()
+        # The fields as the layer has them, as copies, then those the game profile keeps
+        # otherwise; no params.
+        saved = replace(layer, effect=effect, color=static, params={}, speeds=dict(layer.speeds),
+                        keys=dict(layer.keys), mode=mode, background=background)
+        # A game profile holds only speeds and direction: an M profile's hand-set period and
+        # direction go there.
+        if effect in ANIMATIONS and "period" in settings:
+            fastest, slowest = SPEEDS[effect]
+            saved.speeds[effect] = min(max(settings["period"], fastest), slowest)
+        if effect == "wave" and saved.direction is None:
+            saved.direction = next((word for word, code in WAVE_DIRECTIONS.items()
+                                    if code == settings.get("direction")), None)
+        return saved
 
     def _cmd_profile_processes(self, request: dict) -> dict:
         """Set which programs load a game profile, on the daemon's own copy
@@ -580,10 +602,12 @@ class Games:
             # Without a game profile, the M profile's lighting already shows
             # and is saved.
             if self.overlay is not None:
-                take_lighting(target.lighting, self.overlay)
+                # Every keyboard model's: the M profile then shows on each what the game
+                # profile showed.
+                target.lighting = copy.deepcopy(self.overlay.lighting)
                 target.keys = dict(self.overlay.bindings)
                 target.shift = dict(self.overlay.shift)
-                target.mouse = dict(self.overlay.mouse)
+                target.mouse = copy.deepcopy(self.overlay.mouse)
             # Saved before anything live is dropped.
             self.d.config.active_game_profile = None
             self.d.save_config()
@@ -727,13 +751,15 @@ class Games:
         profile = existing or imported
         before = copy.deepcopy(profile)
         if existing is not None:
-            fields = ["name", *LIGHTING_FIELDS]
+            fields = ["name"]
             if not request.get("keep_processes"):
                 fields.append("processes")
             if not lighting_only:
                 fields += ["bindings", "shift", "mouse"]
             for name in fields:
                 setattr(profile, name, getattr(imported, name))
+            # The keyboard models the import has lighting for; the profile's others stay.
+            merge_under(profile.lighting, imported.lighting, keyboard_ids)
         try:
             path = profile.save()
         except BaseException:
@@ -776,18 +802,24 @@ class Games:
     def _cmd_import_m_profile(self, request: dict) -> dict:
         """Put a front end's G keys, MR layer, mouse buttons and, with
         `lighting`, lighting on one M profile (the G HUB import's desktop
-        default); a failed save puts it back."""
+        default); a failed save puts it back. Only the keys `keys` names are written, every one
+        for a null or a request without it (_keys_named); the G HUB import names the G915's and
+        those of another keyboard the file has. The other keys, and the mouse models and
+        keyboard models the import has nothing for, keep the M profile's."""
         index = whole_number(request["value"], "import_m_profile")
         if index not in PROFILE_IDS:
             return {"ok": False, "error": NOT_AN_M_PROFILE}
         imported = GameProfile.from_json(request.get("profile"), "import_m_profile.profile")
+        keys = _keys_named(request.get("keys"))
         self.d.check_config_writable()
         target = self.d.config.profiles[index]
         before = copy.deepcopy(target)
-        target.keys, target.shift = dict(imported.bindings), dict(imported.shift)
-        target.mouse = dict(imported.mouse)
+        for key in keys:
+            target.keys[key], target.shift[key] = imported.bindings[key], imported.shift[key]
+        merge_under(target.mouse, imported.mouse, mouse_ids)
         if request.get("lighting"):
-            take_lighting(target.lighting, imported)
+            # The keyboard models the import has lighting for; the M profile's others stay.
+            merge_under(target.lighting, imported.lighting, keyboard_ids)
         try:
             self.d.save_config()
         except BaseException:
@@ -834,9 +866,9 @@ class Games:
     def scan_processes(self) -> None:
         """Match the focused program, or where focus is not followed the running programs,
         against the profiles' programs and act on it (follow_match). While the first X
-        connection is pending, wait for it instead of loading a profile and taking it back a
-        moment later. One /proc walk every PROCESS_SCAN_INTERVAL serves this and the
-        other-tools check, whatever focus does."""
+        connection is pending and the extension is not in force (Focus.pending), wait for it
+        instead of loading a profile and taking it back a moment later. One /proc walk every
+        PROCESS_SCAN_INTERVAL serves this and the other-tools check, whatever focus does."""
         now = time.monotonic()
         walked = self._last_walk is None or now - self._last_walk >= PROCESS_SCAN_INTERVAL
         procs = self.walk(now) if walked else None
@@ -919,6 +951,7 @@ class Games:
         overlay = cast("GameProfile", self.overlay)
         if overlay.path is None or overlay.path.name == file_name(overlay.name):
             return
+        # First: the read sets Library.shadowed, which the next line tests.
         read = self.library.get(overlay.name)
         if overlay.path.name not in self.library.shadowed:
             return
@@ -939,11 +972,11 @@ class Games:
         did load, so it gets no stand-in."""
         profiles = self.library.all()
         if self.overlay_auto:
-            # An auto-loaded overlay is there: follow_match sets the two together.
+            # An auto-loaded overlay is there: _take_match sets the two together.
             overlay = cast("GameProfile", self.overlay)
             # A profile the library read has its file (GameProfile.load).
             file = cast("Path", overlay.path).name
-            why = dict(self.library.unread()).get(file) or self.library.folder_why()
+            why = self.library.why_unread(file)
             if why is not None:
                 overlay.unreadable = unread_reason(file, why)
                 profiles = sorted([*profiles, overlay], key=lambda p: str(p.path))
@@ -1033,7 +1066,6 @@ class Games:
         says which. A match from the loaded profile's own file under a name edited there is
         followed as a reload follows it (follow_edited_name); `active_game_profile`, the hand
         choice, is written here only so."""
-        focus = self.focus.ready
         self.follow_edited_name(match)
         # A match names its program: names_of gives a program gone no names, and matched_by
         # names one for every match.
@@ -1043,42 +1075,50 @@ class Games:
         if match is None or self.overlay_auto or self.overlay is None:
             self._kept_out = None
         if match is not None:
-            if self.is_held(match.name):
-                return
-            if self.overlay is not None and same_profile(self.overlay.name, match.name):
-                if self.overlay_auto:
-                    self._auto_process = program    # another of its programs
-                return
-            if self.keep_loaded and self.overlay is not None and not self.overlay_auto:
-                if self._kept_out != (match.name, self.overlay.name):
-                    if focus:
-                        log.info("game profile %r: %s has focus; keeping %r loaded "
-                                 "(keep loaded is on)", match.name, escaped(program),
-                                 self.overlay.name)
-                    else:
-                        log.info("game profile %r: %s is running; keeping %r loaded (keep "
-                                 "loaded is on)", match.name, escaped(program), self.overlay.name)
-                    self._kept_out = (match.name, self.overlay.name)
-                return
-            if not self.overlay_auto:
-                self._before_auto = self.overlay.name if self.overlay else None
-            self.overlay, self.overlay_auto = match, True
-            self.loads += 1
-            self._auto_process = program
-            if focus:
-                log.info("game profile %r loaded: %s has focus", match.name, escaped(program))
-            else:
-                log.info("game profile %r auto-loaded: %s is running", match.name,
-                         escaped(program))
-            self.apply_layer()
+            self._take_match(match, program)
         elif self.overlay_auto:
-            # An auto-loaded overlay and its program are there: both are set with the flag, above.
-            name, was = cast("GameProfile", self.overlay).name, cast("str", self._auto_process)
-            self.unload_gone()
-            self._auto_process = None
-            back = escaped(self.overlay.name) if self.overlay else "the M profile default"
-            why = self.let_go(name, was, program, profiles)
-            if why == GONE:
-                self.d.mice.dpi.profile_gone(name)      # as reread and delete_profile do
-            log.info(AUTO_UNLOADS[why], {"name": name, "program": escaped(was), "back": back})
-            self.apply_layer()
+            self._drop_auto(program, profiles)
+
+    def _take_match(self, match: GameProfile, program: str | None) -> None:
+        """Load `match` over the overlay, giving back later a hand choice it replaces, unless it
+        is held off or loaded, or keep loaded keeps a hand choice."""
+        if self.is_held(match.name):
+            return
+        if self.overlay is not None and same_profile(self.overlay.name, match.name):
+            if self.overlay_auto:
+                self._auto_process = program    # another of its programs
+            return
+        focus = self.focus.ready
+        if self.keep_loaded and self.overlay is not None and not self.overlay_auto:
+            if self._kept_out != (match.name, self.overlay.name):
+                log.info("game profile %r: %s %s; keeping %r loaded (keep loaded is on)",
+                         match.name, escaped(program), "has focus" if focus else "is running",
+                         self.overlay.name)
+                self._kept_out = (match.name, self.overlay.name)
+            return
+        if not self.overlay_auto:
+            self._before_auto = self.overlay.name if self.overlay else None
+        self.overlay, self.overlay_auto = match, True
+        self.loads += 1
+        self._auto_process = program
+        if focus:
+            log.info("game profile %r loaded: %s has focus", match.name, escaped(program))
+        else:
+            log.info("game profile %r auto-loaded: %s is running", match.name,
+                     escaped(program))
+        self.apply_layer()
+
+    def _drop_auto(self, program: str | None, profiles: list[GameProfile]) -> None:
+        """Drop the auto-loaded overlay, which no program binds now, give back the hand choice
+        under it, and say why (let_go)."""
+        # An auto-loaded overlay and its program are there: both are set with the flag
+        # (_take_match).
+        name, was = cast("GameProfile", self.overlay).name, cast("str", self._auto_process)
+        self.unload_gone()
+        self._auto_process = None
+        back = escaped(self.overlay.name) if self.overlay else "the M profile default"
+        why = self.let_go(name, was, program, profiles)
+        if why == GONE:
+            self.d.mice.dpi.profile_gone(name)      # as reread and delete_profile do
+        log.info(AUTO_UNLOADS[why], {"name": name, "program": escaped(was), "back": back})
+        self.apply_layer()

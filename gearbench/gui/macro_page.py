@@ -16,14 +16,7 @@ from typing import TYPE_CHECKING, cast
 
 from gi.repository import Adw, Gtk
 
-from ..config import (
-    MOUSE_BUTTONS,
-    Config,
-    counted,
-    macro_name,
-    unread_reason,
-    word_list,
-)
+from ..config import Config, macro_name, unread_reason
 from ..library_files import file_name, slug
 from ..macros import (
     CLICK,
@@ -55,7 +48,9 @@ from ..macros import (
     unbalanced,
     with_step,
 )
+from ..mouse import MODEL_IDS, bindings_of, key_name as mouse_shown
 from ..profiles import GameProfile
+from ..wording import counted, word_list
 from .dialogs import CaptureDialog, RecordDialog
 from .style import confirm, left_out_row, plain_row
 from .tips import explain_choices
@@ -112,11 +107,12 @@ def ends_without_delay(steps: list[dict], repeat: str) -> list[str]:
 
 
 def macro_uses(name: str, config: Config, library: list[GameProfile]) -> list[str]:
-    """Every G key and mouse button bound to the macro `name`, as "G1 on M1",
-    "G2 with MR on M2" or "mouse G4 in Doom": M profiles first, then the game profiles.
+    """Every G key and mouse button that runs the macro `name`, as "G1 on M1",
+    "G2 with MR on M2" or "G502 X PLUS G4 in Doom": M profiles first, then the game profiles.
 
-    Matched by slug, as the daemon finds a macro's file. "mouse" because the keyboard's
-    G4 and G5 share their names with the mouse's.
+    Matched by slug, as the daemon finds a macro's file. A mouse button by its model, as the
+    daemon reads the model's bindings (mouse.bindings_of), since each model's buttons bind on
+    their own and the keyboard's G4 and G5 share their names.
     """
     wanted = slug(name)
 
@@ -132,8 +128,9 @@ def macro_uses(name: str, config: Config, library: list[GameProfile]) -> list[st
     for where, keys, shift, mouse in layers:
         found += [f"{key} {where}" for key, spec in keys.items() if bound(spec)]
         found += [f"{key} with MR {where}" for key, spec in shift.items() if bound(spec)]
-        found += [f"mouse {button.upper()} {where}" for button in MOUSE_BUTTONS
-                  if bound(mouse.get(button))]
+        found += [f"{mouse_shown(model)} {button.upper()} {where}"
+                  for model in sorted(MODEL_IDS)
+                  for button, spec in bindings_of(mouse, model).items() if bound(spec)]
     return found
 
 

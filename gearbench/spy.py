@@ -42,9 +42,10 @@ the mouse is back in ONBOARD mode (capture: ONBOARD at 4.2780, a mask at 5.3109)
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cache
 
 from .hidpp import Hidpp
-from .mouse import EXTRA_BUTTONS, G502X as G502X_MOUSE, MODEL_OF
+from .mouse import MODEL_OF, ButtonTable
 
 F_SPY = 0x8110
 
@@ -56,6 +57,9 @@ FN_SET_TABLE = 4
 
 #: What fn 1 is sent, as G HUB and the probe of 2026-09-24 sent it.
 START = bytes(3)
+#: What fn 4 is sent: G HUB's table for the G502 X PLUS, where the left, right and middle
+#: buttons report natively and in the mask, and every other control in the mask only.
+G_HUB_TABLE = bytes([0x01, 0x02, 0x03])
 
 
 def decode_mask(data: bytes) -> int:
@@ -66,14 +70,15 @@ def decode_mask(data: bytes) -> int:
 
 def mask_bit(index: int) -> int:
     """The bit in the mask of the control at onboard index `index`, counted
-    from 0 as `mouse.EXTRA_BUTTONS` counts: `1 << index`. Index 3, G4, is
+    from 0 as `mouse.ButtonSlot.index` counts: `1 << index`. Index 3, G4, is
     `0x0008`, not the `0x0010` that calling G4 "bit 4" would suggest."""
     return 1 << index
 
 
 @dataclass(frozen=True)
 class SpyModel:
-    """What one model's spy is known to do: measured, not probed."""
+    """What one model's spy is taken to do, built from its button table (spy_model): measured
+    on the G502 X PLUS, assumed on the others, not probed."""
 
     #: What fn 0 answers. Anything else is firmware this entry does not describe.
     count: int
@@ -89,22 +94,25 @@ class SpyModel:
     tilts: dict[int, int]
 
 
-_G502X = SpyModel(
-    count=11,
-    table=bytes([0x01, 0x02, 0x03]),
-    buttons={name: mask_bit(index) for name, (index, _button) in EXTRA_BUTTONS.items()},
-    # Onboard indices 6 and 7: found on Windows by giving each index its own button number,
-    # and seen on Linux on 2026-09-25 (tilt left 0x0040, tilt right 0x0080).
-    tilts={mask_bit(6): -1, mask_bit(7): +1},
-)
+@cache
+def spy_model(table: ButtonTable) -> SpyModel:
+    """What the spy of a model with `table` is taken to do: fn 0 counts the table's entries,
+    G HUB's table goes with fn 4, and each button and tilt reports as its onboard index's bit
+    (mask_bit). Measured on the G502 X PLUS alone; one SpyModel per table."""
+    return SpyModel(count=table.count, table=G_HUB_TABLE,
+                    buttons={slot.name: mask_bit(slot.index) for slot in table.buttons},
+                    tilts={mask_bit(index): way for index, way in table.tilts})
 
-#: The models HOST mode may drive, by product id: the G502 X PLUS, under each id mouse.MODEL_OF
-#: gives it. On its receiver and on its cable (0xC095) the spy is at index 0x0c and G4 came as
-#: its mask (measured 2026-09-26). The G305 has the spy at index 0x08 (count 6, its DPI button
-#: 0x0020 under G HUB's table `01 02 03 04 05 00`, 2026-09-25) but stays in ONBOARD mode, where
-#: that button works with or without Gearbench: the owner's decision of 2026-09-26.
-SPY_MODELS: dict[int, SpyModel] = {product: _G502X for product, model in MODEL_OF.items()
-                                   if model is G502X_MOUSE}
+
+#: The models HOST mode may drive, by product id: each MouseModel with `host_mode` and a button
+#: table, under every id mouse.MODEL_OF gives it. On the G502 X PLUS's receiver and on its cable
+#: (0xC095) the spy is at index 0x0c and G4 came as its mask (measured 2026-09-26). The G305 has
+#: the spy at index 0x08 (count 6, its DPI button 0x0020 under G HUB's table `01 02 03 04 05
+#: 00`, 2026-09-25) but stays in ONBOARD mode, where that button works with or without
+#: Gearbench: the owner's decision of 2026-09-26.
+SPY_MODELS: dict[int, SpyModel] = {product: spy_model(model.button_table)
+                                   for product, model in MODEL_OF.items()
+                                   if model.host_mode and model.button_table is not None}
 
 
 class ButtonSpy:
@@ -123,7 +131,7 @@ class ButtonSpy:
         #: the G502 X PLUS through its receiver (capture) and on its cable
         #: (measured).
         self.index = index
-        #: What this model's spy is known to do.
+        #: What this model's spy is taken to do.
         self.model = model
 
     @classmethod

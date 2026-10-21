@@ -1,0 +1,58 @@
+# Logitech G915 TKL (046d:c343) on its cable, and through its LIGHTSPEED
+# receiver (046d:c545), vendor HID++ interface -> uaccess for the seat user;
+# and, on a kernel that gives it one, the keyboard's node of its own behind
+# the receiver (408E, below), which carries what is typed on it too.
+# The G913 TKL has the same ids. Not yet checked on this hardware: the ids
+# and the interfaces are from its firmware image (MPK14.02_B0022), G HUB's
+# device database and Solaar's records, read 2026-10-17.
+#
+# Interface 02, as on the G915. The keyboard's firmware image declares 00
+# the boot keyboard, 01 a second keyboard collection and 02 the vendor
+# collection (usage page 0xFF00, report ids 0x10 and 0x11), byte for byte the
+# G915's. The c545's image holds its mouse, keyboard and vendor report
+# descriptors in that order, which is the c541's measured layout; that 02 is
+# the vendor one on the c545 is inferred from the order. gearbench-ctl report
+# gives each node's interface and whether its report descriptor holds HID++,
+# read from sysfs, so it needs no access to the node. Gearbench opens
+# interface 02 alone on the cable and on the c545, so if HID++ is on another,
+# put a copy of this file in /etc/udev/rules.d/ without the c343 line (the
+# cable) or the c545 line (the receiver): it overrides this file by name, and
+# a reinstall or upgrade leaves it alone. Then run sudo udevadm control
+# --reload, replug the keyboard or the receiver, and paste the report's block
+# into a device report. Read access to an interface that carries keystrokes
+# would be a keylogger surface.
+#
+# Matched on properties, as 70-g915.rules is, for the reason it gives.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c343", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"
+
+# The keyboard's node of its own behind the c545, on a kernel whose
+# hid-logitech-dj binds the receiver (commit f70a82e20d01, merged for 7.3).
+# Such a kernel gives the paired keyboard a hidraw node,
+# 0003:046D:408E.<n>, as it gives the G502 X PLUS one behind its c547.
+#
+# This node carries the keyboard's keystrokes as well as its HID++ traffic
+# (inferred from the c547, where the mouse's node carries what the mouse
+# sends): a program that can read it reads what is typed on the G915 TKL. It
+# carries no other device's while nothing else is paired to the receiver
+# (70-g502x.rules says why). The owner granted it on 2026-10-18, through
+# uaccess, as the G502 HERO's interface 01 was granted. udev may also give
+# the node the receiver's properties, as it does on the c547, in which case
+# the c545 line below grants it too.
+#
+# The grant crosses accounts, as 70-gearbench-uinput.rules says of
+# /dev/uinput's: a program that opened the node keeps reading it after another
+# account gets the seat, and so reads what that account types on the G915 TKL,
+# a password at the login screen included. On a machine several people use,
+# that file's group grant, in a copy of this file in /etc/udev/rules.d/,
+# limits the node to the group's accounts.
+#
+# KERNELS matches a parent's kernel name, which for the paired device is
+# bus:vendor:product.instance.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0003:046D:408E.*", TAG+="uaccess"
+
+# The receiver's own interface 02, where hid-generic holds the c545, as a
+# 7.0.0 kernel does: the keyboard gets no node of its own, and its
+# HID++ traffic comes over the receiver's vendor interface, as on the G915's
+# c541. Its keystrokes come over the receiver's keyboard interface, 01 by
+# the order above, which gets nothing.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c545", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"

@@ -1,0 +1,21 @@
+# Logitech G903 LIGHTSPEED HERO (046d:4087 through its 046d:c539 receiver or a
+# POWERPLAY mat's 046d:c53a, 046d:c091 cabled) -> uaccess on its own hidraw
+# node through the receiver, and on its HID++ interface, 02, on its cable.
+# Not the older G903 (046d:c086, 046d:4067), which this rule does not name.
+#
+# Not yet checked on this hardware. Its receiver is a LIGHTSPEED one that the
+# kernel's hid-logitech-dj binds as it binds the G305's, so the mouse gets a
+# hidraw node of its own, matched by its HID device name as 70-g305.rules
+# matches the G305's. A property match would also take in the receiver's
+# interfaces. The c539 pairs one device (Solaar's listing: "a maximum of
+# 1"), so no keyboard can share its node; on a POWERPLAY's c53a the other
+# slot is the mat's own chip, which this rule does not grant.
+#
+# Cabled, its firmware's USB descriptors (MPM23.01_B0013) give 00 a boot
+# mouse, 01 a keyboard and 02 the vendor collection, the G502 X PLUS's
+# layout. Interface 01 is not granted.
+#
+# No event node is granted: in host mode Gearbench reads the buttons it binds
+# through HID++ on the hidraw nodes below, and outside host mode none.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0003:046D:4087.*", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c091", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"

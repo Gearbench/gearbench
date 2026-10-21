@@ -1,5 +1,6 @@
-"""The drawn keyboard: a Gtk.Fixed of one button per key, scaled to the width a DrawingArea
-under it reports. Each key with a light carries a CSS class named after the color it shows.
+"""The drawn keyboard: a Gtk.Fixed of one button per key of a model's `Board`, scaled to the
+width a DrawingArea under it reports. Each key with a light carries a CSS class named after the
+color it shows.
 """
 
 from __future__ import annotations
@@ -12,14 +13,7 @@ from gi.repository import Gdk, Gtk
 
 from ..config import format_color, macro_name
 from ..keycodes import ZONE_NAMES
-from ..layout import (
-    HEIGHT as GRID_H,
-    KEYS,
-    ORIGIN_X,
-    ORIGIN_Y,
-    WIDTH as GRID_W,
-    Key,
-)
+from ..layout import Board, Key
 from ..uinput import KEY_LABELS, shown_spec
 from .style import KEY_PREFIX, key_class
 
@@ -44,7 +38,7 @@ RESERVED_TIPS = {
     "M2": "switches to M profile 2",
     "M3": "switches to M profile 3",
     "MR": "hold it and G1 to G5 send their MR bindings (gearbench-ctl bind --shift)",
-    "Game": "Game Mode: turns off both Super keys and the Menu key until pressed again",
+    "Game": "Game Mode: turns off Super and Menu until pressed again",
     "BT": "switches the keyboard to Bluetooth; the keyboard does this itself",
     "Host": "switches which connection the keyboard uses; the keyboard does this itself",
 }
@@ -60,15 +54,20 @@ FULL_NAMES = {
     "Bright": "Brightness", "BT": "Bluetooth",
 }
 
-#: The keys the keyboard focus reaches: all but the reserved, which are
-#: insensitive and take no focus.
-NAVIGABLE: tuple[Key, ...] = tuple(key for key in KEYS if not key.reserved)
-#: Where Tab first enters the board: the top left of the main block.
-FIRST_KEY = next(key for key in NAVIGABLE if key.label == "Esc")
+def navigable(board: Board) -> tuple[Key, ...]:
+    """The keys of `board` the keyboard focus reaches: all but the reserved, which are
+    insensitive and take no focus."""
+    return tuple(key for key in board.keys if not key.reserved)
 
 
-def neighbor(key: Key, direction: str) -> Key | None:
-    """The key an arrow moves the focus to from `key`, or None at the edge.
+def first_key(keys: tuple[Key, ...]) -> Key:
+    """Where Tab first enters a board of `keys`, navigable ones: the top left of the main
+    block."""
+    return next(key for key in keys if key.label == "Esc")
+
+
+def neighbor(key: Key, direction: str, keys: tuple[Key, ...]) -> Key | None:
+    """The key of `keys` an arrow moves the focus to from `key`, or None at the edge.
 
     `direction` is "left", "right", "up" or "down". A key beside `key` shares some of its
     height, one above or below some of its width, so the keypad's tall + and Enter sit
@@ -86,7 +85,7 @@ def neighbor(key: Key, direction: str) -> Key | None:
 
     (start, end), (low, high) = spans(key)
     ranked = []
-    for index, other in enumerate(NAVIGABLE):
+    for index, other in enumerate(keys):
         (o_start, o_end), (o_low, o_high) = spans(other)
         shared = min(high, o_high) - max(low, o_low)
         gap = o_start - end if ahead else start - o_end
@@ -98,9 +97,10 @@ def neighbor(key: Key, direction: str) -> Key | None:
     return min(ranked)[-1] if ranked else None
 
 
-def key_rect(key: Key, unit: float) -> tuple[float, float, int, int]:
-    """Where relayout puts a key's button at `unit` pixels a key unit: left, top, width, height."""
-    return ((key.x - ORIGIN_X) * unit, (key.y - ORIGIN_Y) * unit,
+def key_rect(key: Key, unit: float, board: Board) -> tuple[float, float, int, int]:
+    """Where relayout puts a key of `board` at `unit` pixels a key unit: left, top, width,
+    height."""
+    return ((key.x - board.origin_x) * unit, (key.y - board.origin_y) * unit,
             max(int(key.w * unit) - GAP, 1), max(int(key.h * unit) - GAP, 1))
 
 
@@ -119,6 +119,13 @@ def binding_label(label: str, bound: str | None, unit: float) -> str:
     return f"{label}\n{shown_binding(bound)}"
 
 
+def bindable_span(board: Board) -> str:
+    """The bindable keys of `board`, first to last, as a toast names them: "G1-G5", "F1-F12"
+    on the G915 TKL."""
+    names = [key.label for key in board.keys if key.bindable]
+    return f"{names[0]}-{names[-1]}"
+
+
 def key_tooltip(key: Key, bound: str | None = None) -> str:
     """What a key says on hover in map mode and to a screen reader as its description, with
     a G key's binding, which the key may be too small to show. Color mode has none
@@ -133,35 +140,41 @@ def key_tooltip(key: Key, bound: str | None = None) -> str:
     return " · ".join(bits)
 
 
-def key_name(key: Key) -> str:
-    """What a screen reader calls a key: its label, after its side or "Keypad" where its zone
-    has one, so the two Shift keys and the two 7s are told apart, and before its whole name
-    where the label is cut short. The label stays in the name for speech input."""
+def key_name(key: Key, board: Board) -> str:
+    """What a screen reader calls a key: its label, after "Keypad" where its zone has it or
+    after its side where `board` has a second key of that label, so the two Shift keys and
+    the two 7s are told apart, and before its whole name where the label is cut short. The
+    label stays in the name for speech input."""
     # dict.get is typed for the key's type alone; the None of a key with no light misses.
     first, _, rest = ZONE_NAMES.get(key.zone, "").partition(" ")  # type: ignore[arg-type]
-    if rest and first in ("LEFT", "RIGHT", "KEYPAD"):
+    twinned = sum(other.label == key.label for other in board.keys) > 1
+    if rest and (first == "KEYPAD" or first in ("LEFT", "RIGHT") and twinned):
         return f"{first.title()} {key.label}"
     if full := FULL_NAMES.get(key.label):
         return f"{key.label}, {full}"
     return key.label
 
 
-def fitted_unit(width: float) -> float:
-    """The pixels per key unit that fit the board in `width`, within UNIT_MIN and UNIT_MAX."""
-    return max(UNIT_MIN, min(UNIT_MAX, (width - 4) / GRID_W))
+def fitted_unit(width: float, board: Board) -> float:
+    """The pixels per key unit that fit `board` in `width`, within UNIT_MIN and UNIT_MAX."""
+    return max(UNIT_MIN, min(UNIT_MAX, (width - 4) / board.width))
 
 
-def board_height(width: int) -> int:
-    """The height the keys take at the unit `width` fits, and the margin under them."""
-    return int(GRID_H * fitted_unit(width)) + 4
+def board_height(width: int, board: Board) -> int:
+    """The height `board`'s keys take at the unit `width` fits, and the margin under them."""
+    return int(board.height * fitted_unit(width, board)) + 4
 
 
 class _Probe(Gtk.DrawingArea):
-    """The size probe under the keys, as tall as the keys at its width."""
+    """The size probe under the keys of `board`, as tall as they are at its width."""
+
+    def __init__(self, board: Board) -> None:
+        super().__init__(hexpand=True)
+        self.board = board
 
     # Height for width, which GTK lays out in the pass that gives the width: a size request
     # set at "resize" comes during that pass, and GTK lays it out only when it lays out
-    # something else. At a width not yet given (-1), the narrowest board's height.
+    # something else. At a width not yet given (-1), its board's height at UNIT_MIN.
     def do_get_request_mode(self) -> Gtk.SizeRequestMode:
         return Gtk.SizeRequestMode.HEIGHT_FOR_WIDTH
 
@@ -169,7 +182,7 @@ class _Probe(Gtk.DrawingArea):
                    for_size: int) -> tuple[int, int, int, int]:
         if orientation == Gtk.Orientation.HORIZONTAL:
             return 0, 0, -1, -1
-        height = board_height(for_size)
+        height = board_height(for_size, self.board)
         return height, height, -1, -1
 
 
@@ -198,9 +211,9 @@ class Stroke:
 class _Keys(Gtk.Fixed):
     """The board's Gtk.Fixed, one Tab stop however many keys it holds.
 
-    Tab enters on the key that last had the focus, the first time on FIRST_KEY, and the next
-    Tab leaves the board; the arrows move between the keys (KeyBoard.step). GTK's default
-    would make each focusable key a Tab stop of its own.
+    Tab enters on the key that last had the focus, the first time on the board's Esc
+    (first_key), and the next Tab leaves the board; the arrows move between the keys
+    (KeyBoard.step). GTK's default would make each focusable key a Tab stop of its own.
     """
 
     #: The key Tab enters on: set once the keys are built, then the last
@@ -238,7 +251,8 @@ class KeyBoard:
     (`neighbor`); Space and Enter are a click. Delete, BackSpace, Shift+F10 and Menu are the
     right click, as Shift+F10 and Menu are on GTK's own color plane. Shift with an arrow is a
     drag through the same three handlers, released at `end_key_stroke`. `description` is what
-    the board says about its keys to a screen reader.
+    the board says about its keys to a screen reader. `board` is the model's, whose keys it
+    draws.
     """
 
     def __init__(self, on_click: Callable[[Key], None], on_clear: Callable[[Key], None],
@@ -246,7 +260,9 @@ class KeyBoard:
                  on_stroke_start: Callable[[bool], bool] = lambda _clear: False,
                  on_stroke_key: Callable[[Key, bool], None] = lambda _key, _clear: None,
                  on_stroke_end: Callable[[bool], None] = lambda _clear: None,
-                 description: str = "") -> None:
+                 description: str = "", board: Board) -> None:
+        self.board = board
+        self._navigable = navigable(board)
         self._on_resize = on_resize
         self._on_clear = on_clear
         self._on_stroke_start = on_stroke_start
@@ -276,12 +292,12 @@ class KeyBoard:
 
     def _build_keys(self, on_click: Callable[[Key], None]) -> None:
         """A button per key, put on the Gtk.Fixed."""
-        for key in KEYS:
+        for key in self.board.keys:
             # can_shrink ellipsizes the label to fit: GtkFixed gives a child at least its
             # minimum size, so a wider label would spill over the keys beside it. Set on the
             # label itself, the ellipsis is undone by the next set_label.
             button = Gtk.Button(label=key.label, css_classes=["g915-key"], can_shrink=True)
-            if (name := key_name(key)) != key.label:
+            if (name := key_name(key, self.board)) != key.label:
                 # A button made with a label is named by it, through a relation GTK takes
                 # before LABEL: without the reset both Shift keys are "Shift". set_label
                 # keeps the label child it finds, and adds no relation back.
@@ -297,7 +313,7 @@ class KeyBoard:
             self.fixed.put(button, 0, 0)
             self.keys[key] = button
             self._key_of[button] = key
-        self.fixed.last = self.keys[FIRST_KEY]
+        self.fixed.last = self.keys[first_key(self._navigable)]
 
     def _build_drags(self) -> None:
         """A drag gesture per mouse button, on the Gtk.Fixed."""
@@ -343,7 +359,7 @@ class KeyBoard:
         """The size probe, and the overlay that puts the keys over it."""
         # A DrawingArea with no draw func, as a size probe: its "resize" gives the board its
         # width, and its measure the height the keys take at that width.
-        self._probe = _Probe(hexpand=True)
+        self._probe = _Probe(self.board)
         self._probe.connect("resize", lambda _a, w, _h: self.relayout(w))
         self.widget = Gtk.Overlay(child=self._probe)
         self.widget.add_overlay(self.fixed)
@@ -352,18 +368,18 @@ class KeyBoard:
         """Lay the keys out at full size before any resize arrives: an Overlay child with no
         size is not drawn. Not in the constructor: it calls back into the caller, which is
         still building itself."""
-        self.relayout(math.ceil(GRID_W * UNIT_MAX) + 4)
+        self.relayout(math.ceil(self.board.width * UNIT_MAX) + 4)
 
     def relayout(self, width: int) -> None:
         """Scale the drawn keyboard to the width available."""
         if width <= 1:
             return
-        unit = fitted_unit(width)
+        unit = fitted_unit(width, self.board)
         if self.unit <= unit < self.unit + 0.5:
             return
         self.unit = unit
         for key, button in self.keys.items():
-            left, top, width, height = key_rect(key, unit)
+            left, top, width, height = key_rect(key, unit, self.board)
             button.set_size_request(width, height)
             self.fixed.move(button, left, top)
         self._on_resize()
@@ -416,7 +432,7 @@ class KeyBoard:
         """The key under a point of the Gtk.Fixed, as `relayout` placed it,
         or None over the gap between two keys and off the keys."""
         for key in self.keys:
-            left, top, width, height = key_rect(key, self.unit)
+            left, top, width, height = key_rect(key, self.unit, self.board)
             if left <= x < left + width and top <= y < top + height:
                 return key
         return None
@@ -542,7 +558,7 @@ class KeyBoard:
                 self._reach(key)
             else:
                 self.stroke.dead = True
-        target = neighbor(key, direction)
+        target = neighbor(key, direction, self._navigable)
         if target is None:
             return True
         self.keys[target].grab_focus()

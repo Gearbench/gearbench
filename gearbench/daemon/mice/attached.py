@@ -2,9 +2,11 @@
 (`KeptMouse`), the waits for a mouse asleep or missing, and what the mice's controller and
 its parts share: a color in flight (`SentColor`), the keys a model's DPI and tuning are filed
 under (`dpi_keys`), a game profile's own stages (`own_stages`), a stage's place in an edited
-list (`same_place`), what a `mouse_dpi_stages` request asks for (`stage_request`), the
-effects `mouse_effect` takes (`effect_names`) and the error with no mouse attached
-(`no_mouse`)."""
+list (`same_place`), the DPI under a held shift moved to its place (`follow_shift`), what
+a `mouse_dpi_stages` request asks for (`stage_request`), the
+effects `mouse_effect` takes (`effect_names`), the error with no mouse attached
+(`no_mouse`) and why a game profile's own stages and rate skip a mouse outside host mode
+(`TUNING_HOST_ONLY`)."""
 
 from __future__ import annotations
 
@@ -14,13 +16,15 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import cast
 
-from ...config import written
 from ...evdev import EventReader
 from ...hidpp import NO_RULE, Hidpp
-from ...lighting import NAME_TO_EFFECT, Cluster, Lighting
-from ...mouse import BACKUP_NAMES, Mouse, backup_name
+from ...lighting import Cluster
+from ...mouse import GEARBENCH_LIGHTING, OWN_LIGHTING, WAITS_TO_CLAIM, Mouse, model_ids
+from ...mouse_lighting import MouseLights
 from ...profiles import MouseTuning
+from ...report import untested, untested_note
 from ...spy import ButtonSpy
+from ...wording import written
 from ..shared import MOUSE_SILENT_RECHECK, whole_number
 
 # A mouse heard from within this long counts as awake (AttachedMouse.may_be_asleep).
@@ -39,6 +43,20 @@ MOUSE_POLL_RETRY = 30.0
 #: An error for a command that needs a mouse while none is attached.
 NO_MOUSE = "no mouse found; switch it on, or plug in its receiver or cable"
 
+#: Why a game profile's own stages and rate leave a mouse outside host mode alone, for the
+#: refusal and the note that say so.
+TUNING_HOST_ONLY = "a game profile's own stages and rate are for a mouse in host mode"
+
+
+def enable_refusal(name: str) -> str:
+    """The refusal of the enable write on a model whose event node Gearbench does not read
+    (ButtonTable.event_node): its buttons, sent as mouse buttons 11 to 16, would reach nothing
+    outside host mode (the owner's decision of 2026-10-21, "All but Enable…")."""
+    return (f"nothing was written: Gearbench does not read the {name}'s event node, so its "
+            f"buttons, enabled in its onboard profile, would do nothing outside host mode. In "
+            f"host mode, the default, they reach Gearbench without this write "
+            f"(`gearbench-ctl mouse-host on`).")
+
 
 def no_mouse(denied: Sequence[tuple[Path, int]]) -> str:
     """The error for a command that needs a mouse while none is attached, given the mouse
@@ -49,18 +67,17 @@ def no_mouse(denied: Sequence[tuple[Path, int]]) -> str:
 
 
 def effect_names(clusters: Iterable[Cluster]) -> list[str]:
-    """The effects `mouse_effect` takes on these clusters, sorted: an unnamed id shows as
-    effect-0x0013 and the like, which has_effect cannot resolve."""
-    return sorted({e.name for c in clusters for e in c.effects if e.name in NAME_TO_EFFECT})
+    """The effects `mouse_effect` takes on these clusters, sorted, by the names the clusters
+    resolve: an unnamed id shows as effect-0x0013 and the like, which has_effect cannot."""
+    return sorted({e.name for c in clusters for e in c.effects if c.has_effect(e.name)})
 
 
 def dpi_keys(product: int) -> list[str]:
-    """The `mouse_dpi` and `mouse_tuning` keys of this mouse, its own product id first. One model
-    has an id per route (the G502 X PLUS is 4099 on its receiver, c095 on its cable), filed
-    together in BACKUP_NAMES, and a DPI chosen on one is the mouse's on the other."""
-    name = backup_name(product)
-    siblings = sorted(p for p, n in BACKUP_NAMES.items() if n == name and p != product)
-    return [f"{product:04x}"] + [f"{p:04x}" for p in siblings]
+    """The `mouse_dpi` and `mouse_tuning` keys of this mouse, its own product id first, then
+    its model's other ids (mouse.model_ids): the G502 X PLUS is 4099 on its receiver and c095
+    on its cable, and a DPI chosen on one is the mouse's on the other."""
+    own = f"{product:04x}"
+    return [own, *(key for key in model_ids(own) if key != own)]
 
 
 def own_stages(tuning: MouseTuning | None) -> tuple[int, ...] | None:
@@ -75,6 +92,16 @@ def same_place(dpi: int | None, was: Sequence[int], now: Sequence[int]) -> int |
         return None
     at = was.index(dpi)
     return now[at] if at < len(now) else None
+
+
+def follow_shift(attached: AttachedMouse, was: Sequence[int], now: Sequence[int]) -> int | None:
+    """After the stages in force went from `was` to `now` under a held DPI shift: the DPI under
+    the shift moves to its place in `now`, for the release to put back. The DPI under the
+    shift, or None with none held."""
+    moved = same_place(attached.dpi_before_shift, was, now)
+    if moved is not None:
+        attached.dpi_before_shift = moved
+    return attached.dpi_before_shift
 
 
 def stage_request(request: dict) -> tuple[list[int], int | None, int | None]:
@@ -109,12 +136,13 @@ class AttachedMouse:
     """One mouse the daemon drives, and its state. Every attached mouse is driven at once, so
     its buttons work while another's page is on screen; the window shows `Mice.selected`.
 
-    A field without a default is given at the attach.
+    A field without a default is given at the attach, but for own_lighting and release_owed,
+    which the record sets from its product.
     """
 
     dev: Hidpp
     mouse: Mouse
-    lighting: Lighting | None
+    lighting: MouseLights | None
     product: int
     input: list[EventReader] = field(default_factory=list)
     #: Its event node the gearbench group may read and why the last try was refused
@@ -145,6 +173,10 @@ class AttachedMouse:
     #: It stopped answering: nothing is written to it unasked until it answers, and the loop asks
     #: it at `recheck_at` (MOUSE_SILENT_RECHECK).
     silent: bool = False
+    #: Its button spy armed by an arm that ran to its end (Mice.arm_host); False from its
+    #: attach, from the start of each arm and of each hand-back. A mouse counted in HOST mode
+    #: without it, and not answering, is not driven yet (mouse.host_state).
+    armed: bool = False
     recheck_at: float = 0.0
     recheck_wait: float = MOUSE_SILENT_RECHECK
     #: Its receiver said its link is down (hidpp.LINK_NOTICE): silent, and not asked at a recheck
@@ -156,8 +188,29 @@ class AttachedMouse:
     #: on; asked for while a color was in flight; a send whose answer was lost; a DPI flash's
     #: repaint.
     owed_lighting: bool = False
+    #: It shows its own lighting, no claim having landed: a mouse that waits to claim
+    #: (mouse.WAITS_TO_CLAIM), from its attach until a claim lands (MouseLighting.claim, before its
+    #: first lighting write), and again once a release lands (MouseLighting.let_go). A claim
+    #: that failed may have landed all the same (claim_unsure). False on any other mouse, which
+    #: is claimed at its setup.
+    own_lighting: bool = field(init=False)
+    #: A claim failed, and may have landed all the same: its answer lost, or a two-write
+    #: claim's second write refused after its first. Until a claim or a release lands, the
+    #: mouse counts as holding it: held_lighting answers its lighting, and let_go releases it
+    #: (the owner's decision of 2026-10-21).
+    claim_unsure: bool = False
+    #: A mouse that waits to claim is owed one release from its attach, for a claim an
+    #: earlier run left, killed before its stop: sent by its first lighting setup with nothing
+    #: to write (MouseLighting.let_go), and due no more once that release has gone out (the
+    #: owner's decision of 2026-10-18, "Release at startup", made for the G502 HERO; that it
+    #: goes once whether it lands or not, and to the G502 LIGHTSPEED and the PRO WIRELESS, is
+    #: Claude Code's call under it, pending the owner's). False on any other mouse.
+    release_owed: bool = field(init=False)
     #: When its lighting is written again after a DPI flash (after_dpi_write), or None.
     repaint_at: float | None = None
+    #: The journal said, since this attach, that color sync leaves it as it is: it has no
+    #: lighting the daemon drives (sync_mouse_color).
+    sync_skip_said: bool = False
     #: The feature index of 0x0020 ConfigChange (MOUSE_COOKIE); None without it or outside
     #: COOKIE_MODELS.
     config_change: int | None = None
@@ -202,7 +255,7 @@ class AttachedMouse:
     #: Counted in HOST mode, only on a mouse with a spy: set before arm_host's HOST write, by
     #: the arm's first mode read finding HOST (_mode_before_arm), and where the mouse may have
     #: been left in it; cleared by that read finding another mode or by a switch to ONBOARD
-    #: mode that lands. G4 to G9 reach the daemon as spy masks only while this holds.
+    #: mode that lands. Its buttons reach the daemon as spy masks only while this holds.
     host: bool = False
     #: Why the last arm did not take, for `problems` (mouse_not_host), or None.
     host_error: str | None = None
@@ -234,8 +287,10 @@ class AttachedMouse:
     dpi_before_load: int | None = None
     #: The DPI a stage edit under the same load was mapped from, kept while its move is owed:
     #: that move may have landed with its answer lost, so the retry maps from this, not from a
-    #: read (retune). Cleared once stages are taken (take_tuning) or out of force (hand_back),
-    #: or a DPI is chosen (remember_dpi).
+    #: read (retune), and a DPI shift pressed meanwhile holds this as the DPI under it. The
+    #: shift's press, release or put-back meanwhile makes it the DPI that write sent
+    #: (Dpi.edit_moved). Cleared once stages are taken (take_tuning) or out of force
+    #: (Dpi.out_of_force), or a DPI is chosen (remember_dpi).
     dpi_before_edit: int | None = None
     #: The stages and rate in force changed while it was not answering: given once it answers
     #: (tend_mice), or by its next setup.
@@ -253,12 +308,60 @@ class AttachedMouse:
     live_rate: int | None = None
     #: Its wheel's 0x2121 mode as the last read with high resolution on found it, which a setup
     #: finding high resolution off puts back (keep_wheel), or None before such a read. Not
-    #: kept across a replug: the kernel writes the mode again at that connect.
+    #: kept across a replug: through a receiver the kernel writes the mode again at that
+    #: connect, and on a cable hid-generic writes none.
     wheel_mode: int | None = None
+
+    def __post_init__(self) -> None:
+        self.own_lighting = self.release_owed = self.product in WAITS_TO_CLAIM
 
     @property
     def name(self) -> str:
         return self.mouse.name
+
+    def connected_words(self, path: Path) -> str:
+        """The journal's line for it attached on `path`: its model, its id, what this build
+        drives on it and whether it says when it is switched on, and for a model not yet run
+        on (report.untested) the note that asks for a device report from it."""
+        said = (f"{self.name} connected on {path} ({self.product:04x}): "
+                f"{', '.join(self.mouse.capabilities) or 'nothing this build drives'}; "
+                + ("says when it is switched on" if self.wireless is not None
+                   else "cannot say when it is switched on (no 0x1D4B)"))
+        return f"{said}; {untested_note(self.name)}" if untested(self.product) else said
+
+    @property
+    def held_lighting(self) -> MouseLights | None:
+        """`lighting` while its claim is held or may be (claim_unsure), the one a stop
+        releases; None while it shows its own (own_lighting), or for a mouse without
+        lighting."""
+        return None if self.own_lighting and not self.claim_unsure else self.lighting
+
+    @property
+    def lighting_shown(self) -> str | None:
+        """Whose lighting a mouse that waits to claim (mouse.WAITS_TO_CLAIM) shows, OWN_LIGHTING or
+        GEARBENCH_LIGHTING; None for a mouse without lighting, and for any other, which shows
+        Gearbench's from its setup."""
+        if self.lighting is None or self.product not in WAITS_TO_CLAIM:
+            return None
+        return OWN_LIGHTING if self.own_lighting else GEARBENCH_LIGHTING
+
+    @property
+    def sets_rate_live(self) -> bool:
+        """Whether `mouse_rate`, with no game profile's own rate to edit, sets this mouse's
+        rate live alone (Dpi.live_rate): in HOST mode, on a model whose onboard
+        profile is not written (Mouse.flash_refusal)."""
+        return self.host and self.mouse.flash_refusal is not None
+
+    @property
+    def enable_refused(self) -> str | None:
+        """Why the enable write is refused on this mouse, before anything is sent
+        (enable_refusal), or None: on a model whose event node is read, one without a button
+        table, and one whose writes are not tested, whose own refusal (Mouse.flash_refusal)
+        comes first."""
+        table = self.mouse.button_table
+        if table is None or table.event_node or self.mouse.flash_refusal is not None:
+            return None
+        return enable_refusal(self.name)
 
     @property
     def its_spy(self) -> ButtonSpy:
@@ -268,11 +371,9 @@ class AttachedMouse:
         return cast(ButtonSpy, self.spy)
 
     @property
-    def its_lighting(self) -> Lighting:
-        """`lighting` on a mouse that has it. Mice's color and effect writes are reached only
-        for one: no_mouse_lighting, give_back_lighting and sync_mouse_color check `lighting`
-        first."""
-        return cast(Lighting, self.lighting)
+    def its_lighting(self) -> MouseLights:
+        """`lighting` on a mouse that has it: every path to it checks `lighting` first."""
+        return cast(MouseLights, self.lighting)
 
     def may_be_asleep(self) -> bool:
         """Not heard from within MOUSE_AWAKE, or marked not answering: a write waited for

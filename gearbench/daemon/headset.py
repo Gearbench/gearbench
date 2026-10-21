@@ -46,13 +46,14 @@ from ..astro import (
     read_setting,
 )
 from ..battery import astro as astro_battery
-from ..config import reason, whole, written
 from ..hidpp import NO_RULE
+from ..wording import reason, whole, written
 from .shared import (
     KEYBOARD_BATTERY_INTERVAL,
     MOUSE_SILENT_RECHECK,
     BatteryNotices,
     HeadsetError,
+    Lookout,
     failure_reason,
     name_text,
     node_denied,
@@ -221,16 +222,15 @@ class Headset(BatteryNotices):
         self.path: Path | None = None
         self.product: int | None = None
         self.version: str | None = None
-        #: When to look for a base again, and the wait while a found one does not answer.
-        self._retry_at = 0.0
-        self._backoff = HEADSET_RETRY
-        #: A node found and refused to this user, not answering, or whose probe failed
-        #: otherwise, for problems(), which reads them whether or not a base is attached:
+        #: When to look for a base again, and the node found that does not answer, which
+        #: problems() reads too.
+        self._lookout = Lookout(HEADSET_RETRY, HEADSET_RETRY_MAX)
+        #: A node found and refused to this user, or whose probe failed other than by no
+        #: answer, for problems(), which reads them whether or not a base is attached:
         #: connect clears them before it attaches one. Then the nodes a refusal was warned of
         #: and the last connect or poll failure logged at info, so a retry says each once.
         self._denied: Path | None = None
         self._denied_said: set[str] = set()
-        self._unanswered: Path | None = None
         self._not_set_up: Path | None = None
         self._said: str | None = None
         self._clear()
@@ -285,7 +285,7 @@ class Headset(BatteryNotices):
 
     def deadlines(self) -> list[float]:
         if self.a50 is None:
-            return [self._retry_at] if self._retry_at else []
+            return [self._lookout.retry_at] if self._lookout.retry_at else []
         if self.saving is not None:
             save = self.saving
             return [save.retry_at if save.retry_at is not None else save.deadline]
@@ -298,28 +298,20 @@ class Headset(BatteryNotices):
     def maybe_connect(self) -> None:
         """Look for a base once the retry is due, or at once when a base that did not answer has
         lost its node; the next look is timed from the attempt's end."""
-        if self.a50 is not None:
-            return
         # Unplugged, as NOT_ANSWERING asks: looked for now, so it stops being said, and its
         # replug is not left to the doubled wait.
-        gone = self._unanswered is not None and not self._unanswered.exists()
-        if not gone and time.monotonic() < self._retry_at:
+        if self.a50 is not None or not self._lookout.due():
             return
         try:
             self.connect()
         finally:
-            if self._unanswered is not None:
-                wait = self._backoff
-                self._backoff = min(wait * 2, HEADSET_RETRY_MAX)
-            else:
-                wait = self._backoff = HEADSET_RETRY
-            self._retry_at = time.monotonic() + wait
+            self._lookout.looked()
 
     def connect(self) -> None:
         """Attach the base find_base finds if it answers the probe, 03, 55 and 54, on the base's
         own timeout. Never raises. With the headset on, its version, battery and every setting are
         read before the node is registered; the gate sorts out what they fail on."""
-        self._denied = self._unanswered = self._not_set_up = None
+        self._denied = self._lookout.unanswered = self._not_set_up = None
         try:
             found = find_base()
         except OSError as exc:
@@ -350,8 +342,8 @@ class Headset(BatteryNotices):
         except FAILURES as exc:
             self._close(a50)
             quiet = isinstance(exc, AstroTimeout)
-            self._unanswered = path if quiet else None
-            # Kept apart from _unanswered, whose wait doubles; a base gone is none found.
+            self._lookout.unanswered = path if quiet else None
+            # Kept apart from the lookout's node, whose wait doubles; a base gone is none found.
             self._not_set_up = None if quiet or isinstance(exc, BaseGone) else path
             why = "no answer to the probe" if quiet else f"could not set it up: {reason(exc)}"
             said = f"headset: the base station on {path}: {why}"
@@ -397,9 +389,8 @@ class Headset(BatteryNotices):
     def recheck(self) -> None:
         """After a resume: the status poll, or a silent base's recheck, due
         now, a full read owed, and a missing base looked for."""
-        now = time.monotonic()
-        self._status_at = self._recheck_at = now
-        self._retry_at = min(self._retry_at, now)
+        self._status_at = self._recheck_at = time.monotonic()
+        self._lookout.recheck()
         # A base that lost power in the suspend may keep its node, its RAM back at flash values.
         self._read_owed = True
 
@@ -412,7 +403,7 @@ class Headset(BatteryNotices):
     def not_answering(self) -> bool:
         """A found base that does not answer the probe, or an attached one
         marked not answering."""
-        return self._unanswered is not None or self.silent
+        return self._lookout.unanswered is not None or self.silent
 
     def not_set_up(self) -> bool:
         """A found base whose probe got an error reply or one Gearbench cannot
@@ -447,9 +438,9 @@ class Headset(BatteryNotices):
         try:
             result = what(*args, **kwargs)
         except BaseGone as exc:
-            log.info("headset: the base station went away: %s", exc)
+            log.info("headset: the base station went away: %s", failure_reason(exc))
             self.teardown()
-            raise HeadsetError(f"the base station went away: {exc}") from exc
+            raise HeadsetError(f"the base station went away: {failure_reason(exc)}") from exc
         except AstroTimeout as exc:
             self.mark_silent()
             raise HeadsetError(f"the base station is not answering: {exc}") from exc
@@ -555,7 +546,7 @@ class Headset(BatteryNotices):
         except HeadsetError as exc:
             log.debug("headset: %s", exc)
         except BaseGone as exc:
-            log.info("headset: the base station went away: %s", exc)
+            log.info("headset: the base station went away: %s", failure_reason(exc))
             self.teardown()
         except (OSError, AstroFailure) as exc:
             log.info("headset: %s; letting the base station go", reason(exc))

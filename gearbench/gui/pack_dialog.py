@@ -14,9 +14,9 @@ from typing import TYPE_CHECKING, ClassVar
 from gi.repository import Adw, Gtk
 
 from .. import import_plan, pack
-from ..config import counted
 from ..macros import Macro
 from ..profiles import GameProfile
+from ..wording import counted
 from .import_dialog import (
     NO_MATCH as NO_PROFILE_MATCH,
     Importer,

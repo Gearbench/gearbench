@@ -1,31 +1,35 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "Hades",
   "processes": [
     "Hades.exe"
   ],
-  "mode": "perkey",
-  "effect": "static",
-  "base": "#ff0000",
-  "background": "#121212",
-  "keys": {
-    "A": "#ff0000",
-    "B": "#0050ff",
-    "C": "#0050ff",
-    "D": "#ff0000",
-    "E": "#8a00ff",
-    "ESC": "#0050ff",
-    "F": "#8a00ff",
-    "G": "#8a00ff",
-    "G1": "#ffe000",
-    "G2": "#ffe000",
-    "G3": "#ffe000",
-    "G4": "#ffe000",
-    "G5": "#ffe000",
-    "Q": "#8a00ff",
-    "R": "#8a00ff",
-    "S": "#ff0000",
-    "SPACE": "#ff0000",
-    "W": "#ff0000"
+  "lighting": {
+    "c33e": {
+      "mode": "perkey",
+      "effect": "static",
+      "base": "#ff0000",
+      "background": "#121212",
+      "keys": {
+        "A": "#ff0000",
+        "B": "#0050ff",
+        "C": "#0050ff",
+        "D": "#ff0000",
+        "E": "#8a00ff",
+        "ESC": "#0050ff",
+        "F": "#8a00ff",
+        "G": "#8a00ff",
+        "G1": "#ffe000",
+        "G2": "#ffe000",
+        "G3": "#ffe000",
+        "G4": "#ffe000",
+        "G5": "#ffe000",
+        "Q": "#8a00ff",
+        "R": "#8a00ff",
+        "S": "#ff0000",
+        "SPACE": "#ff0000",
+        "W": "#ff0000"
+      }
+    }
   }
 }

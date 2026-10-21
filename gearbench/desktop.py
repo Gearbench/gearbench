@@ -50,23 +50,23 @@ NOTIFICATIONS = "org.freedesktop.Notifications"
 NOTIFICATIONS_PATH = "/org/freedesktop/Notifications"
 IDLE_MONITOR = "org.gnome.Mutter.IdleMonitor"
 IDLE_MONITOR_PATH = "/org/gnome/Mutter/IdleMonitor/Core"
-#: Gearbench's GNOME Shell extension, gnome-shell/gearbench-focus@wmuschetto.github.io.
-FOCUS = "io.github.wmuschetto.Gearbench.Focus"
-FOCUS_PATH = "/io/github/wmuschetto/Gearbench/Focus"
-EXTENSION_UUID = "gearbench-focus@wmuschetto.github.io"
+#: Gearbench's GNOME Shell extension, gnome-shell/gearbench-focus@gearbench.github.io.
+FOCUS = "io.github.gearbench.Gearbench.Focus"
+FOCUS_PATH = "/io/github/gearbench/Gearbench/Focus"
+EXTENSION_UUID = "gearbench-focus@gearbench.github.io"
 #: GNOME Shell's extension interface, the one `gnome-extensions enable` calls.
 SHELL_EXTENSIONS = "org.gnome.Shell.Extensions"
 SHELL_EXTENSIONS_PATH = "/org/gnome/Shell/Extensions"
 APPLICATION = "org.freedesktop.Application"
 #: The window's object path: the app id, dots to slashes, per the Desktop Entry spec.
-APP_PATH = "/io/github/wmuschetto/Gearbench"
+APP_PATH = "/io/github/gearbench/Gearbench"
 
 #: The desktop entry's Name, shown by the notices, the tray, the window and logind's
 #: inhibitor list.
 APP_NAME = "Gearbench"
 #: The desktop entry's id, also gui.window.APP_ID. GNOME finds the app through it, which gives
 #: Gearbench's notices a switch in Settings > Notifications.
-DESKTOP_ENTRY = "io.github.wmuschetto.Gearbench"
+DESKTOP_ENTRY = "io.github.gearbench.Gearbench"
 #: The notification spec's urgency byte: 0 low, 1 normal, 2 critical.
 URGENCY_NORMAL = 1
 

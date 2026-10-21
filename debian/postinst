@@ -2,7 +2,7 @@
 set -e
 
 # Made before the udev reload: udev drops a rule line that names a group not yet there, and
-# 70-g502x.rules grants the mouse's event nodes to this one. The package adds no account,
+# 70-g502x.rules grants the G502 X PLUS's event nodes to this one. The package adds no account,
 # since it cannot know who uses the mouse.
 make_group() {
     getent group gearbench >/dev/null && return 0
@@ -20,7 +20,7 @@ if [ "$1" = "configure" ]; then
 fi
 
 # All three triggers are needed: a usb trigger does not re-run the hidraw rules, input
-# covers the mouse's event nodes, and misc covers /dev/uinput. install.sh runs the same
+# covers the G502 X PLUS's event nodes, and misc covers /dev/uinput. install.sh runs the same
 # four commands.
 if [ "$1" = "configure" ] && [ -d /run/udev ] && command -v udevadm >/dev/null 2>&1
 then
@@ -35,7 +35,19 @@ fi
 # out of /usr/local, so this only warns.
 checkout_rules() {
     for rule in 70-g915.rules 70-g502x.rules 70-g305.rules 70-astro-a50.rules \
-        70-gearbench-uinput.rules
+        70-g515.rules \
+        70-g502hero.rules \
+        70-g502x-lightspeed.rules \
+        70-pro-x-superlight.rules \
+        70-g915-tkl.rules \
+        70-g502x-wired.rules \
+        70-g502x-falcon.rules \
+        70-g815.rules \
+        70-g502-lightspeed.rules \
+        70-pro-wireless.rules \
+        70-g903-hero.rules \
+        70-gearbench-uinput.rules \
+        70-g432.rules
     do
         [ -e "$1/$rule" ] || continue
         echo "gearbench: $1/$rule, from an install from a checkout, overrides this" \
@@ -60,7 +72,7 @@ restart_daemons() {
     if [ -z "$1" ] && command -v udevadm >/dev/null 2>&1; then
         # The uaccess grants of the trigger above land asynchronously, and the daemon
         # opens /dev/uinput once, at its start. Bounded, so a stuck queue cannot hold
-        # dpkg; checked by hand only (MAINTENANCE, the package's first install).
+        # dpkg; checked by hand only.
         udevadm settle --timeout=10 || true
     fi
     for unit in $(systemctl --no-legend --plain list-units 'user@*.service' | awk '{print $1}')

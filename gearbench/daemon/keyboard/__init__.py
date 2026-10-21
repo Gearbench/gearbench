@@ -1,7 +1,8 @@
 """The keyboard's controller, `Keyboard`: connecting on either route, the claim, painting the
 profile in force (`apply_profile`), the M and MR LEDs, the idle notices and the light level,
 and the teardown. The parts it builds do the rest: the writes that put the lighting on the
-board (paint.py) and the command handlers (commands.py)."""
+board (paint.py), the keyboard left on its own profile (onboard_hold.py) and the command
+handlers (commands.py)."""
 
 from __future__ import annotations
 
@@ -12,8 +13,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, cast
 
-from ...battery import read as read_battery
-from ...config import PROFILE_IDS, escaped, reason
+from ...config import PROFILE_IDS
 from ...hidpp import (
     LINK_DOWN,
     NO_RULE,
@@ -24,46 +24,42 @@ from ...hidpp import (
     Hidpp,
     HidppError,
     HidppFailure,
-    open_device,
 )
 from ...keyboard import (
     CABLED_IDS as KEYBOARD_CABLED,
-    WITNESS as KEYBOARD_WITNESS,
+    MODEL_OF as KEYBOARDS,
+    RECEIVER_NODE_IDS as KEYBOARD_RECEIVERS,
     capabilities as keyboard_capabilities,
     find_attached_keyboard,
     name as keyboard_name,
+    read_battery,
 )
 from ...keys import DivertedKeys
-from ...lighting import LEVEL_WORDS, Lighting, LightingError
-from ...onboard import (
-    F_ONBOARD,
-    MODE_HOST,
-    MODE_ONBOARD,
-    read_mode,
-    running_sector,
-    write_mode,
-)
+from ...lighting import DARK, DIM, LEVEL_WORDS, LIT, Lighting, LightingError
+from ...onboard import F_ONBOARD, MODE_HOST, MODE_ONBOARD, read_mode, running_sector, write_mode
+from ...wording import escaped, reason
 from ..shared import (
-    DARK,
-    DIM,
     F_WIRELESS,
     IDLE_NOTE,
     KEYBOARD_BATTERY_INTERVAL,
     LIGHTS_DOWN_NOTE,
-    LIT,
     MOUSE_PROBE,
     MOUSE_PROBE_TIMEOUT,
     MOUSE_SILENT_RECHECK,
     REAPPLY_INTERVAL,
     RECONNECT_DELAY,
+    Answered,
     darker,
     failure_reason,
+    said_once,
     scaled,
     unanswered,
     unreachable,
 )
-from .commands import KeyboardCommands
-from .paint import KEYBOARD_AWAY, KEYBOARD_SILENT, LED_SETTLE, NO_LIGHTING, Paint, unanswered_note
+from .commands import KeyboardCommands, connected_words
+from .notes import KEYBOARD_AWAY, KEYBOARD_SILENT, LED_SETTLE, NO_LIGHTING, unanswered_note
+from .onboard_hold import OnboardHold
+from .paint import Paint
 
 if TYPE_CHECKING:
     from .. import Daemon
@@ -153,7 +149,7 @@ def run_steps(steps: Iterable[Step]) -> tuple[list[str], list[str]]:
 
 
 class Keyboard:
-    """The G915 and what the daemon holds for it."""
+    """The keyboard and what the daemon holds for it."""
 
     # -- the controller ------------------------------------------------------
 
@@ -162,8 +158,8 @@ class Keyboard:
         self.dev: Hidpp | None = None
         self.lighting: Lighting | None = None
         self.keys: DivertedKeys | None = None
-        #: The attached keyboard's product id, which differs per route; the battery curve is
-        #: keyed to it.
+        #: The product id of the keyboard attached last, kept while it is away
+        #: (PerKeyboard.model); it differs per route.
         self.keyboard_product: int | None = None
         #: What the attached keyboard can do, for the window to render from.
         self.keyboard_able: list[str] = []
@@ -171,8 +167,9 @@ class Keyboard:
         #: keyboard is off, so its power-on report here says it came back without its diversion,
         #: claim and host mode, as the receiver's link-up notice does with keyboard_link_notices on.
         self.keyboard_wireless: int | None = None
-        #: The last connect failure logged, so a repeat is said once.
-        self._connect_said: str | None = None
+        #: The last connect failure logged on each node, by its path, so a repeat is said once
+        #: (said_once): a keyboard passed over and one standing in for it each keep their own.
+        self._connect_said: dict[str, str] = {}
         #: Only the first connect to reach its HOST write says it found the keyboard in HOST
         #: mode: a move to the cable, and a connect the keyboard stopped answering, keep the
         #: mode on purpose.
@@ -251,6 +248,7 @@ class Keyboard:
         #: The parts, each built with the daemon and this controller, which it keeps as
         #: `keyboard`. The command handlers are `handlers`: `commands` is the table below.
         self.paint = Paint(daemon, self)
+        self.hold = OnboardHold(daemon, self)
         self.handlers = KeyboardCommands(daemon, self)
 
     def commands(self) -> dict[str, Callable[[dict], dict]]:
@@ -281,39 +279,54 @@ class Keyboard:
 
     # -- connecting and claiming ---------------------------------------------
 
-    def connect(self) -> bool:
+    def connect(self, answered: Answered | None = None) -> bool:
         """Open the keyboard and take it over, or leave nothing behind.
 
         Every device call up to the registration is inside one guard: a keyboard unplugged or
         answering short part way through leaves half-built handles, and the loop, which calls this
         every RECONNECT_DELAY, retries only while `dev` is None.
+
+        A model whose G keys type its own keys is left on its own profile while Gearbench
+        cannot type them, the virtual keyboard missing or the session not active
+        (OnboardHold.keep_onboard, hold_for_session); unless it was found in host mode and
+        handed back, its node is not opened again until Gearbench can (held_onboard). It gives
+        way, as one that does not answer does, to another that answers (PerKeyboard.stand_in).
+
+        `answered` is a keyboard that PerKeyboard asked and that answered its probe, before the
+        one driven was handed back for it or in place of the one found first; it is set up in
+        place of a look and a probe, and left on its own profile it gives way to none.
         """
-        found = find_attached_keyboard()
+        found = self.d.per_keyboard.find_keyboard() if answered is None else answered.found
         if found is None:
             return False
-        path, product, derived = found
-        self.keyboard_product = product
+        if self.hold.held_onboard(found) is not None:
+            return self.d.per_keyboard.stand_in(found, held=True)
+        path, product, _derived = found
+        self.keyboard_product = self.d.per_keyboard.found(product)
         started = time.monotonic()
         try:
             # The index is probed, not assumed: on the receiver's node 0xFF is the receiver
-            # itself. On the probe budget, since the loop waits while this runs.
-            opened = open_device(path, KEYBOARD_WITNESS, prefer=derived, **MOUSE_PROBE)
+            # itself. On the probe budget, since the loop waits while this runs; the answer is
+            # kept for status, which then asks the node no sooner than RECONNECT_DELAY.
+            opened = self.d.per_keyboard.ask(found) if answered is None else answered.opened
             if opened is None:
                 # Once at info: this repeats while the keyboard is off behind its receiver.
                 said = f"no keyboard answered on {path}; is it switched on?"
-                log.log(logging.DEBUG if said == self._connect_said else logging.INFO, "%s", said)
-                self._connect_said = said
+                said_once(self._connect_said, str(path), said, logging.INFO)
                 self.d.note_slow(started, f"keyboard connect on {path}",
                                "no keyboard answering on it", repeats="keyboard")
-                return False
+                # Another keyboard plugged in that answers is connected in its place.
+                return self.d.per_keyboard.stand_in(found)
             self.dev, index = opened
-            self.keyboard_able = keyboard_capabilities(self.dev)
+            self.keyboard_able = keyboard_capabilities(self.dev, KEYBOARDS[product])
             wireless = self.dev.feature(F_WIRELESS)
             self.keyboard_wireless = wireless.index if wireless else None
             # Each piece is built only if the keyboard has its feature. Lighting needs only 0x8071;
             # per-key (0x8081) is optional.
             self.lighting = Lighting.find(self.dev)
             self.keys = DivertedKeys(self.dev) if "g_keys" in self.keyboard_able else None
+            if self.hold.keep_onboard(found):
+                return answered is None and self.d.per_keyboard.stand_in(found, held=True)
             if self.set_keyboard_mode(MODE_HOST) == MODE_HOST and not self._connected_once:
                 # set_keyboard_mode says nothing when the mode already matches; this line is
                 # the only trace of a stop that did not hand the keyboard back.
@@ -337,14 +350,12 @@ class Keyboard:
         except (OSError, HidppFailure, IndexError, RuntimeError) as exc:
             self.connect_failed(str(path), started, exc)
             return False
-        self._connect_said = None
+        self._connect_said.clear()
         # A power-on report queued during the connect asks for the setup it just had.
         self._keyboard_reapplied_at = time.monotonic()
         self.d.forget_slow("keyboard")
         self.d.note_slow(started, f"keyboard connect on {path}")
-        log.info("%s connected on %s (%04x, device index 0x%02x): %s",
-                 keyboard_name(product), path, product, index,
-                 ", ".join(self.keyboard_able) or "nothing this build drives")
+        log.info("%s", connected_words(product, path, index, self.keyboard_able))
         self.turn_on_link_notices()
         return True
 
@@ -352,9 +363,10 @@ class Keyboard:
         """What connect does with a failure inside its guard, on the node at `path`: say it,
         take down what was built and note a slow attempt.
 
-        Said once per distinct failure: a node the udev rule never granted fails the same way
-        every RECONNECT_DELAY. A keyboard gone quiet after its probe is off or out of range,
-        not a fault, and is handed nothing back: each step would wait out its own timeout.
+        Said once per distinct failure on each node: a node the udev rule never granted fails
+        the same way every RECONNECT_DELAY. A keyboard gone quiet after its probe is off or out
+        of range, not a fault, and is handed nothing back: each step would wait out its own
+        timeout.
         """
         quiet = unanswered(exc)
         if quiet:
@@ -366,8 +378,7 @@ class Keyboard:
         else:
             said = f"could not set the keyboard up on {path}: {reason(exc)}"
         level = logging.INFO if quiet else logging.WARNING
-        log.log(logging.DEBUG if said == self._connect_said else level, "%s", said)
-        self._connect_said = said
+        said_once(self._connect_said, path, said, level)
         self.teardown_device(hand_back=not quiet)
         self.d.note_slow(started, f"keyboard connect on {path}", str(exc), repeats="keyboard")
 
@@ -437,16 +448,16 @@ class Keyboard:
         level is set once."""
         if lock is not None:
             self.lock_lights = lock
-        self.idle_lights = LIT
-        self._idle_since = None
+        self.idle_lights, self._idle_since = LIT, None
         self.lights = self.lock_lights
 
     def turn_on_link_notices(self) -> None:
-        """With `keyboard_link_notices` on and the keyboard on its receiver, have the receiver
-        send its link notices (take_link_notice) by setting register 0x00's wireless bit. A
-        failure is logged and changes nothing else."""
+        """With `keyboard_link_notices` on and the keyboard on its receiver's own node
+        (keyboard.RECEIVER_NODE_IDS), have the receiver send its link notices
+        (take_link_notice) by setting register 0x00's wireless bit. A failure is logged and
+        changes nothing else."""
         if (not self.d.config.keyboard_link_notices or self.dev is None
-                or self.keyboard_product in KEYBOARD_CABLED):
+                or self.keyboard_product not in KEYBOARD_RECEIVERS):
             return
         receiver = f"the {keyboard_name(self.keyboard_product)}'s receiver"
         step = "the first read"
@@ -478,8 +489,9 @@ class Keyboard:
         Down, the keyboard is off, out of range or on its cable: marked not answering, its held
         keys let go of, the cable looked for, and REAPPLY_INTERVAL reset, since the next link is a
         new link setup. Up, it is set up again at once, since link setup drops the claim; its
-        power-on report then falls within REAPPLY_INTERVAL. The silent mark's recheck and the
-        power-on report cover a notice that does not come.
+        power-on report then falls within REAPPLY_INTERVAL. An unanswered request marks the
+        keyboard in place of a down notice that does not come, and the power-on report sets it
+        up in place of an up notice.
         """
         if data[0] & LINK_DOWN:
             self._keyboard_reapplied_at = float("-inf")
@@ -544,14 +556,15 @@ class Keyboard:
         A G915 given its cable answers on the cable's node, and its receiver's node stays,
         answering each request for it with HID++ 1.0 error 0x08, unknown device; no DeviceGone
         comes. connect() prefers the cable; this makes the same choice while attached. Looked
-        for through sysfs every RECONNECT_DELAY, or at once with `force`. True when the receiver
-        route was dropped, for the loop to connect again at once.
+        for through sysfs every RECONNECT_DELAY, or at once with `force`, among the model's own
+        ids alone: another model's cable is another keyboard, and leaves the route as it is.
+        True when the receiver route was dropped, for the loop to connect again at once.
         """
         if (self.dev is None or self.keyboard_product in KEYBOARD_CABLED
                 or (time.monotonic() < self._cable_check_at and not force)):
             return False
         self._cable_check_at = time.monotonic() + RECONNECT_DELAY
-        found = find_attached_keyboard(cabled_only=True)
+        found = find_attached_keyboard(cabled_only=True, same_model_as=self.keyboard_product)
         if found is None:
             return False
         log.info("%s moved from its receiver (%s) to its cable (%s)",
@@ -614,15 +627,14 @@ class Keyboard:
         self._unheard = True
         # Kept, it would answer for a keyboard that may still be off once the mark runs out.
         self._battery_read = None
-        self.mouse_follows_the_desktop(followed)
+        self.repaint_synced_mouse(followed)
 
     def mark_keyboard_answering(self, quiet: bool = False) -> None:
         """Clear the mark: the keyboard sent a report or answered a request. The first answer
         after the not-answering line is logged, unless `quiet`: the caller says it."""
         if self._silence_said and not quiet:
             log.info("the keyboard is answering again")
-        self._silence_said = False
-        self.keyboard_silent_until = 0.0
+        self._silence_said, self.keyboard_silent_until = False, 0.0
 
     def keyboard_unanswered(self, exc: BaseException) -> None:
         """A keyboard request went unanswered (`unanswered`): mark it not answering and look for its
@@ -673,9 +685,10 @@ class Keyboard:
 
         Kept for KEYBOARD_BATTERY_INTERVAL per handle, since the window asks every three seconds,
         and dropped when the keyboard is marked not answering. No reading, or no answer, is
-        followed by one probe (keyboard_answers), which marks only a keyboard that is off.
+        followed by one probe (keyboard_answers), which marks only a keyboard that is off. One
+        with no battery feature is asked nothing: nothing would be kept, so each call would probe.
         """
-        if not self.keyboard_answering():
+        if not self.keyboard_answering() or "battery" not in self.keyboard_able:
             return None
         kept = self._battery_read
         if (kept is not None and kept[0] is self.dev
@@ -687,7 +700,7 @@ class Keyboard:
                 self._battery_read = (self._dev, time.monotonic(), reading)
                 self.mark_keyboard_answering()
             else:
-                # A refusal, or no battery feature: the probe says whether the keyboard answers.
+                # A refusal: the probe says whether the keyboard answers.
                 self.keyboard_answers()
             return reading
         except DeviceGone:
@@ -727,9 +740,9 @@ class Keyboard:
 
     def shown_color(self) -> int:
         """The color the board shows around any per-key overrides: the layer's color
-        (Games.active_lighting), or black under disabled, which is in STATIC_EFFECTS so that
+        (PerKeyboard.active_lighting), or black under disabled, which is in STATIC_EFFECTS so that
         overrides show over it and whose color must not fill the board."""
-        effect_name, color, _keys, _params = self.d.games.active_lighting()
+        effect_name, color, _keys, _params = self.d.per_keyboard.active_lighting()
         return 0x000000 if effect_name == "disabled" else color
 
     def change_unreached(self) -> str | None:
@@ -754,7 +767,7 @@ class Keyboard:
         status with the device's words in `last_apply_detail`; else the lights-down note, or None.
         A command passes it on as its reply's note.
         """
-        effect_name, color, per_key, extra_params = self.d.games.active_lighting()
+        effect_name, color, per_key, extra_params = self.d.per_keyboard.active_lighting()
         shown = self.shown_color()
         self.leds_due = self.last_preview = None
         # Guarded on lighting, not keys: without diversion only the LEDs are skipped.
@@ -797,7 +810,7 @@ class Keyboard:
         cable look dropped the receiver route), not reached (a link error, marked and owed) or
         refused. For apply_profile and `paint`, which answer it alike."""
         if isinstance(exc, DeviceGone):
-            log.info("keyboard went away while applying %s: %s", what, exc)
+            log.info("keyboard went away while applying %s: %s", what, failure_reason(exc))
             self.teardown_device()
             return KEYBOARD_AWAY, None
         if unanswered(exc):
@@ -831,7 +844,7 @@ class Keyboard:
         try:
             action(keys)
         except DeviceGone as exc:
-            log.info("keyboard went away writing the %s LED: %s", what, exc)
+            log.info("keyboard went away writing the %s LED: %s", what, failure_reason(exc))
             self.teardown_device()
         except HidppFailure as exc:
             if unanswered(exc):
@@ -1194,10 +1207,8 @@ class Keyboard:
         preview, which saves nothing, passes `saved` False for the words without "saved; "."""
         if self.lights == LIT:
             return None
-        if self.lock_lights != self.lights:
-            note = IDLE_NOTE[self.lights]
-        else:
-            note = LIGHTS_DOWN_NOTE[self.lights]
+        down = IDLE_NOTE if self.lock_lights != self.lights else LIGHTS_DOWN_NOTE
+        note = down[self.lights]
         return note if saved else note.removeprefix("saved; ")
 
     def no_lighting_note(self) -> str | None:
@@ -1211,31 +1222,32 @@ class Keyboard:
         a request does not count). Away or off it sends no idle notice."""
         return self.lighting is not None and not self._unheard
 
-    def mouse_follows_the_desktop(self, followed: bool) -> None:
-        """Give a synced mouse the desktop's idle level at once when the keyboard's own level
-        stops being followed (`followed` is idle_level_known before the mark or teardown) while
-        the desktop is idle: nothing else repaints the mouse until the next input or the
-        desktop's next level (the owner's decision of 2026-09-29)."""
-        if followed and self.d.session.idle_for_both:
+    def repaint_synced_mouse(self, followed: bool, gone: bool = False) -> None:
+        """Repaint a synced mouse at once where what it shows changes, since nothing else
+        repaints it until the next input or the desktop's next level: the desktop's idle level
+        when the keyboard's own level stops being followed (`followed` is idle_level_known before
+        the mark or teardown) while the desktop is idle (the owner's decision of 2026-09-29),
+        and with `gone`, at a teardown with `hand_back`, the leader's lighting where the mice
+        follow it now (PerKeyboard.moved)."""
+        if (followed and self.d.session.idle_for_both) or (gone and self.d.per_keyboard.moved()):
             self.d.mice.color.sync_mouse_color(self.shown_color())
 
-    def mouse_idle_level(self) -> str:
-        """The idle level a synced mouse shows: lit until the whole desktop is idle
-        (Session.idle_level), then the keyboard's own, or while that is not known
-        (idle_level_known) the desktop's, which goes by the keyboard's times. The mouse may be
-        in use while the keyboard is idle."""
+    def mouse_level(self) -> str:
+        """The level a synced mouse shows: the darker of the lock's level and its idle level,
+        which is lit until the whole desktop is idle (Session.idle_level), then the keyboard's
+        own, or while that is not known (idle_level_known) the desktop's, which goes by the
+        keyboard's times. The mouse may be in use while the keyboard is idle."""
         desktop = self.d.session.idle_level
-        if desktop == LIT or not self.idle_level_known():
-            return desktop
-        return self.idle_lights
+        idle = desktop if desktop == LIT or not self.idle_level_known() else self.idle_lights
+        return darker(self.lock_lights, idle)
 
     def at_level(self, color: int) -> int:
-        """`color` as a synced mouse shows it: at the keyboard's brightness, then black or halved
-        at the darker of the lock's level and mouse_idle_level."""
-        level = darker(self.lock_lights, self.mouse_idle_level())
+        """`color` as a synced mouse shows it: at the keyboard's brightness (at_brightness), then
+        black or halved at mouse_level."""
+        level = self.mouse_level()
         if level == DARK:
             return 0x000000
-        color = scaled(color, self.d.config.brightness)
+        color = self.d.per_keyboard.at_brightness(color)
         return scaled(color, 50) if level == DIM else color
 
     def dark_for_sleep(self) -> str:
@@ -1329,10 +1341,8 @@ class Keyboard:
                 if self.dev is not None and self._cable_look_at is None:
                     self._cable_look_at = time.monotonic() + CABLE_WAIT
             return
-        log.debug(
-            "unhandled notification: feature idx 0x%02x addr 0x%02x %s",
-            event.feature_index, event.address, event.data[:6].hex(" "),
-        )
+        log.debug("unhandled notification: feature idx 0x%02x addr 0x%02x %s",
+                  event.feature_index, event.address, event.data[:6].hex(" "))
 
     def take_brightness_key(self, level: int) -> None:
         """Keep the level the keyboard's own brightness key set (0x8040 event 0, big-endian) over
@@ -1344,15 +1354,14 @@ class Keyboard:
         coming back matches the stored level, since each write saves the level the keyboard
         keeps, so this cannot loop.
         """
-        if level == self.d.config.brightness:
+        if level == self.d.per_keyboard.brightness():
             return
         if not 0 <= level <= 100:
             # config.json refuses it at the next start, and set_brightness at every apply.
             log.warning("the keyboard reported brightness %d, outside 0..100; not kept", level)
             return
         log.info("the keyboard's brightness key set it to %d; keeping that", level)
-        self.d.config.brightness = level
-        self.d.persist()
+        self.d.per_keyboard.keep_brightness(level)
         self.d.mice.color.sync_mouse_color(self.shown_color())
 
     # -- teardown ------------------------------------------------------------
@@ -1363,18 +1372,20 @@ class Keyboard:
 
         `lights_off` turns every cluster off and keeps the claim and HOST mode instead of
         handing the panel back: a release or ONBOARD mode makes the firmware repaint its own
-        effect.
+        effect. A keyboard whose G keys type its own keys gets ONBOARD mode back all the same,
+        after the dark (teardown_steps).
 
         The shift layer goes, since a keyboard that disappears with MR down never sends the
         release; so do a macro a G key started and a key a G key holds, whose releases still go
         to the virtual devices. A macro a mouse button started keeps running, or a keyboard node
         that cannot be opened would cancel it every RECONNECT_DELAY.
 
-        `hand_back` False writes nothing, for a route the keyboard has left and a keyboard that
-        stopped answering during its connect or setup, which stays in HOST mode with its keys
-        diverted until the next connect. Nothing is written to a keyboard marked not answering
-        either, and a step that gets no answer skips the rest, each of which would wait three
-        seconds. The answer says what was and was not done, for shutdown's log line.
+        `hand_back` False writes nothing, for a route the keyboard has left, a keyboard held on
+        its own profile (OnboardHold.keep_onboard) and one that stopped answering during its
+        connect or setup, which stays in HOST mode with its keys diverted until the next
+        connect. Nothing is written to a keyboard marked not answering either, and a step that
+        gets no answer skips the rest, each of which would wait three seconds. The answer says
+        what was and was not done, for shutdown's log line.
 
         `stopping` is the daemon's own stop, which gives a synced mouse no idle level: a plain
         stop releases the mouse next, and a power-off darkens it.
@@ -1395,28 +1406,30 @@ class Keyboard:
         said = self.teardown_said(lights_off, hand_back, silent, done, missed)
         if self.dev is not None:
             self.dev.close()
-        self.dev = self.lighting = self.keys = None
-        self.keyboard_wireless = None
+        self.dev = self.lighting = self.keys = self.keyboard_wireless = None
         # Its idle level goes with it: claimed again, it is awake.
         self.keyboard_awake()
         if not stopping:
-            self.mouse_follows_the_desktop(followed)
+            # Not for a teardown with hand_back False, whose keyboard is still plugged in.
+            self.repaint_synced_mouse(followed, gone=hand_back)
         return said
 
     def teardown_steps(self, lights_off: bool) -> tuple[Step, ...]:
         """What teardown_device hands back, in order, for a keyboard that has each piece: the M
         and MR LEDs off and the key diversion, then the LED claim and ONBOARD mode, or with
-        `lights_off` every cluster off in their place."""
-        give_back = (
-            (self.lighting, lambda: self._lighting.release(), "LED claim"),
-            (self.dev is not None and "onboard" in self.keyboard_able,
-             lambda: self.set_keyboard_mode(MODE_ONBOARD), "onboard mode"),
-        )
-        go_dark = ((self.lighting, lambda: self.paint.darken(self._lighting), "lights out"),)
-        return (
-            (self.keys, lambda: self._keys.all_leds_off(), "M/MR LEDs"),
-            (self.keys, lambda: self._keys.restore(), "key diversion"),
-        ) + (go_dark if lights_off else give_back)
+        `lights_off` every cluster off in their place, then ONBOARD mode on a keyboard whose G
+        keys type its own keys while unbound (`typed_keys`)."""
+        onboard = (self.dev is not None and "onboard" in self.keyboard_able,
+                   lambda: self.set_keyboard_mode(MODE_ONBOARD), "onboard mode")
+        # Kept in HOST mode, its G keys would type nothing, bound or not, until it is switched
+        # off and on (KeyboardModel.g_key_defaults). Last: ONBOARD mode may repaint its own
+        # effect, as the G915's does.
+        go_dark = ((self.lighting, lambda: self.paint.darken(self._lighting), "lights out"),
+                   *((onboard,) if "typed_keys" in self.keyboard_able else ()))
+        give_back = ((self.lighting, lambda: self._lighting.release(), "LED claim"), onboard)
+        keys = ((self.keys, lambda: self._keys.all_leds_off(), "M/MR LEDs"),
+                (self.keys, lambda: self._keys.restore(), "key diversion"))
+        return keys + (go_dark if lights_off else give_back)
 
     def teardown_said(self, lights_off: bool, hand_back: bool, silent: bool,
                       done: list[str], missed: list[str]) -> str:

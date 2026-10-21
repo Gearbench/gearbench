@@ -12,12 +12,12 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ...config import reason
 from ...evdev import EV_KEY, EventReader, find_event_nodes, group_denied
-from ...hidpp import DeviceGone
-from ...mouse import BUTTON_CODES, VENDOR_ID as MOUSE_VENDOR
+from ...hidpp import VENDOR_ID as MOUSE_VENDOR, DeviceGone
+from ...mouse import BUTTON_CODES
 from ...spy import decode_mask, edges, tilt as spy_tilt
 from ...uinput import EV_REL, UinputError
+from ...wording import reason
 from .attached import MOUSE_RETRY, AttachedMouse
 
 if TYPE_CHECKING:
@@ -137,14 +137,11 @@ class Buttons:
     def drop_spy_state(self, attached: AttachedMouse) -> int | None:
         """Let go of what a mouse's buttons hold where a release could be lost, and answer the
         DPI under a held shift, which it forgets. Nothing is written to the mouse, which may
-        not answer: a setup writes the remembered DPI. Only a mouse with bindable buttons: the
-        held state is not tagged by mouse, and a G305 switching off must not stop what the
-        G502 X PLUS started."""
+        not answer: a setup writes the remembered DPI. What another mouse's buttons hold stays:
+        the bindings keep which mouse pressed each (Bindings.on_mouse_button)."""
         held = attached.dpi_before_shift
-        if "buttons" not in attached.mouse.capabilities:
-            return held
-        self.d.bindings.stop_mouse_macro()
-        self.d.bindings.release_mouse_holds()
+        self.d.bindings.stop_mouse_macro(attached)
+        self.d.bindings.release_mouse_holds(attached)
         attached.dpi_before_shift = None
         attached.buttons_down.clear()
         attached.spy_mask = 0
@@ -168,9 +165,11 @@ class Buttons:
     # -- the evdev readers ---------------------------------------------------
 
     def wants_input(self, attached: AttachedMouse) -> bool:
-        """Whether this mouse has buttons the daemon reads and no reader open. A mouse without
-        them is never opened: the G305's node is not even granted."""
-        return "buttons" in attached.mouse.capabilities and not attached.input
+        """Whether this mouse has buttons the daemon reads on its event node
+        (ButtonTable.event_node) and no reader open. Another is never opened: its node is not
+        granted, as the G305's is not."""
+        table = attached.mouse.button_table
+        return table is not None and table.event_node and not attached.input
 
     def open_mouse_input(self, found: AttachedMouse) -> None:
         """Open one mouse's evdev nodes; never fatal."""

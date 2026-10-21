@@ -28,7 +28,8 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, cast, overload
 
-from .config import escaped, runtime_home
+from .config import runtime_home
+from .wording import escaped
 
 if TYPE_CHECKING:
     from gi.repository import Gio, GLib

@@ -1,9 +1,10 @@
-# Gearbench: Astro A50 Spatial, a 7.1 output rendered for headphones on the
-# Astro A50's Game output.
+# Gearbench: Gearbench Spatial, a 7.1 output rendered for headphones, here on
+# @PLAYS_ON@.
 #
-# gearbench-spatial.service writes this file from Gearbench's template at
-# every start, with the head and the room chosen in Gearbench's spatial.json,
-# and runs it as a PipeWire client of its own: pipewire -c <this file>.
+# gearbench-spatial.service's process writes this file from Gearbench's
+# template each time it starts the chain on an output, with the head and the
+# room in Gearbench's spatial.json, and runs it as a PipeWire client of its
+# own: pipewire -c <this file>.
 #
 # Each speaker channel is convolved with SADIE II's measured left-ear and
 # right-ear responses at its angle: 48 kHz WAV files, unmodified, of subject
@@ -14,29 +15,15 @@
 # changes while it runs:
 #   pw-cli set-param <node id> Props '{ params = [ "outL:Gain 2" 0.1 "outR:Gain 2" 0.1 ] }'
 
-# PipeWire's default: at 0, a chain that fails to load leaves the unit's
-# journal nothing to say why.
-context.properties = {
-    log.level = 2
-}
-
-context.spa-libs = {
-    audio.convert.* = audioconvert/libspa-audioconvert
-    support.*       = support/libspa-support
-}
+@CLIENT_CONTEXT@
 
 context.modules = [
-    { name = libpipewire-module-rt
-        flags = [ ifexists nofail ]
-    }
-    { name = libpipewire-module-protocol-native }
-    { name = libpipewire-module-client-node }
-    { name = libpipewire-module-adapter }
+@CLIENT_MODULES@
 
     { name = libpipewire-module-filter-chain
         args = {
-            node.description = "Astro A50 Spatial"
-            media.name       = "Astro A50 Spatial"
+            node.description = "Gearbench Spatial"
+            media.name       = "Gearbench Spatial"
             filter.graph = {
                 nodes = [
                     { type = builtin label = copy name = copyFL }
@@ -128,19 +115,22 @@ context.modules = [
                 outputs = [ "outL:Out" "outR:Out" ]
             }
             capture.props = {
-                node.name      = "gearbench-a50-spatial"
+                node.name      = "gearbench-spatial"
                 media.class    = Audio/Sink
                 audio.channels = 8
                 audio.position = [ FL FR FC LFE RL RR SL SR ]
+                # Where it plays, for Gearbench to read back.
+                gearbench.headset = "@HEADSET@"
+                gearbench.target  = "@TARGET@"
             }
             playback.props = {
-                node.name          = "gearbench-a50-spatial.output"
+                node.name          = "gearbench-spatial.output"
                 node.passive       = true
                 audio.channels     = 2
                 audio.position     = [ FL FR ]
-                target.object      = "alsa_output.usb-Astro_Gaming_Astro_A50-00.stereo-game"
+                target.object      = "@TARGET@"
                 # Binaural sound never falls back to another output, such as
-                # speakers: it waits for Astro A50 Game.
+                # speakers: it waits for the one it is aimed at.
                 node.dont-fallback = true
                 node.linger        = true
             }

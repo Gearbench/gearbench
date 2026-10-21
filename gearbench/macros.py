@@ -24,19 +24,13 @@ from .config import (
     SkipWarnings,
     changed_on_disk,
     config_dir,
-    counted,
     expect,
     file_stamp,
     from_file,
-    kind_of,
     macro_name,
-    reason,
     refuse_name,
     sync_removal,
-    whole,
-    word_list,
     write_json,
-    written,
 )
 from .library_files import (
     by_name,
@@ -63,6 +57,7 @@ from .uinput import (
     parse_binding,
     shown_spec,
 )
+from .wording import counted, kind_of, reason, whole, word_list, written
 
 log = logging.getLogger("gearbench")
 

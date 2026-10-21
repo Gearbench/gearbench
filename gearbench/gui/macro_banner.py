@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from gi.repository import Adw, GLib
 
-from ..config import number
+from ..wording import number
 from .macro_page import REPEAT_CHOICES, REPEAT_LABELS
 
 if TYPE_CHECKING:                       # pragma: no cover

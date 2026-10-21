@@ -9,12 +9,13 @@ not fight over one rule.
 from __future__ import annotations
 
 import weakref
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable, Sequence
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, cast
 
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
 
+from ..astro import NAME_BYTES
 from ..battery import (
     CHARGING,
     CRITICAL_PERCENT,
@@ -25,7 +26,10 @@ from ..battery import (
     icon_name,
     reading_words,
 )
-from ..config import clock_shown, format_color, word_list
+from ..config import format_color, profile_label, shown_path
+from ..eq_presets import is_name
+from ..report import REPORT_FORM
+from ..wording import clock_shown, reason, word_list
 
 #: The fixed rules, which the window loads once for every tab: the swatches, the
 #: Mouse tab's stage dots, the pickers' square, strip and markers, and the board's
@@ -91,6 +95,27 @@ def set_dot(dot: Gtk.Image, state: bool | str) -> None:
         dot.remove_css_class(other)
     dot.add_css_class(style)
     dot.update_property([Gtk.AccessibleProperty.LABEL], [label])
+
+
+def put_dot(row: Adw.ActionRow, dot: Gtk.Image, state: bool | str | None, label: str) -> None:
+    """Set a switch row's dot, `label` its name for a screen reader, or for None take it out
+    of the row: hidden, it still indents the title by the row's spacing."""
+    attached = dot.get_parent() is not None
+    if state is None:
+        if attached:
+            row.remove(dot)
+        return
+    set_dot(dot, state)
+    # set_dot's words are a device's: "Not available" for a unit that failed.
+    dot.update_property([Gtk.AccessibleProperty.LABEL], [label])
+    if not attached:
+        row.add_prefix(dot)
+
+
+def unit_words(words: str) -> str:
+    """A unit's summary as its switch row's subtitle: capitalized, but a command keeps its
+    case, "systemctl --user did not answer"."""
+    return words if words.startswith("systemctl ") else words[:1].upper() + words[1:]
 
 
 def displayable(text: str) -> str:
@@ -191,6 +216,84 @@ class EntryTexts:
             row.set_text(text)
             row.set_show_apply_button(True)
         self._texts[row] = text
+
+
+#: The Name rows' words for what astro.preset_name refuses, the A50's and the G432's.
+NAME_BLANK = "A preset name cannot be blank"
+NAME_LONG = "A preset name is at most {} bytes, not {}: an accented letter takes 2 or more"
+NAME_CONTROL = "A preset name cannot hold a control character, such as a tab or a line break"
+
+
+def name_refusal(name: str) -> str | None:
+    """Why a Name row cannot take `name`, already stripped, in words, or None. Whether it
+    can is astro.preset_name's rule (eq_presets.is_name), which past a blank name and a long
+    one refuses a control character."""
+    if is_name(name):
+        return None
+    # NAME_BYTES starts at 1, so the only name too short is the empty one.
+    if not name:
+        return NAME_BLANK
+    if (size := len(name.encode())) > NAME_BYTES[1]:
+        return NAME_LONG.format(NAME_BYTES[1], size)
+    return NAME_CONTROL
+
+
+def preset_label(number: int, name: str | None) -> str:
+    """An EQ preset as a dropdown lists it: its number, and its name when there is one."""
+    return f"{number} · {name}" if name else f"Preset {number}"
+
+
+#: The A50's Import row's title, and astroeq_dialog's.
+ASTROEQ_IMPORT = "Import from Astro Command Center…"
+ASTROEQ_TITLE = "Import from Astro Command Center"
+#: The A50's Import row's refusal of the file, with its name and why.
+ASTROEQ_REFUSED = "{} could not be imported: {}"
+#: The Reset to default rows' title, the A50's and the G432's.
+PRESET_RESET = "Reset to default"
+
+
+def astroeq_dialog() -> Gtk.FileDialog:
+    """The file dialog the A50's Import row and Load preset to headset's Add row open:
+    Command Center's presets, *.astroeq."""
+    dialog = Gtk.FileDialog(title=ASTROEQ_TITLE, modal=True)
+    filters = Gio.ListStore.new(Gtk.FileFilter)
+    presets = Gtk.FileFilter(name="Command Center presets")
+    presets.add_pattern("*.astroeq")
+    filters.append(presets)
+    dialog.set_filters(filters)
+    return dialog
+
+
+#: Every Headset tab slider's width, fixed so the ends line up down the tab.
+SLIDER_WIDTH = 280
+
+
+def percent(level: int) -> str:
+    """A slider's level in words, as its row's subtitle shows it and a screen reader says
+    it (spoken_scale): "40%"."""
+    return f"{level}%"
+
+
+def spoken_scale(low: float, high: float, label: str, page: float = 10, origin: bool = True,
+                 spoken: Callable[[int], str] = percent) -> Gtk.Scale:
+    """A Headset tab slider, named `label` for a screen reader; `origin` False for a
+    balance or a gain, where a fill from the left end would read as a level. `spoken` is
+    its value as a screen reader says it, the words its row shows: a percent by default;
+    a balance, 0 to 255, and a gain pass their own."""
+    scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, draw_value=False, hexpand=False,
+                      valign=Gtk.Align.CENTER, has_origin=origin,
+                      adjustment=Gtk.Adjustment(lower=low, upper=high, value=low,
+                                                step_increment=1, page_increment=page))
+    scale.set_round_digits(0)
+    scale.set_size_request(SLIDER_WIDTH, -1)
+    scale.update_property([Gtk.AccessibleProperty.LABEL], [label])
+
+    def say(scale: Gtk.Scale) -> None:
+        scale.update_property([Gtk.AccessibleProperty.VALUE_TEXT],
+                              [spoken(round(scale.get_value()))])
+    scale.connect("value-changed", say)
+    say(scale)
+    return scale
 
 
 class PointerChange(NamedTuple):
@@ -362,6 +465,82 @@ class DeviceView:
         self.status.set_description(GLib.markup_escape_text(reason[:1].upper() + reason[1:]))
 
 
+def top_switcher(stack: Gtk.Stack) -> Gtk.StackSwitcher:
+    """The row of buttons at the top of a tab that picks the device it shows, hidden until
+    there are two to pick from."""
+    return Gtk.StackSwitcher(stack=stack, halign=Gtk.Align.CENTER, margin_top=12,
+                             visible=False)
+
+
+class Switcher:
+    """A top_switcher for a tab that shows each device it picks in the same rows: a button
+    per choice over a stack whose pages are empty, there to name the choices. `picked` gets
+    the index of the choice clicked; `show` moves the switcher with no call, so a poll's
+    choice is never sent back."""
+
+    def __init__(self, label: str, picked: Callable[[int], None]) -> None:
+        self._picked = picked
+        #: The choices' labels, in the buttons' order.
+        self.labels: list[str] = []
+        #: show is putting the switcher on a choice, which is not a pick.
+        self._showing = False
+        self.stack = Gtk.Stack()
+        self.stack.connect("notify::visible-child-name", self._on_pick)
+        self.widget = top_switcher(self.stack)
+        # Each button is named by its label; the whole by what it picks.
+        self.widget.update_property([Gtk.AccessibleProperty.LABEL], [label])
+
+    @property
+    def selected(self) -> int | None:
+        """The index of the choice the switcher is on, None with none."""
+        name = self.stack.get_visible_child_name()
+        return None if name is None else int(name)
+
+    def show(self, labels: Sequence[str], at: int | None, shown: bool,
+             unpicked: Collection[int] = ()) -> None:
+        """Offer `labels`, with the switcher on the one at `at`, and shown while `shown`; the
+        button of each choice whose index is in `unpicked` is insensitive, so it shows and
+        cannot be picked. None for `at` leaves it where it is, which for new labels is on the
+        first."""
+        self._showing = True
+        try:
+            if list(labels) != self.labels:
+                while (page := self.stack.get_first_child()) is not None:
+                    self.stack.remove(page)
+                for index, words in enumerate(labels):
+                    self.stack.add_titled(Gtk.Box(), str(index), words)
+                self.labels = list(labels)
+            if at is not None:
+                self.stack.set_visible_child_name(str(at))
+        finally:
+            self._showing = False
+        # The StackSwitcher's children are its buttons, one for each page in the pages' order,
+        # each a label of the page's title, and it leaves their sensitivity alone: read off
+        # GTK 4.22.4 on 2026-10-20, not promised by its documentation. A label of two lines
+        # is centered, as one line is. Each button's own drop motion controller switches the
+        # page under a drag held over it for half a second, which here would be a pick no one
+        # clicked, so it goes.
+        button, index = self.widget.get_first_child(), 0
+        while button is not None:
+            for controller in list(button.observe_controllers()):
+                if isinstance(controller, Gtk.DropControllerMotion):
+                    button.remove_controller(controller)
+            button.set_sensitive(index not in unpicked)
+            cast("Gtk.Label", button.get_first_child()).set_justify(Gtk.Justification.CENTER)
+            button, index = button.get_next_sibling(), index + 1
+        self.widget.set_visible(shown)
+
+    def _on_pick(self, _stack: Gtk.Stack, _pspec: GObject.ParamSpec) -> None:
+        # A page goes only in show, so outside it the stack is on one.
+        if not self._showing:
+            self._picked(cast("int", self.selected))
+
+
+#: The size of a dialog that lists a library.
+LIST_DIALOG_WIDTH = 560
+LIST_DIALOG_HEIGHT = 640
+
+
 #: The longest text a toast carries whole; about 105 characters of its one line
 #: fit in the window. Longer refusals open a dialog, longer notes use short_note.
 TOAST_MAX = 80
@@ -389,6 +568,19 @@ def toast_note(toast: Callable[..., object], note: str, fallback: str,
         toast(short, full=note)
 
 
+#: A save that failed: where it went and its cause in words, and the toast's line when that
+#: is too long, with where it went said shorter.
+SAVE_FAILED = "Could not save {}: {}"
+SAVE_FAILED_LINE = "Could not save {}"
+
+
+def toast_not_saved(toast: Callable[..., object], path: Path, error: OSError) -> None:
+    """A save of `path` that failed, its cause in words: a toast too short for the path names
+    the file, the whole sentence behind Details."""
+    toast_note(toast, SAVE_FAILED.format(shown_path(path), reason(error)),
+               SAVE_FAILED_LINE.format(path.name), one_sentence=True)
+
+
 def editing_text(overlay: str | None, auto: bool, processes: list[str], active: int,
                  name: str, program: str | None) -> str:
     """Which layer the window edits, for the line on the Keyboard and Mouse tabs.
@@ -398,7 +590,7 @@ def editing_text(overlay: str | None, auto: bool, processes: list[str], active: 
     the window last read them, are all named.
     """
     if not overlay:
-        return f"Editing M{active} · {name}"
+        return f"Editing {profile_label(active, name)}"
     if not auto:
         return f"Editing {overlay}"
     if program:
@@ -459,6 +651,51 @@ def status_rows(group: Adw.PreferencesGroup, title: str = "Status"
     battery_row.add_prefix(icon)
     group.add(battery_row)
     return state_row, dot, battery_row, icon
+
+
+#: The Keyboard and Mouse tabs' row for a model Gearbench has not yet run on
+#: (report.untested): its title and subtitle, its button's label and tooltip, and the toast
+#: when the browser does not open, with the form's address behind Details.
+UNTESTED_TITLE = "Not yet checked on this model"
+UNTESTED_SUBTITLE = "Run gearbench-ctl report in a terminal and paste its block into the form"
+REPORT_BUTTON = "Device report"
+REPORT_BUTTON_HELP = "Opens the Device report form in your browser"
+NO_BROWSER = "The browser did not open"
+
+
+def untested_row(group: Adw.PreferencesGroup, toast: Callable[..., object]) -> Adw.ActionRow:
+    """The row, hidden until show_untested shows it, added to `group`, with its Device report
+    button; `toast` says why the browser did not open."""
+    row = Adw.ActionRow(title=UNTESTED_TITLE, subtitle=UNTESTED_SUBTITLE, use_markup=False,
+                        visible=False)
+    button = Gtk.Button(label=REPORT_BUTTON, valign=Gtk.Align.CENTER,
+                        tooltip_text=REPORT_BUTTON_HELP)
+    button.connect("clicked", lambda clicked: open_report_form(clicked, toast))
+    row.add_suffix(button)
+    group.add(row)
+    return row
+
+
+def show_untested(row: Adw.ActionRow, untested: object) -> None:
+    """Show the row where a reply's `untested` is true, and hide it for any other model."""
+    row.set_visible(untested is True)
+
+
+def open_report_form(widget: Gtk.Widget, toast: Callable[..., object]) -> None:
+    """Open REPORT_FORM in the browser, over the window `widget` is on. A failure is toasted
+    with the address; a launch the person dismissed is not."""
+    def launched(launcher: Gtk.UriLauncher, result: Gio.AsyncResult) -> None:
+        try:
+            launcher.launch_finish(result)
+        except GLib.Error as exc:
+            # As Gtk.FileDialog's: a portal's chooser closed unpicked is no failure.
+            if not exc.matches(Gtk.dialog_error_quark(), Gtk.DialogError.DISMISSED):
+                toast(NO_BROWSER, full=f"{NO_BROWSER}: {exc.message}. The Device report "
+                                       f"form is at {REPORT_FORM}")
+
+    # A tab's widget is on the window, its root.
+    Gtk.UriLauncher(uri=REPORT_FORM).launch(cast("Gtk.Window", widget.get_root()), None,
+                                            launched)
 
 
 #: A status row's route words.

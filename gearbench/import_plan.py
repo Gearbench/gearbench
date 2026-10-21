@@ -12,26 +12,21 @@ the pack, and nothing here writes a profile, macro or setting.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
 from itertools import groupby
 from typing import cast
 
 from .apps import wanted_forms
-from .config import (
-    MOUSE_ACTIONS,
-    Config,
-    ConfigError,
-    counted,
-    macro_name,
-    without_controls,
-    word_list,
-)
+from .config import MOUSE_ACTIONS, Config, ConfigError, macro_name
+from .keyboard import own_entry, own_named_keys
 from .library_files import slug
 from .macros import KEY_STEPS, MacroLibrary, macro_summary, step_summary
-from .profiles import LIGHTING_FIELDS, MAX_PROCESSES, GameProfile, Library
+from .mouse import MODEL_IDS, MODEL_OF, bindings_of
+from .profiles import MAX_PROCESSES, GameProfile, Library
 from .uinput import MODIFIER_KINDS, parse_binding
+from .wording import counted, without_controls, word_list
 
 #: What to do with an imported name Gearbench already has.
 REPLACE, KEEP, SKIP = "replace", "keep", "skip"
@@ -135,22 +130,30 @@ def macro_form(repeat: str, steps: list[dict]) -> tuple[str, list[dict]]:
                     else step for step in steps]
 
 
-def game_form(game: GameProfile, macro: Callable[[str], object]) -> tuple:
+def game_form(game: GameProfile, macro: Callable[[str], object],
+              models: Collection[str]) -> tuple:
     """What a game profile does, for telling an import from one already
-    there: its G keys, MR layer and mouse buttons, a macro binding by what
-    `macro` says the macro it names does, and the lighting as it is saved.
-    Not its name, and not its programs."""
+    there: its G keys, MR layer and each mouse model's buttons as they are
+    in force, a macro binding by what `macro` says the macro it names does,
+    and the lighting as it is saved for each keyboard model of `models`,
+    those the import has lighting for, which a replace writes. Not its name,
+    and not its programs."""
     def does(spec: str | None, actions: tuple[str, ...] = ()) -> object:
         if spec is None or spec in actions:
             return spec
         name = macro_name(spec)
         return ("macro", macro(name)) if name is not None else _keys(spec)
 
+    # A model with no entry, as Restore defaults leaves it, runs its defaults, and the import
+    # writes each model it has in full; an id no model has keeps its entry.
+    mice = {model: bindings_of(game.mouse, model) for model in MODEL_IDS}
+    mice |= {key: entry for key, entry in game.mouse.items() if int(key, 16) not in MODEL_OF}
     return (
         {k: does(v) for k, v in game.bindings.items()},
         {k: does(v) for k, v in game.shift.items()},
-        {k: does(v, MOUSE_ACTIONS) for k, v in game.mouse.items()},
-        tuple(getattr(game, name) for name in LIGHTING_FIELDS),
+        {model: {k: does(v, MOUSE_ACTIONS) for k, v in entry.items()}
+         for model, entry in mice.items()},
+        [own_entry(game.lighting, model) for model in sorted(models)],
     )
 
 
@@ -189,8 +192,9 @@ class Plan:
     macros: list[dict] = field(default_factory=list)
     #: (profiles/*.json body, whether it writes over one of the same name).
     profiles: list[tuple[dict, bool]] = field(default_factory=list)
-    #: (M profile, body, whether its lighting is imported too).
-    m_profiles: list[tuple[int, dict, bool]] = field(default_factory=list)
+    #: (M profile, body, whether its lighting is imported too, the keys it writes: the G915's
+    #: and those of another keyboard the file has slots of, so the M profile keeps the others).
+    m_profiles: list[tuple[int, dict, bool, list[str]]] = field(default_factory=list)
     clashes: list[Clash] = field(default_factory=list)
     #: Clashes nobody has chosen for yet. Nothing may be written while any is.
     unresolved: list[Clash] = field(default_factory=list)
@@ -443,7 +447,7 @@ def requests(plan: Plan) -> list[dict]:
              **({"keep_processes": True} if body["name"] in plan.kept else {})}
             for body, replace in plan.profiles]
     out += [{"command": "import_m_profile", "value": bank, "profile": body,
-             "lighting": lighting} for bank, body, lighting in plan.m_profiles]
+             "lighting": lighting, "keys": keys} for bank, body, lighting, keys in plan.m_profiles]
     return out
 
 
@@ -474,10 +478,18 @@ def plan_lines(plan: Plan) -> list[str]:
                  else ", keeps your programs" if body["name"] in plan.kept
                  else f", loads for {word_list(body['processes'], 'and')}")
               for body, replace in plan.profiles]
-    lines += [f"M{bank}: " + word_list(["G keys", "MR layer", "mouse buttons",
-                                        *(["lighting"] if light else [])], "and")
-              for bank, _body, light in plan.m_profiles]
+    lines += [f"M{bank}: " + word_list(m_profile_parts(keys, bool(body["mouse"]), light), "and")
+              for bank, body, light, keys in plan.m_profiles]
     return lines
+
+
+def m_profile_parts(keys: Collection[str], mouse: bool, lighting: bool) -> list[str]:
+    """What an import writes on an M profile, for a line. The G915's G keys are always written,
+    and a keyboard that binds under their names comes in with them; a keyboard with names of its
+    own (own_named_keys), or a mouse model, the import has nothing for keeps the M profile's.
+    G HUB's lighting is read for the G915 alone (ghub_plan)."""
+    return ["G keys", *own_named_keys(keys), "MR layer", *(["mouse buttons"] if mouse else []),
+            *(["G915's lighting"] if lighting else [])]
 
 
 def plan_summary(plan: Plan, verb: str = "Writes") -> str:
@@ -505,7 +517,7 @@ def held_back(request: Mapping, sent: list[tuple[dict, dict]]) -> dict | None:
         return None
     body = request["profile"]
     for binding in (*body["bindings"].values(), *body["shift"].values(),
-                    *body["mouse"].values()):
+                    *(spec for entry in body["mouse"].values() for spec in entry.values())):
         name = macro_name(binding)
         if name is not None and slug(name) in failed:
             said = "may not have been saved" if failed[slug(name)] else "was not saved"

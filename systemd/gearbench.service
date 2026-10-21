@@ -1,6 +1,6 @@
 [Unit]
-Description=Gearbench - Logitech G keyboard, mouse and Astro A50 headset control
-Documentation=https://github.com/wmuschetto/gearbench
+Description=Gearbench - Logitech G keyboard, mouse and headset control
+Documentation=https://github.com/gearbench/gearbench
 # Tied to the graphical session because device access comes from udev uaccess,
 # which grants the ACL to the user of the active seat session. Started outside
 # one, the daemon cannot open the keyboard.
@@ -23,8 +23,8 @@ WorkingDirectory=@CHECKOUT@
 #
 # The settings folder first, which ReadWritePaths= below needs. The + runs it
 # outside the sandbox, as the same user: ProtectHome=read-only would stop it
-# creating a folder in ~/.config. A folder the window, or headset-spatial with --head
-# or --room, made under the login umask is tightened to 0700 too: install -d -m sets
+# creating a folder in ~/.config. A folder the window or the CLI made under the
+# login umask is tightened to 0700 too: install -d -m sets
 # the mode of one that is there, as GNU coreutils 9.7 and uutils 0.10.0 both did
 # (measured 2026-09-29).
 ExecStartPre=+/usr/bin/install -d -m 0700 %E/gearbench
@@ -43,8 +43,9 @@ SyslogIdentifier=gearbench
 MemoryMax=256M
 MemorySwapMax=0
 
-# It needs the keyboard's, each mouse's and the headset base station's hidraw
-# node, the G502 X PLUS's event node and /dev/uinput, and nothing else.
+# It needs the keyboard's, each mouse's and each headset's hidraw node (the
+# A50 base station's, the G432 adapter's), the G502 X PLUS's event node and
+# /dev/uinput, and nothing else.
 #
 # On Ubuntu with its default AppArmor restriction on unprivileged user
 # namespaces (kernel.apparmor_restrict_unprivileged_userns=1) the six

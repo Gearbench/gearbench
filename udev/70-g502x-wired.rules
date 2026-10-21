@@ -1,0 +1,23 @@
+# Logitech G502 X, cabled (046d:c099) -> uaccess on its HID++ interface, 01.
+#
+# Not yet checked on this hardware. The mouse is wired only, with two USB
+# interfaces: 00 the boot mouse and 01, which holds HID++ beside the mouse's
+# own keyboard, consumer and system reports (report ids 01, 03, 04, 10 and
+# 11, from a published descriptor and a published log of the mouse). That is
+# the G502 HERO's layout, so this rule is the HERO's, for this id.
+#
+# Interface 01 carries the keystrokes the mouse sends for a button its
+# onboard profile binds to a key: a program that can read this node reads
+# those keystrokes. It carries no other device's. It is granted for this
+# trial, the owner's decision of 2026-10-18, through uaccess, as the other
+# rules do. Interface 00, the pointer, is not granted, and no event node is:
+# in host mode Gearbench reads the buttons it binds through HID++ on
+# interface 01, and outside host mode none.
+#
+# The grant crosses accounts, as 70-gearbench-uinput.rules says of
+# /dev/uinput's: a program that opened the node keeps reading it after another
+# account gets the seat, and so reads what that account types with a button
+# bound to a key. On a machine several people use, that file's group grant, in
+# a copy of this file in /etc/udev/rules.d/, limits the node to the group's
+# accounts.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c099", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"

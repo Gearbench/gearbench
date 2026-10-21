@@ -11,7 +11,7 @@ import re
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from gi.repository import Adw, GObject, Gtk
+from gi.repository import Adw, GLib, GObject, Gtk
 
 from ..onboard import DPI_STAGES
 from .style import EntryTexts, Styler, confirm, explain, holds_focus, take_color_class
@@ -23,6 +23,15 @@ if TYPE_CHECKING:                       # pragma: no cover
 #: The report rate row's usual subtitle. On the row, not a tooltip: an Adw.ComboRow keeps its
 #: tooltip out of the accessibility tree. A profile 1 write takes effect at its commit.
 RATE_HELP = "Saved to onboard profile 1 at once"
+#: Its subtitle on a mouse in host mode whose onboard profile Gearbench does not write: the
+#: daemon sets the rate live alone (the reply's `rate_live`).
+RATE_LIVE_HELP = "Set live in host mode; the onboard profile keeps its own"
+#: Its subtitle on such a mouse outside host mode, where the row is off: the daemon's reason,
+#: then where the rate is still set.
+RATE_REFUSED = "{}; in host mode the rate is set live"
+#: A report rate kept for a model whose onboard profile is not written, in force in place of
+#: profile 1's in host mode (kept_in_force), with the mouse's name.
+KEPT_RATE = "the report rate kept for the {}"
 #: The Shift stage row's note: the pick is written to flash and the paddle uses it at once.
 STAGE_NOTE = "Saved to the mouse at once"
 #: The Default stage row's subtitle. Measured 2026-09-24: a switch to a profile starts on its
@@ -68,6 +77,13 @@ REMOVE_FROM_PROFILE_1 = ("Onboard profile 1 is rewritten without it, after a bac
                          "profile backup… undoes it.")
 
 
+def kept_in_force(game: dict) -> bool:
+    """Whether the rate kept for the model (Dpi.kept_rate) is in force in place of profile 1's
+    under `game`, the reply's `game_profile`: only where the profile applies, in host mode, since
+    outside it the mouse runs its onboard profile and no kept rate is sent (Dpi.tune)."""
+    return game.get("kept_rate") is not None and bool(game.get("applies"))
+
+
 class StagesCard:
     """The DPI stages group and the Report rate row, and the commands they send.
 
@@ -109,6 +125,14 @@ class StagesCard:
         self._dot_slots: list[int] = []
         #: The loaded game profile's part of the last reply (game_profile), or None.
         self._game: dict | None = None
+        #: The shown mouse's name (the reply's `name`), for the words on a rate kept for its
+        #: model (the game profile's `kept_rate`).
+        self._mouse_name: str | None = None
+        #: Why the daemon refuses every write to profile 1 on the mouse shown, from the last
+        #: reply (`flash_refused`), or None: held by hold_refused.
+        self._refused: str | None = None
+        #: The daemon sets the shown mouse's rate live alone (the reply's `rate_live`).
+        self._rate_live = False
 
     @property
     def flash_rows(self) -> tuple[Gtk.Widget, ...]:
@@ -116,6 +140,22 @@ class StagesCard:
         stages and rate."""
         return (self.rate_row, *self.stage_rows, self.add_stage_row, self.default_stage_row,
                 self.shift_stage_row, self.factory_row, self.game_row)
+
+    def show_able(self, able: set[str]) -> None:
+        """Show the group for a mouse with `dpi_stages`, the Report rate row for one with
+        `report_rate`, and the Shift stage row for one with `buttons`: the shift stage is where
+        a button bound to DPI shift drops to, and only a mouse with the button table has one to
+        bind. Hidden, the row keeps its pick, which every stage write sends."""
+        self.group.set_visible("dpi_stages" in able)
+        self.rate_row.set_visible("report_rate" in able)
+        self.shift_stage_row.set_visible("buttons" in able)
+
+    def set_usable(self, usable: bool) -> None:
+        """The rows on while the page has a mouse that answers and no write in flight, and off
+        again where hold_refused keeps them."""
+        for row in self.flash_rows:
+            row.set_sensitive(usable)
+        self.hold_refused()
 
     def close(self) -> None:
         """Take the stage dots' sheet off the display, which holds it."""
@@ -198,6 +238,8 @@ class StagesCard:
         onboard = info.get("onboard") or {}
         game = info.get("game_profile") if isinstance(info.get("game_profile"), dict) else None
         self._game = game
+        self._mouse_name = info.get("name")
+        self._rate_live = bool(info.get("rate_live"))
         # The rows edit the game profile's own only where the daemon says they do: `edited` is
         # that profile, or empty where they do not.
         edited = game if game and game.get("edits") else {}
@@ -206,6 +248,25 @@ class StagesCard:
         self._show_stage_list(onboard, edited, force)
         # After the stage rows, whose slots the dots' colors go by.
         self.show_stage_colors(info.get("stage_colors"), info.get("stage_color_names"))
+        refused = info.get("flash_refused")
+        self._refused = refused if isinstance(refused, str) else None
+
+    def hold_refused(self) -> None:
+        """Keep the rows off for a mouse whose every write to profile 1 the daemon refuses
+        (`flash_refused`), with the reason where the rate row and the group say what a change
+        does: said before a click, not after it. A reply or the end of a write turns the rows
+        back on (set_usable), and this off again. Rows that edit a loaded game
+        profile's own stages and rate stay on, as does the rate row where the daemon sets the
+        rate live (`rate_live`), its subtitle saying so."""
+        if self._refused is None or (self._game and self._game.get("edits")):
+            return
+        self.rate_row.set_subtitle(RATE_LIVE_HELP if self._rate_live
+                                   else RATE_REFUSED.format(self._refused))
+        # A group's description is markup, and the reason is the daemon's, naming the mouse.
+        self.group.set_description(GLib.markup_escape_text(self._refused))
+        for row in self.flash_rows:
+            if not (self._rate_live and row is self.rate_row):
+                row.set_sensitive(False)
 
     def _show_rate(self, info: dict, onboard: dict, edited: dict, fresh: bool) -> None:
         """The Report rate row: the mouse's rates, on the game profile's own, profile 1's or
@@ -224,7 +285,9 @@ class StagesCard:
         own_rate = edited.get("report_rate")
         # Live where no rate is stored, which is a mouse without an onboard profile or
         # one whose sector is unknown: the rate it runs at is what the row would change.
-        chosen = next((rate for rate in (own_rate, stored, live) if rate in self._rates), None)
+        # Where the daemon sets the rate live alone, the live one is what the row changes.
+        order = (own_rate, live, stored) if self._rate_live else (own_rate, stored, live)
+        chosen = next((rate for rate in order if rate in self._rates), None)
         if chosen is not None:
             self._loading.put_selected(self.rate_row, self._rates.index(chosen))
         elif fresh:
@@ -234,8 +297,8 @@ class StagesCard:
             self.rate_row.set_subtitle(f"{edited['name']}'s own"
                                        + (f"; profile 1 stores {stored} Hz" if stored else ""))
         elif edited:
-            self.rate_row.set_subtitle(
-                f"Profile 1's; a change is saved as {edited['name']}'s own")
+            whose = f"Kept for the {self._mouse_name}" if kept_in_force(edited) else "Profile 1's"
+            self.rate_row.set_subtitle(f"{whose}; a change is saved as {edited['name']}'s own")
         else:
             self.rate_row.set_subtitle(
                 f"Profile 1 stores {stored} Hz; the mouse is running at {live} Hz"
@@ -347,7 +410,8 @@ class StagesCard:
             said = (f"{name} has its own {' and '.join(own)}, in force only while "
                     f"Gearbench drives the mouse in host mode.")
         elif not own:
-            said = (f"{name} uses profile 1's DPI stages and report rate. A change below "
+            rate = KEPT_RATE.format(self._mouse_name) if kept_in_force(game) else "report rate"
+            said = (f"{name} uses profile 1's DPI stages and {rate}. A change below "
                     f"is saved as its own.")
         else:
             said = (f"{name} has its own {' and '.join(own)}, in force "
@@ -367,12 +431,17 @@ class StagesCard:
         requests = [dict(reset) for reset, _words in own]
         what = " and ".join(words for _reset, words in own)
         name = game.get("name")
+        uses = f"onboard profile 1's {what}"
+        if kept_in_force(game) and game.get("report_rate"):
+            kept = KEPT_RATE.format(self._mouse_name)
+            uses = (f"onboard profile 1's DPI stages and {kept}" if game.get("dpi_stages")
+                    else kept)
 
         def next_one(_reply: dict | None = None) -> None:
             if requests:
                 self._write(requests.pop(0), next_one, product=product, layer=layer)
         self._ask(f"Remove {name}'s own {what}?",
-                  f"While {name} is loaded, the mouse uses onboard profile 1's {what}. "
+                  f"While {name} is loaded, the mouse uses {uses}. "
                   "The game profile's file is saved at once.", "Remove", next_one)
 
     def _rows_layer(self) -> dict:

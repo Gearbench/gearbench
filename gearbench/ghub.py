@@ -18,26 +18,16 @@ import string
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from typing import cast
 
 from .apps import wanted_forms
-from .config import (
-    G_KEYS,
-    MOUSE_LABELS,
-    ConfigError,
-    counted,
-    parse_color,
-    read_capped,
-    reason,
-    whole,
-    without_controls,
-    written,
-)
+from .config import G_KEYS, ConfigError, parse_color, read_capped
+from .keyboard import G815, G915, G915_TKL
 from .keycodes import USAGE_NAMES
-from .library_files import by_name, slug
+from .library_files import Taken, by_name
 from .macros import (
     CLICK,
     CLICK_DOWN,
@@ -53,8 +43,10 @@ from .macros import (
     WHILE_HELD,
     validate_steps,
 )
+from .mouse import MODEL_OF, ButtonTable, MouseModel, key_of
 from .profiles import MAX_PROCESSES, MAX_PROGRAM_BYTES
 from .uinput import UinputError, parse_binding
+from .wording import counted, reason, whole, without_controls, written
 
 # -- G HUB's vocabulary -----------------------------------------------------
 
@@ -93,24 +85,22 @@ DISABLED = "ffffffff-ffff-ffff-ffff-ffffffffffff"
 BUILTIN_PREFIX = "0f82f693-5b78-4cf5-867e-"
 BUILTIN_SUFFIX = "00000000"
 
-#: The devices whose assignments this reads, by G HUB's slot prefix.
+#: The devices whose assignments this reads, by G HUB's slot prefix: each keyboard's G keys,
+#: G HUB's `g1` on, under the names its model binds them under (KeyboardModel.g_key_names),
+#: and each mouse's buttons (MICE). "g915tkl" is the G915 TKL's slotPrefix in G HUB's device
+#: database, as "g915" is the G915's and "g815" the G815's and G813's; no settings file with a
+#: G915 TKL or a G815 has been read.
+KEYBOARDS = {"g915": G915, "g915tkl": G915_TKL, "g815": G815}
+#: Each mouse model with buttons to bind, by its slotPrefix in G HUB's device database (read
+#: 2026-10-18), from one of its product ids. Only the G502 X PLUS's slots have been read from
+#: a settings file.
+MICE = {device: MODEL_OF[product] for device, product in (
+    ("g502x-plus", 0x4099), ("g502hero", 0xC08B), ("g502x-lightspeed", 0x409F),
+    ("proxwirelessmouse", 0x4093), ("g502x", 0xC099), ("g502x-wl", 0x40B2),
+    ("g502wireless", 0x407F), ("prowirelessmouse", 0x4079), ("g903hero", 0x4087))}
+#: The keyboard whose G keys every profile has, as the preview lists them: another's are
+#: read where a profile has a slot of it.
 KEYBOARD = "g915"
-MOUSE = "g502x-plus"
-#: G HUB's number for each of the keyboard's G keys, in a slot (`g1`) and as a light's id.
-G_NUMBERS = range(1, len(G_KEYS) + 1)
-#: G HUB's G502 X PLUS slots to Gearbench's buttons. G HUB numbers the paddle
-#: g5 and the front side button g6, and the DPI buttons g10 (up) and g11
-#: (down), where Gearbench follows the mouse's own labels.
-MOUSE_SLOTS = {"g4": "g4", "g5": "g6", "g6": "g5", "g10": "g8", "g11": "g7", "g9": "g9"}
-#: The mouse's other slots, which Gearbench does not rebind, with the card each
-#: holds out of the box. Holding that card loses nothing; anything else is
-#: listed as not imported.
-MOUSE_FIXED = {
-    "g1": ("left button", "0201"), "g2": ("right button", "0202"),
-    "g3": ("middle button", "0203"), "g7": ("wheel tilt left", "040b"),
-    "g8": ("wheel tilt right", "040c"), "scroll1": ("wheel up", "0409"),
-    "scroll2": ("wheel down", "040a"),
-}
 
 #: Built-in mouse actions (category 04) by value, and the Gearbench action each is.
 MOUSE_ACTION_NAMES = {
@@ -118,7 +108,7 @@ MOUSE_ACTION_NAMES = {
     0x05: "default DPI", 0x09: "wheel up", 0x0A: "wheel down", 0x0B: "wheel tilt left",
     0x0C: "wheel tilt right", 0x0E: "go to the shift DPI", 0x0F: "wheel mode toggle",
 }
-MOUSE_ACTIONS = {0x01: "dpi-up", 0x02: "dpi-down", 0x03: "dpi-shift"}
+MOUSE_ACTIONS = {0x01: "dpi-up", 0x02: "dpi-down", 0x03: "dpi-shift", 0x04: "dpi-cycle"}
 #: Built-in mouse buttons (category 02), and the two Gearbench can send.
 MOUSE_BUTTON_NAMES = {0x01: "left click", 0x02: "right click", 0x03: "middle click",
                       0x04: "back", 0x05: "forward"}
@@ -167,7 +157,8 @@ HID_BUTTONS = {1: "left", 2: "right", 3: "middle", 4: "side", 5: "extra"}
 #: group is keyed by HID usage, the order the zone ids follow.
 LIGHT_GROUPS: dict[str, dict[int, str]] = {
     "PERKEY_KEYBOARD": USAGE_NAMES,
-    "PERKEY_GKEY": {n: f"G{n}" for n in G_NUMBERS},
+    # G HUB's number for each of the G915's G keys as a light's id.
+    "PERKEY_GKEY": dict(enumerate(G_KEYS, 1)),
     "PERKEY_BRANDING": {1: "LOGO"},
     # The brightness button, the group's one light in G HUB's layout. Unchecked:
     # that an effect record keys it by that LED id, as the other groups do.
@@ -716,15 +707,17 @@ class GhubProfile:
     processes: list[str] = field(default_factory=list)
     #: M bank to (G keys, shift layer). A game profile takes bank 1.
     banks: dict[int, tuple[dict[str, Binding], dict[str, Binding]]] = field(default_factory=dict)
-    #: Gearbench's g4..g9 to what each is bound to. A button missing keeps
-    #: Gearbench's default.
-    mouse: dict[str, Binding] = field(default_factory=dict)
+    #: By mouse model (mouse.model_key), each mouse the import reads (mice_in): its buttons,
+    #: by the names Gearbench binds them under, to what each is bound to. A button missing
+    #: keeps its model's default.
+    mouse: dict[str, dict[str, Binding]] = field(default_factory=dict)
     lighting: GhubLighting | None = None
     lighting_note: str = ""
     #: The macro cards it uses, in the order it uses them.
     macros: list[str] = field(default_factory=list)
-    #: What G HUB calls a key binding, by where it is bound (`where`), when
-    #: it is a card with a name of its own: "Use Med Kit" for its key.
+    #: What G HUB calls a key binding, by where it is bound (`key_where` for a G key,
+    #: `mouse_where` for a button), when it is a card with a name of its own: "Use Med
+    #: Kit" for its key.
     labels: dict[str, str] = field(default_factory=dict)
     #: What is not imported, one sentence each.
     skipped: list[str] = field(default_factory=list)
@@ -732,6 +725,12 @@ class GhubProfile:
 
     def search_text(self) -> str:
         return " ".join((self.name, self.application, self.ghub_name, *self.processes)).casefold()
+
+    def key_where(self, key: str, shifted: bool, bank: int) -> str:
+        """How the preview names the G key `key` on `bank`, and what `labels` holds its label
+        under: "G1", "G1 with MR", "G1 on M2". A game profile has one bank, so its keys name
+        none."""
+        return key + (" with MR" if shifted else "") + (f" on M{bank}" if self.desktop else "")
 
 
 @dataclass
@@ -890,40 +889,8 @@ class _Reader:
                                        *_said_cut("G HUB's profile name", long_own)])
 
         slots = _slots(record, self.others)
-
-        def action(device: str, control: str, bank: int, shifted: bool,
-                   where: str) -> Action | None:
-            key = (device, control, bank, shifted)
-            return self.card_action_at(slots[key], where, profile.skipped) if key in slots else None
-
-        banks = (1, 2, 3) if desktop else (1,)
-        for bank in banks:
-            layers: tuple[dict[str, Binding], dict[str, Binding]] = ({}, {})
-            for shifted, layer in ((False, layers[0]), (True, layers[1])):
-                for n in G_NUMBERS:
-                    where = g_where(f"G{n}", shifted, bank if desktop else None)
-                    act = action(KEYBOARD, f"g{n}", bank, shifted, where)
-                    # The base layer is filled first, so the MR layer's key has its
-                    # binding to fall through to.
-                    layer[f"G{n}"] = self.g_binding(profile, act, where,
-                                                    layers[0][f"G{n}"] if shifted else None)
-            profile.banks[bank] = layers
-
-        def users(n: int, bank: int, shifted: bool) -> bool:
-            """Whether a G key on M2 or M3 holds something of the user's: not
-            what M1 has there, and not G HUB's factory card, F1 to F5 or the
-            G-Shift default."""
-            card = slots.get((KEYBOARD, f"g{n}", bank, shifted))
-            factory = builtin_id(SHIFT_DEFAULT if shifted else f"01{0x39 + n:02x}")
-            return card is not None and card not in (factory,
-                                                     slots.get((KEYBOARD, f"g{n}", 1, shifted)))
-
-        if not desktop and any(users(n, bank, shifted) for n in G_NUMBERS for bank in (2, 3)
-                               for shifted in (False, True)):
-            profile.notes.append("Its M2 and M3 G keys are not imported: a game profile has one "
-                                 "set of G keys, and M1's are used.")
-
-        self.mouse_buttons(profile, action)
+        self.g_keys(profile, slots)
+        self.mouse_buttons(profile, slots)
         self.mouse_not_rebound(profile, slots)
 
         profile.lighting, profile.lighting_note = self.lighting(record.get("lightingCard"))
@@ -940,6 +907,73 @@ class _Reader:
                 "G HUB records no program for it, so it loads by hand; add a program after "
                 "importing.")
         return profile
+
+    def slot_action(self, profile: GhubProfile,
+                    slots: Mapping[tuple[str, str, int, bool], object],
+                    slot: tuple[str, str, int, bool], where: str) -> Action | None:
+        """What the card on `slot` does (card_action_at, its cut name said in the profile's
+        `skipped`), None for a slot the profile has no card on."""
+        return self.card_action_at(slots[slot], where, profile.skipped) if slot in slots else None
+
+    def g_keys(self, profile: GhubProfile,
+               slots: Mapping[tuple[str, str, int, bool], object]) -> None:
+        """The profile's `banks`: each keyboard's G keys under the names its model binds them
+        under (KEYBOARDS), the G915's always and another's where the profile has a slot of
+        it, on M1 to M3 for the desktop and on M1 for a game, whose notes say so when its M2
+        or M3 holds something of the user's. A key two keyboards bind under one name, as the
+        G915 and the G815 do, takes one keyboard's card (g_key_from)."""
+        keys = [(device, n, key) for device, model in KEYBOARDS.items()
+                if device == KEYBOARD or any(slot[0] == device for slot in slots)
+                for n, key in enumerate(model.g_key_names, 1)]
+        # Each name, to the keys of each keyboard that binds one under it, (device, number).
+        named = {name: [(device, n) for device, n, key in keys if key == name]
+                 for _device, _n, name in keys}
+        desktop = profile.desktop
+        for bank in (1, 2, 3) if desktop else (1,):
+            layers: tuple[dict[str, Binding], dict[str, Binding]] = ({}, {})
+            for shifted, layer in ((False, layers[0]), (True, layers[1])):
+                for key, holders in named.items():
+                    where = profile.key_where(key, shifted, bank)
+                    device, n = self.g_key_from(profile, slots, key, holders, (bank, shifted),
+                                                where)
+                    act = self.slot_action(profile, slots, (device, f"g{n}", bank, shifted),
+                                           where)
+                    # The base layer is filled first, so the MR layer's key has its
+                    # binding to fall through to.
+                    layer[key] = self.g_binding(profile, act, where,
+                                                layers[0][key] if shifted else None)
+            profile.banks[bank] = layers
+
+        def users(device: str, n: int, bank: int, shifted: bool) -> bool:
+            """Whether a G key on M2 or M3 holds something of the user's: not
+            what M1 has there, and not its factory_card."""
+            card = slots.get((device, f"g{n}", bank, shifted))
+            return card is not None and card not in (factory_card(n, shifted),
+                                                     slots.get((device, f"g{n}", 1, shifted)))
+
+        if not desktop and any(users(device, n, bank, shifted) for device, n, _key in keys
+                               for bank in (2, 3) for shifted in (False, True)):
+            profile.notes.append("Its M2 and M3 G keys are not imported: a game profile has one "
+                                 "set of G keys, and M1's are used.")
+
+    def g_key_from(self, profile: GhubProfile, slots: Mapping[tuple[str, str, int, bool], object],
+                   key: str, holders: list[tuple[str, int]], layer: tuple[int, bool],
+                   where: str) -> tuple[str, int]:
+        """Which of `holders`, the keys (device, number) bound under the name `key`, the G key
+        at `where` takes its card from on `layer` (bank, shifted): of those with a slot of it,
+        the first whose card is the user's, not its factory_card, else the first; else the
+        first of all. Another with a card of the user's, not the same, is said in `skipped`."""
+        cards = {(device, n): slots[device, f"g{n}", *layer] for device, n in holders
+                 if (device, f"g{n}", *layer) in slots}
+        own = [held for held, card in cards.items() if card != factory_card(held[1], layer[1])]
+        for other in own[1:]:
+            if cards[other] != cards[own[0]]:
+                # Not imported, so a name it cut is not said.
+                act = self.card_action_at(cards[other], where, [])
+                kept, lost = KEYBOARDS[own[0][0]].name, KEYBOARDS[other[0]].name
+                profile.skipped.append(f"{lost} {where}: {act.label}, Gearbench takes the "
+                                       f"{kept}'s {key} for both keyboards")
+        return (own or [*cards, *holders])[0]
 
     def g_binding(self, profile: GhubProfile, act: Action | None, where: str,
                   under: Binding) -> Binding:
@@ -963,51 +997,64 @@ class _Reader:
         return None
 
     def mouse_buttons(self, profile: GhubProfile,
-                      action: Callable[[str, str, int, bool, str], Action | None]) -> None:
-        """The profile's `mouse`: each of Gearbench's buttons G HUB binds; what
-        one cannot take is said in `skipped`."""
-        for control, button in MOUSE_SLOTS.items():
-            where = mouse_where(button)
-            act = action(MOUSE, control, 1, False, where)
-            if act is None or act.kind == DEFAULT:
-                continue
-            if act.kind == NOTHING:
-                profile.mouse[button] = "none"
-            elif act.kind in (KEYS, ACTION):
-                profile.mouse[button] = act.value
-                if act.kind == KEYS and act.label != act.value:
-                    profile.labels[where] = act.label
-            elif act.kind == MACRO:
-                bound = self.use_macro(profile, act, where)
-                if bound is not None:
-                    profile.mouse[button] = bound
-            else:
-                why = (act.value if act.kind == OTHER else
-                       "a button takes no click; a macro's click step can send left, right "
-                       "or middle")
-                profile.skipped.append(f"{where}: {act.label}, {why}")
+                      slots: Mapping[tuple[str, str, int, bool], object]) -> None:
+        """The profile's `mouse`: for each mouse it reads (mice_in), each of the model's
+        buttons G HUB binds; what one cannot take is said in `skipped`."""
+        for device, model in mice_in(slots):
+            mouse = profile.mouse[key_of(model)] = {}
+            for control, button in mouse_slots(model).items():
+                where = mouse_where(model, button)
+                act = self.slot_action(profile, slots, (device, control, 1, False), where)
+                self.mouse_button(profile, mouse, button, act, where)
+
+    def mouse_button(self, profile: GhubProfile, mouse: dict[str, Binding], button: str,
+                     act: Action | None, where: str) -> None:
+        """What one button at `where` is bound to, into `mouse`, its model's bindings, or what
+        it cannot take into the profile's `skipped`."""
+        if act is None or act.kind == DEFAULT:
+            return
+        if act.kind == NOTHING:
+            mouse[button] = "none"
+        elif act.kind in (KEYS, ACTION):
+            mouse[button] = act.value
+            if act.kind == KEYS and act.label != act.value:
+                profile.labels[where] = act.label
+        elif act.kind == MACRO:
+            bound = self.use_macro(profile, act, where)
+            if bound is not None:
+                mouse[button] = bound
+        else:
+            why = (act.value if act.kind == OTHER else
+                   "a button takes no click; a macro's click step can send left, right "
+                   "or middle")
+            profile.skipped.append(f"{where}: {act.label}, {why}")
 
     def mouse_not_rebound(self, profile: GhubProfile,
                           slots: Mapping[tuple[str, str, int, bool], object]) -> None:
-        """Said in the profile's `skipped`: a fixed mouse button G HUB moved off
-        its default card, and any card but the default on the mouse's G-Shift
+        """Said in the profile's `skipped`, for each mouse it reads (mice_in): a fixed control
+        G HUB moved off its default card, and any card but the default on the mouse's G-Shift
         layer."""
-        for control, (label, default) in MOUSE_FIXED.items():
-            card = slots.get((MOUSE, control, 1, False))
-            if card is not None and card != builtin_id(default):
-                act = self.card_action_at(card, f"Mouse {label}", profile.skipped)
-                profile.skipped.append(f"Mouse {label}: {act.label}, Gearbench does not rebind it")
-        for (device, control, bank, shifted), card in sorted(slots.items(), key=str):
-            # The mouse's own controls on bank 1, as the rest reads the mouse: a slot id can
-            # name any control and bank, and each would be a line.
-            if (device, bank) != (MOUSE, 1) or not shifted or (control not in MOUSE_SLOTS
-                                                              and control not in MOUSE_FIXED):
-                continue
-            where = f"Mouse {_mouse_label(control)} with G-Shift"
-            act = self.card_action_at(card, where, profile.skipped)
-            if act.kind != DEFAULT:
-                profile.skipped.append(f"{where}: {act.label}, Gearbench has no G-Shift layer on "
-                                       f"the mouse")
+        # Sorted once, and each model's labels made once: a file can hold hundreds of
+        # thousands of slots, and a profile can read every mouse of MICE.
+        ordered = sorted(slots.items(), key=str)
+        for mouse, model in mice_in(slots):
+            labels = mouse_labels(model)
+            for control, (_label, default) in fixed_slots(model).items():
+                card = slots.get((mouse, control, 1, False))
+                if card is not None and card != builtin_id(default):
+                    named = labels[control]
+                    act = self.card_action_at(card, named, profile.skipped)
+                    profile.skipped.append(f"{named}: {act.label}, Gearbench does not rebind it")
+            for (device, control, bank, shifted), card in ordered:
+                # The mouse's own controls on bank 1, as the rest reads the mouse: a slot id can
+                # name any control and bank, and each would be a line.
+                where = labels.get(control)
+                if (device, bank) != (mouse, 1) or not shifted or where is None:
+                    continue
+                act = self.card_action_at(card, f"{where} with G-Shift", profile.skipped)
+                if act.kind != DEFAULT:
+                    profile.skipped.append(f"{where} with G-Shift: {act.label}, Gearbench has no "
+                                           f"G-Shift layer on the mouse")
 
 
 def _app_id(record: Mapping) -> str | None:
@@ -1056,51 +1103,68 @@ def _processes(app: Mapping) -> tuple[list[str], list[str]]:
     return found, said
 
 
-class Taken:
-    """Names given so far, as the library compares them, and where `unique`
-    stopped counting for each numbered form. Kept across calls: rebuilt for
-    each name and counted from (2) each time, they would make a parse
-    quadratic in the profiles of one application."""
-
-    def __init__(self, names: Iterable[str] = ()) -> None:
-        self._slugs = {slug(name) for name in names}
-        self._counts: dict[str, int] = {}
-
-    def add(self, name: str) -> None:
-        self._slugs.add(slug(name))
-
-    def unique(self, wanted: str) -> str:
-        """`wanted`, or `wanted (2)`, `(3)`... whichever no name given so far
-        has, compared as the library compares them. The count starts where it
-        stopped for names whose numbered forms share a slug: a Taken only
-        grows, so the names it passed over are still taken."""
-        if slug(wanted) not in self._slugs:
-            return wanted
-        # Keyed by the numbered form, not `wanted`: a name with no letter or digit
-        # slugs as a hash of itself, but "!!! (2)" and "@@@ (2)" both slug as "2".
-        key = slug(f"{wanted} (n)")
-        n = self._counts.get(key, 2)
-        while slug(f"{wanted} ({n})") in self._slugs:
-            n += 1
-        self._counts[key] = n
-        return f"{wanted} ({n})"
+def factory_card(n: int, shifted: bool) -> str:
+    """The card G HUB puts on a keyboard's G key `n` out of the box: the F key of its number, or
+    on the G-Shift layer, the G-Shift default."""
+    return builtin_id(SHIFT_DEFAULT if shifted else f"01{0x39 + n:02x}")
 
 
-def g_where(key: str, shifted: bool, bank: int | None) -> str:
-    """How the preview names a G key: "G1", "G1 with MR", "G1 on M2"."""
-    return key + (" with MR" if shifted else "") + (f" on M{bank}" if bank else "")
+def mice_in(slots: Mapping[tuple[str, str, int, bool], object]) -> list[tuple[str, MouseModel]]:
+    """The mice of MICE whose buttons a profile's import reads, by G HUB's slot prefix: each
+    the profile has a slot of, so a mouse G HUB has nothing for keeps an M profile's own."""
+    return [(device, model) for device, model in MICE.items()
+            if any(slot[0] == device for slot in slots)]
 
 
-def mouse_where(button: str) -> str:
-    return f"Mouse {MOUSE_LABELS[button]}"
+def mouse_slots(model: MouseModel) -> dict[str, str]:
+    """G HUB's slots of a mouse model's buttons, to the names Gearbench binds them under. G
+    HUB's slot gN is the button entry N - 1 of the onboard profile (ButtonSlot.index): so the
+    G502 X PLUS's settings file has it, its paddle at index 4 being G HUB's g5 and Gearbench's
+    G6, and so the G502 HERO's device package draws it. Taken for every model's table (Claude
+    Code's call of 2026-10-18, pending the owner)."""
+    return {f"g{slot.index + 1}": slot.name
+            for slot in cast(ButtonTable, model.button_table).buttons}
 
 
-def _mouse_label(control: str) -> str:
-    """A G HUB mouse slot by what Gearbench or the mouse calls it: a slot of MOUSE_SLOTS or
-    of MOUSE_FIXED."""
-    if control in MOUSE_SLOTS:
-        return MOUSE_LABELS[MOUSE_SLOTS[control]]
-    return MOUSE_FIXED[control][0]
+def fixed_slots(model: MouseModel) -> dict[str, tuple[str, str]]:
+    """A mouse model's other controls by G HUB's slot, which Gearbench does not rebind, with
+    what each is and the card it holds out of the box: the three main buttons, the wheel
+    tilts and a profile button at any entry past them no button or tilt holds, each at its
+    entry's slot (mouse_slots' rule), and the wheel. Holding that card loses nothing;
+    anything else is listed as not imported."""
+    table = cast(ButtonTable, model.button_table)
+    tilts = {f"g{index + 1}": ("wheel tilt left", "040b") if way < 0
+             else ("wheel tilt right", "040c")
+             for index, way in table.tilts}
+    held = {slot.index for slot in table.buttons} | {index for index, _way in table.tilts}
+    # Such an entry is the G903 LIGHTSPEED HERO's profile cycle at 11. Its card out of the box
+    # is taken as the one the G502 X PLUS's G9 holds for that job: no settings file with a
+    # G903 has been read.
+    rest = {f"g{index + 1}": ("profile button", "0901")
+            for index in range(3, table.count) if index not in held}
+    return {"g1": ("left button", "0201"), "g2": ("right button", "0202"),
+            "g3": ("middle button", "0203"), **tilts, **rest, "scroll1": ("wheel up", "0409"),
+            "scroll2": ("wheel down", "040a")}
+
+
+def button_label(model: MouseModel, button: str) -> str:
+    """What the mouse model calls its button `button`: "G4 (side, rear)"."""
+    return next(slot.label for slot in cast(ButtonTable, model.button_table).buttons
+                if slot.name == button)
+
+
+def mouse_where(model: MouseModel, button: str) -> str:
+    """How the preview names a mouse button: "G502 X PLUS G4 (side, rear)"."""
+    return f"{model.name} {button_label(model, button)}"
+
+
+def mouse_labels(model: MouseModel) -> dict[str, str]:
+    """Each G HUB slot of `model` by what Gearbench or the mouse calls it: a button's
+    (mouse_slots) over another control's (fixed_slots)."""
+    return ({control: f"{model.name} {label}"
+             for control, (label, _card) in fixed_slots(model).items()}
+            | {control: mouse_where(model, button)
+               for control, button in mouse_slots(model).items()})
 
 
 def _slots(record: Mapping, others: set[str]) -> dict[tuple[str, str, int, bool], object]:
@@ -1114,7 +1178,7 @@ def _slots(record: Mapping, others: set[str]) -> dict[tuple[str, str, int, bool]
         parsed = _slot(assignment["slotId"])
         if parsed is None:
             continue
-        if parsed[0] not in (KEYBOARD, MOUSE):
+        if parsed[0] not in (*KEYBOARDS, *MICE):
             # Cut as the file's other names are: the window names up to SHOWN_DEVICES of
             # them in one label.
             if device := _name(parsed[0])[0]:

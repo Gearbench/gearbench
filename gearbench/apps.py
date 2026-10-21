@@ -20,7 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
-from .config import config_home, first_of, printable
+from .config import config_home
+from .wording import first_of, printable
 
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 

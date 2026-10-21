@@ -32,7 +32,7 @@ MENU_PATH = "/MenuBar"
 ACTIVE, NEEDS_ATTENTION = "Active", "NeedsAttention"
 #: The app's symbolic icon, which install.sh and the package put in the hicolor theme
 #: (desktop/icons/symbolic/).
-ICON = "io.github.wmuschetto.Gearbench-symbolic"
+ICON = "io.github.gearbench.Gearbench-symbolic"
 PROBLEM_ICON = "dialog-warning-symbolic"
 LOW_BATTERY_ICON = "battery-caution-symbolic"
 #: Below this on battery the icon asks for attention: the lower of the two low-battery
@@ -81,6 +81,10 @@ class Battery:
     answering: bool
     #: A keyboard on its cable with no reading, which is charging or full.
     cabled: bool
+    #: battery.icon_name's for the whole reading, the icon the window's Battery row shows
+    #: too, but for a keyboard on its cable with no reading: the adapter here, a missing
+    #: battery there.
+    icon: str
 
     @classmethod
     def of(cls, key: str, name: str, reading: dict | None, *, answering: bool = True,
@@ -90,7 +94,7 @@ class Battery:
         return cls(key, name, percent=reading.get("percent"), state=reading.get("state"),
                    plugged=bool(reading.get("charging") or reading.get("external_power")),
                    approximate=bool(reading.get("approximate")),
-                   answering=answering, cabled=cabled)
+                   answering=answering, cabled=cabled, icon=icon_name(reading, cabled))
 
     @property
     def low(self) -> bool:
@@ -114,11 +118,6 @@ class Battery:
             return f"{self.name}: {said}"
         return f"{self.name}: {said}" + ("" if self.answering else ", not answering")
 
-    def icon(self) -> str:
-        """battery.icon_name's, the icon the window's Battery row shows too, but for a keyboard
-        on its cable with no reading: the adapter here, a missing battery there."""
-        return icon_name({"percent": self.percent, "state": self.state}, self.cabled)
-
 
 @dataclass(frozen=True)
 class Stages:
@@ -139,6 +138,10 @@ class Snapshot:
     stages: Stages | None = None
     profiles: tuple[str, ...] = ()
     loaded: str | None = None
+    #: Each M profile's number and label while a keyboard that switches them here is connected
+    #: (keyboard.m_profiles_in_menu), empty otherwise. `active` is the M profile in force.
+    m_profiles: tuple[tuple[int, str], ...] = ()
+    active: int = 1
     keep_loaded: bool = False
     lock_lights: bool = True
     dpi_notices: bool = True
@@ -279,6 +282,16 @@ def profile_menu(snap: Snapshot) -> Item:
                 children=(*choices, Item("separator:keep_loaded", separator=True), keep))
 
 
+def m_profile_menu(snap: Snapshot) -> Item:
+    """The M profile submenu: each M profile, the one in force marked. Choosing another
+    switches to it, as its M key does on a keyboard that has one."""
+    choices = tuple(
+        Item(f"m_profile:{number}", label, toggle="radio", on=number == snap.active,
+             request=None if number == snap.active else request(command="profile", value=number))
+        for number, label in snap.m_profiles)
+    return Item("m_profiles", "M profile", children=choices)
+
+
 def switch_items(snap: Snapshot) -> tuple[Item, ...]:
     found = [switch("Lights off when locked", snap.lock_lights, command="lock_lights"),
              switch("DPI notices", snap.dpi_notices, command="dpi_notices")]
@@ -293,12 +306,13 @@ def build(snap: Snapshot, title: str) -> Model:
     groups = (
         # The AppIndicators extension shows no tooltip, so the menu is where they can be read.
         ("problems", problem_items(snap.problems)),
-        ("batteries", tuple(Item(f"battery:{b.key}", b.words(), b.icon(), enabled=False)
+        ("batteries", tuple(Item(f"battery:{b.key}", b.words(), b.icon, enabled=False)
                             for b in snap.batteries)),
         (OPEN, (Item(OPEN, f"Open {title}"),)),
         ("dpi", dpi_items(snap.stages) if snap.stages is not None else ()),
         # Without a game profile, None would be the submenu's only choice.
-        ("profiles", (profile_menu(snap),) if snap.profiles or snap.loaded else ()),
+        ("profiles", ((m_profile_menu(snap),) if snap.m_profiles else ())
+         + ((profile_menu(snap),) if snap.profiles or snap.loaded else ())),
         ("switches", switch_items(snap)),
     )
     items: list[Item] = []

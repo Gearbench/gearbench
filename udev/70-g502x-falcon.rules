@@ -1,0 +1,22 @@
+# Logitech G502 X PLUS MILLENNIUM FALCON (046d:40b2 through its LIGHTSPEED
+# receiver, 046d:c09e cabled) -> uaccess on its own hidraw node through the
+# receiver, and on its HID++ interface, 02, on its cable.
+#
+# Not yet checked on this hardware. It is an edition of the G502 X PLUS with
+# ids of its own, so its rules are the X PLUS's hidraw rules in
+# 70-g502x.rules, for the same reasons. Through the receiver the mouse's own
+# node is matched by its HID device name: a property match would also take
+# in the receiver's interfaces, which carry the input of everything paired to
+# it. Pair nothing else to this mouse's receiver: going by the kernel's
+# hid-logitech-dj.c, a keyboard paired after the mouse could have its
+# keystrokes arrive on this node.
+#
+# Cabled, a published lsusb of one unit gives three interfaces, 00 a boot
+# mouse, 01 a boot keyboard and 02 a vendor collection, the X PLUS's layout,
+# where 02 holds HID++ alone; that 02 does here too is assumed. Interface 01
+# is not granted.
+#
+# No event node is granted: in host mode Gearbench reads the buttons it binds
+# through HID++ on the hidraw nodes below, and outside host mode none.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0003:046D:40B2.*", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c09e", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"

@@ -12,7 +12,8 @@ from collections.abc import Callable, Sequence
 
 from gi.repository import Adw, Gdk, Gtk
 
-from ..config import ConfigError, counted, format_color, parse_color
+from ..config import ConfigError, format_color, parse_color
+from ..wording import counted
 from .style import EntryTexts, Styler, take_color_class
 from .worker import Settle
 

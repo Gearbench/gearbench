@@ -11,14 +11,18 @@ import json
 import sys
 
 from ..battery import reading_words
-from ..config import escaped as _escaped
 from ..daemon import send_command
+from ..wording import escaped as _escaped
 
 #: Reply fields only the window reads: lighting digests (KeyboardCommands.lighting_digest).
 WINDOW_DIGESTS = frozenset({"lighting", "was"})
 
 #: The narrowest label column of a reply printed whole, in characters, a label and its colon.
 REPLY_LABELS = 20
+#: How long a look for a running daemon waits for each answer, in seconds: a daemon that
+#: has not answered by then counts as running (daemon.BUSY), so the look need not wait
+#: send_command's own 3 s.
+PROBE_WAIT = 0.5
 
 
 def send(request: dict, timeout: float | None = None) -> dict:

@@ -1,7 +1,70 @@
-gearbench (1.0.1) resolute; urgency=medium
+gearbench (1.1.0) resolute; urgency=medium
 
-  * SECURITY.md says how to report a security problem privately, and the
-    README and the man page point to it.
+  * New keyboards: the G515 TKL, which has run on the hardware, and three
+    trials not yet checked there: the G515 LIGHTSPEED TKL, the G915 TKL
+    (G913 TKL too) and the G815 (G813 too). Each gets per-key lighting, its
+    animations and brightness. The G515 TKL runs Cycle, Wave and Ripple in
+    its own versions, each checked on it. The G915 TKL's F1 to F12 bind to a
+    key or a macro as the G915's G keys do.
+  * New mice: the G502 HERO, tried on a G502 SE HERO, whose DPI stages are
+    written to its onboard profile 1 (checked on it), and seven trials not
+    yet checked on the hardware: the G502 X, G502 X LIGHTSPEED, G502 X PLUS
+    MILLENNIUM FALCON, G502 LIGHTSPEED, PRO X SUPERLIGHT, PRO WIRELESS and
+    G903 LIGHTSPEED HERO. Gearbench reads each and sets its DPI live; in
+    host mode, not yet checked on any of them, it drives their buttons and
+    sets their report rate live. Nothing is written to the seven's onboard
+    memory. Sync with keyboard drives each one with lighting, and a button
+    can be bound to DPI cycle.
+  * The Logitech G432 headset, checked once on the hardware, on a page of
+    its own in the Headset tab: its sidetone; Logitech G432 Equalizer, an
+    output with ten bands and two shelves, three shipped presets and up to
+    16 in all, an A50 preset copied in; noise suppression for its
+    microphone; and spatial sound, which now plays to either headset. The
+    equalizer and noise suppression are off until switched on, and off again
+    after a logout.
+  * The Astro A50 keeps up to 16 EQ presets of your own, apart from the base
+    station's three, and loads one into slot 1, 2 or 3, unsaved until Save.
+    Each of its three presets gets Reset to default. Both were checked on
+    the base station; the Load preset to headset… dialog, built after that
+    check, is not yet checked on the hardware.
+  * gearbench-ctl report prints what each Logitech device on USB says about
+    itself, to paste into the repository's new Device report form, so a
+    model Gearbench does not drive yet can be supported. It sends reads
+    alone, reads no serial number and prints no computer or user name. Each
+    model Gearbench has not yet run on asks for a report in status, the
+    journal and its tab.
+  * While two keyboards are plugged in, a switcher at the top of the
+    Keyboard tab picks the one Gearbench drives and the mouse follows; the
+    Mouse tab picks its mouse with a switcher too. A keyboard switched off
+    is grayed out there, and the other is driven meanwhile. Each keyboard
+    model keeps its own lighting and brightness, and each mouse model its
+    own button bindings. A keyboard is offered only the effects it reports,
+    and Wave runs in six directions on every keyboard.
+  * The app id is now io.github.gearbench.Gearbench and the GNOME Shell
+    extension gearbench-focus@gearbench.github.io, after the gearbench
+    organization on GitHub, which now holds the repository. After the
+    upgrade, set Gearbench's switch in Settings > Notifications again if you
+    had changed it, pin Gearbench to the dock again, log out and back in
+    once, and then turn the extension on with the window's Turn on. Until it
+    runs, game profiles follow only X11 windows.
+  * Spatial sound plays to one output for every headset, Gearbench Spatial
+    (gearbench-spatial), in place of Astro A50 Spatial. Change each game's
+    launch option to PULSE_SINK=gearbench-spatial %command%: a game still on
+    gearbench-a50-spatial plays on the default output in stereo. If spatial
+    sound was on, switch it off and on once after the update.
+  * config.json and the game profiles' files are now version 3: they keep
+    the lighting for each keyboard model, config.json its brightness too,
+    and the button bindings for each mouse model. Settings from an earlier
+    Gearbench load as the G915's and the G502 X PLUS's. Before each file's
+    first save, a copy goes to backup/ in the settings folder; an earlier
+    Gearbench does not read the new files, and copying the backups back
+    returns to it.
+  * Among the fixes: DPI notices no longer stop GNOME Shell from showing any
+    app's notifications until the next login, and a G432 adapter that
+    answers its firmware read short no longer stops the service. Security
+    fixes: the daemon refuses a runtime folder another account could swap,
+    and the G432's equalizer, noise suppression and spatial sound no longer
+    take a sandboxed app's copy of the headset's output or microphone.
 
- -- wmuschetto <113629853+wmuschetto@users.noreply.github.com>  Sat, 17 Oct 2026 05:05:54 +0000
+ -- wmuschetto <113629853+wmuschetto@users.noreply.github.com>  Wed, 21 Oct 2026 16:05:45 +0000
 

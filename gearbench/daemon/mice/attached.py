@@ -277,9 +277,9 @@ class AttachedMouse:
     #: earlier run left, killed before its stop: sent by its first lighting setup with nothing
     #: to write (MouseLighting.let_go), and due no more once that release has gone out or any
     #: release has landed (MouseLighting.release), as `mouse_effect`'s `release` sends (the
-    #: owner's decision of 2026-10-18, "Release at startup", made for the G502 HERO; that it
-    #: goes once whether it lands or not, and to the G502 LIGHTSPEED and the PRO WIRELESS, is
-    #: Claude Code's call under it, pending the owner's). False on any other mouse.
+    #: owner's decision of 2026-10-18, "Release at startup", made for the G502 HERO). It goes
+    #: once whether it lands or not, and to the G502 LIGHTSPEED and the PRO WIRELESS too.
+    #: False on any other mouse.
     release_owed: bool = field(init=False)
     #: When its lighting is written again after a DPI flash (after_dpi_write), or None.
     repaint_at: float | None = None

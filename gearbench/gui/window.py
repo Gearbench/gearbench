@@ -76,7 +76,7 @@ from .worker import (
 
 #: What the uinput banner adds after the daemon's no_virtual_keyboard or no_virtual_mouse
 #: problem, after "; ": a one-line text the window shows ends with no period (the user's
-#: decision of 2026-10-27, D22).
+#: decision of 2026-10-27).
 SEE_GUIDE = "see the user guide"
 #: The uinput banner's problems: with both in a status, it says the first.
 UINPUT_PROBLEMS = ("no_virtual_keyboard", "no_virtual_mouse")

@@ -92,7 +92,7 @@
   <screenshots>
     <screenshot type="default">
       <caption>Keyboard: keys painted by click or drag, G keys and M profiles</caption>
-      <image>https://raw.githubusercontent.com/gearbench/gearbench/v1.2.0/docs/images/hero.png</image>
+      <image>https://raw.githubusercontent.com/gearbench/gearbench/v1.2.1/docs/images/hero.png</image>
     </screenshot>
   </screenshots>
 
@@ -197,15 +197,10 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
-    <release version="1.2.0" date="2026-10-28">
+    <release version="1.2.1" date="2026-10-28">
       <description>
-        <p>New devices tested on the hardware: the G915 X LIGHTSPEED
-        keyboard and the Astro A50 X and G933 headsets. More keyboards,
-        mice and headsets, the rest of the G432's family among them, are
-        built as trials not yet checked on the hardware.</p>
-        <p>Every keyboard plugged in is driven at once, one leading the
-        others' lighting, and each mouse's pointer moves at the DPI
-        Gearbench sets.</p>
+        <p>Installing from a checkout works again: install.sh had lost the
+        permission to run, so ./install.sh failed with "Permission denied".</p>
       </description>
     </release>
   </releases>

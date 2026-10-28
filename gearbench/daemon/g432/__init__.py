@@ -117,7 +117,7 @@ log = logging.getLogger("gearbench")
 
 NO_G432 = "no G432 or other headset of its family found; plug in its USB adapter, receiver or cable"
 #: The level a G key turns sidetone on at where it turned none off: the middle of
-#: SIDETONE_RANGE, Claude Code's call of 2026-10-25, pending the owner.
+#: SIDETONE_RANGE.
 SIDETONE_ON = 50
 #: `g432_headset_eq`'s refusal of more than one of gains, a preset and flat, before anything
 #: is sent.

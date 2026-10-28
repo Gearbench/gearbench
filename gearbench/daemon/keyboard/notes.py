@@ -15,8 +15,8 @@ LED_SETTLE = 0.2
 
 #: How long the node of a keyboard that did not answer its probe is waited on before it is
 #: asked again, doubling after each further probe nothing answers up to KEYBOARD_RETRY_MAX
-#: (Waiting.wait_for): the mice's 10 s and 120 s (mice.attached.MOUSE_RETRY), Claude Code's
-#: call of 2026-10-21. A probe holds the daemon's one thread 1.5 s for each device index that
+#: (Waiting.wait_for): the mice's 10 s and 120 s (mice.attached.MOUSE_RETRY).
+#: A probe holds the daemon's one thread 1.5 s for each device index that
 #: stays silent (hidpp.find_index): 1.5 s behind a receiver, which answers for its keyboard
 #: switched off, and up to 10.5 s on a node where no index answers.
 KEYBOARD_RETRY = 10.0

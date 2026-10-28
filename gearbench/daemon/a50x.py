@@ -291,8 +291,8 @@ class A50XHeadset(BatteryNotices):
         """Move a headset attached through its receiver to its cable once the cable's node is
         there, looked for through sysfs at the looks' pace (Plugs.pace), or at the next pass
         after look_now: the cable is preferred, as a keyboard's and a mouse's are, though the
-        headset may still answer through its receiver (the main session's call of 2026-10-23,
-        pending the owner). One this user may not open yet is not tried: its refusal is warned
+        headset may still answer through its receiver. One this
+        user may not open yet is not tried: its refusal is warned
         of and a problem while the node stays refused (_refused), as a mouse's cable's is, the
         receiver stays attached, and udev's grant brings the look forward. The connect
         tries the cable first; one that does not attach leaves the receiver attached again,

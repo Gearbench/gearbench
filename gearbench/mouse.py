@@ -291,7 +291,7 @@ class MouseModel:
     #: Whether it claims its lighting only once there is a color to write, not at its setup,
     #: and is released once at its attach with nothing to write (WAITS_TO_CLAIM): each
     #: model with zone lighting (the owner's decision of 2026-10-18, "Wait to claim"), the
-    #: G903 LIGHTSPEED HERO ("Wait for a color") and the G203 LIGHTSYNC (Claude Code's call).
+    #: G903 LIGHTSPEED HERO ("Wait for a color") and the G203 LIGHTSYNC.
     waits_to_claim: bool = False
     #: Whether its lighting writes passed their test on this hardware: until they do,
     #: `status` says its lighting is not yet tested (lighting_under_test).
@@ -444,7 +444,7 @@ PRO_X2_SUPERSTRIKE = replace(PRO_X_SUPERLIGHT_2, name="PRO X2 SUPERSTRIKE",
 #: collection is on interface 01 beside the mouse's keyboard collection (Solaar's descriptors:
 #: `interface=1` for the c092; the c09d's assumed the same), as on the G502 HERO. Its lighting
 #: through 0x8071 and 0x8081 as the G502 X PLUS's, assumed, claimed only once there is a color
-#: to write (Claude Code's call: the fewest writes to an untested mouse). HOST mode as
+#: to write (the fewest writes to an untested mouse). HOST mode as
 #: untested, its image never read.
 G203_LIGHTSYNC = MouseModel("G203 LIGHTSYNC", "g203lightsync", (),
                             button_table=G203_LIGHTSYNC_BUTTONS, host_mode=True, interface=1,

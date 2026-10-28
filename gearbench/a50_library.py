@@ -20,9 +20,8 @@ LIBRARY_VERSION = 1
 #: The three slots' defaults, which Reset to default writes to a slot, slot 1 first, its name
 #: too: the A50 EQ research's three presets of 2026-09-27, designed against Harman over-ear
 #: 2018 from published measurements of the A50 Gen 4 and a model of the base station's
-#: filters (eq-presets-report.md and its .astroeq files), in the slots the owner's base
-#: station held them in on 2026-10-18 (a50-presets-before.json), both outside the
-#: repository. The research named the first two Rock and Alt and FPS Spatial; a headset's
+#: filters, in the slots the owner's base station held them in on 2026-10-18. The research
+#: named the first two Rock and Alt and FPS Spatial; a headset's
 #: shipped presets take eq_presets' names (the owner's decision of 2026-10-22).
 DEFAULT_SLOTS = (
     astro.EqPreset(eq_presets.MEDIA, (4, -7, 2, 5, 3), (80, 180, 2700, 4400, 12000),

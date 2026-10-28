@@ -1138,8 +1138,7 @@ def mouse_slots(model: MouseModel) -> dict[str, str]:
     """G HUB's slots of a mouse model's buttons, to the names Gearbench binds them under. G
     HUB's slot gN is the button entry N - 1 of the onboard profile (ButtonSlot.index): so the
     G502 X PLUS's settings file has it, its paddle at index 4 being G HUB's g5 and Gearbench's
-    G6, and so the G502 HERO's device package draws it. Taken for every model's table (Claude
-    Code's call of 2026-10-18, pending the owner)."""
+    G6, and so the G502 HERO's device package draws it. Taken for every model's table."""
     return {f"g{slot.index + 1}": slot.name
             for slot in cast(ButtonTable, model.button_table).buttons}
 

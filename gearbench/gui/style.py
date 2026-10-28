@@ -1037,8 +1037,8 @@ def status_rows(group: Adw.PreferencesGroup
 #: when the browser does not open, with the form's address behind Details.
 UNTESTED_TITLE = "Not yet tested on this model"
 #: A write held on a model not yet tested, said once before a click at the narrowest scope that
-#: holds every grayed row: a group's line, or a row's own (the user's decision of 2026-10-27,
-#: D13). The cause stays the CLI's, the refusal toast's and Details'.
+#: holds every grayed row: a group's line, or a row's own (the user's decision of
+#: 2026-10-27). The cause stays the CLI's, the refusal toast's and Details'.
 TEST_WAIT = "for a test on this model"
 CHANGES_WAIT = f"Changes wait {TEST_WAIT}"
 PROFILE_WRITES_WAIT = f"Writes to profile 1 wait {TEST_WAIT}"

@@ -326,7 +326,7 @@ def programs_for(taking: list[tuple[list[str], str, str | None]], existing: Exis
     waits for: those that replace a profile of yours loading a program it keeps or takes
     (`keepers_last`). The import's programs past MAX_PROCESSES with those are left out (the
     owner's decision of 2026-10-02), and said unless one it takes or keeps loads for them too
-    (Claude Code's call of 2026-10-04, confirmed by the owner's decision of 2026-10-06).
+    (the owner's decision of 2026-10-06).
 
     Past `limit` characters of those sentences, each profile from the one that passes it
     has one in place of its own (`_said_within`)."""

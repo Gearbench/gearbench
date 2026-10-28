@@ -67,8 +67,7 @@ def _bands(*bands: tuple[int, int, float]) -> tuple[Band, ...]:
 
 
 #: The A50 X's Media, Gaming and Everyday for the headphones, the three the owner tuned by
-#: ear on 2026-10-22 (research-eq/a50x-walk-2026-10-22.md, "The three, as settled", outside
-#: the repository): the research's sets, with the owner's stronger correction at 1150 Hz and
+#: ear on 2026-10-22: the research's sets, with the owner's stronger correction at 1150 Hz and
 #: 3850 Hz in each.
 A50_X_TUNED = (
     Preset(eq_presets.MEDIA, "headphones", _bands(
@@ -89,8 +88,7 @@ A50_X_TUNED = (
 #: headphones made to sound like them (the owner's decision of 2026-10-23, "Sound like the
 #: A50 X"): fitted from those measurements to the A50 X's sound with them at the ear, in the
 #: model's own equalizer's format, the boosts summing to +12 dB at most at any frequency, with
-#: no preamp cut (the owner's decisions of 2026-10-23 and 2026-10-18;
-#: research-eq/like-a50x-centurion.md, outside the repository). A save writes them to the file
+#: no preamp cut (the owner's decisions of 2026-10-23 and 2026-10-18). A save writes them to the file
 #: with its change, and a deleted one stays deleted.
 STARTERS: Mapping[str, tuple[Preset, ...]] = {
     A50_X.key: A50_X_TUNED,

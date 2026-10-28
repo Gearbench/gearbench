@@ -237,7 +237,7 @@ G515_LIGHTSPEED = KeyboardModel("G515 LIGHTSPEED TKL", F_RGB, G515_BOARD,
 # them (the owner's decision of 2026-10-18, "Gearbench types F keys"). They bind as the
 # G915's G keys do, each typing its own key while unbound, under names of their own (the
 # owner's decisions of 2026-10-18, "Bindable, F keys by default" and "Their own"): the names
-# on their keycaps, Claude Code's call of 2026-10-18, pending the owner. The G913 TKL is on
+# on their keycaps. The G913 TKL is on
 # the same ids. It takes the G915's cell: the power model in G HUB's
 # g915_tkl_us package has the G915's discharge and charging curves point for point, and
 # differs only in its charging time and power figures (compared 2026-10-18).
@@ -299,7 +299,7 @@ def g515_generation(name: str, board: Board, fn_keys: frozenset[int],
 
 # The G515 generation's other keyboards (the owner's decisions of 2026-10-21: "Built untested
 # based on as much data as we can gather", the framework built now "so when we confirm, we can
-# fill in the blanks"; the seven are Claude Code's calls of 2026-10-21, pending the owner).
+# fill in the blanks").
 # None had been read on this machine before the G915 X LIGHTSPEED, whose own tests of
 # 2026-10-23 its record follows below. Each has 0x1B05, 0x8101, 0x8051, 0x4523 and 0x8040 beside
 # 0x8071 and 0x8081 in its feature table, so FN's reports, Game Mode's state, the brightness
@@ -325,8 +325,8 @@ def g515_generation(name: str, board: Board, fn_keys: frozenset[int],
 # their firmware images' (G HUB's 175.0.16, 186.01.7, 181.5.20 and 177.5.20). The G512 X's
 # analog keys, 0x1B08, wait for a device report (the owner's decision of 2026-10-21).
 # The G915 X's G1 to G9 bind under names of their own and do what the keyboard does with them
-# while unbound (Claude Code's call of 2026-10-21, as the owner's "Bindable" and "Their own" of
-# 2026-10-18 have the G915's), but on the G915 X LIGHTSPEED, below; FN with its F1 to F4 is the
+# while unbound (as the owner's "Bindable" and "Their own" of 2026-10-18 have the G915's), but
+# on the G915 X LIGHTSPEED, below; FN with its F1 to F4 is the
 # keyboard's, custom assignments' shortcut and its three onboard profiles. Each key id its
 # control list gives is the keyboard's own (the owner's decision of 2026-10-23, "All four
 # lessons"), its G keys' by the G915 X LIGHTSPEED's control ids, G915X_G_CONTROLS, and the

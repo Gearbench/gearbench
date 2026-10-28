@@ -16,4 +16,4 @@ their feature tables; the A50 Gen 4's base station speaks its own protocol, not 
 `gearbench-ctl probe` and `gearbench-ctl report`, never touch hardware themselves.
 """
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"

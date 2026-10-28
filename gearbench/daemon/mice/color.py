@@ -175,8 +175,8 @@ class MouseLighting:
 
     def let_go(self, attached: AttachedMouse) -> bool:
         """Release the claim of a mouse whose claim waits again (claim_waits), so it shows its
-        own lighting: color sync turned off with no color or effect of its own set (Claude
-        Code's call of 2026-10-18, pending the owner's), a claim that failed and may have landed
+        own lighting: color sync turned off with no color or effect of its own set,
+        a claim that failed and may have landed
         (claim_unsure), or the release it is owed from its attach (release_owed), which ends a
         claim an earlier run left. That one goes once, whether it lands or not. True when the
         release landed, or none was due."""

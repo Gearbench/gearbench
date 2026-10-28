@@ -67,8 +67,8 @@ def target(objects: Sequence[object], picked: str | None) -> spatial.Target | No
     """Where the chain plays for pw-dump's `objects` and the headset `picked`: spatial.pick's
     headset, at its output, or for the G432, or another of its family whose equalizer
     g432_eq runs, at that equalizer's sink while `objects` hold the one its unit's process
-    made (made_in), since spatial sound goes through the equalizer while it runs (Claude
-    Code's call of 2026-10-18, pending the owner's confirmation); None for no headset."""
+    made (made_in), since spatial sound goes through the equalizer while it runs;
+    None for no headset."""
     chosen = spatial.pick(spatial.present(objects), picked)
     if chosen is None:
         return None

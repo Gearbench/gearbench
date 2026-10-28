@@ -263,7 +263,7 @@ def problem_line(message: str) -> str:
 
 def problems_icon(problems: Sequence[str], codes: Sequence[str]) -> str:
     """The panel's attention icon while `problems` are listed, with their `codes`: the worst
-    line's sign, one sign with one meaning (the user's decision of 2026-10-27, D17): the
+    line's sign, one sign with one meaning (the user's decision of 2026-10-27): the
     error sign while any is not a device asleep, a problem given no code included, the
     warning sign while every one is. With none, the error sign, so the icon changes only
     when one asleep comes."""

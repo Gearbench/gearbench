@@ -264,8 +264,8 @@ ANIMATIONS = ("breathe", "cycle", "wave", "ripple", "pulsar-point", *SIGNATURES)
 #: owner's choice of 2026-09-24 after watching it on the G915. Pulsar Point takes none: the
 #: owner's G915 X LIGHTSPEED ran it at one pace with its period at 1000 and at 20000 ms, in two
 #: runs (2026-10-24), and G HUB's window offers no speed for it, so it goes at G HUB's 3000
-#: (DEFAULT_PERIODS) and has no Speed row (Claude Code's call of 2026-10-24, which the owner
-#: confirmed). SIGNATURES take none either, as each runs on its effect.
+#: (DEFAULT_PERIODS) and has no Speed row (confirmed by the owner, 2026-10-24).
+#: SIGNATURES take none either, as each runs on its effect.
 SPEEDS = {"breathe": (1000, 20000), "cycle": (1000, 20000), "wave": (1000, 20000),
           "ripple": (100, 1000)}
 

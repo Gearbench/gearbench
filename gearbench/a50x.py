@@ -9,8 +9,7 @@ the daemon.
 
 The A50 X's frames, features, reads and events are measured: Gearbench's reads of one on
 2026-10-21 (the first connect's steps 1 to 6, firmware before 1.3.21), and G HUB 39.1.2's
-traffic with the same unit on firmware 1.3.21 that day, each of its settings changed once
-(the captures, kept outside the repository, by section: B3 the table, B4 each setting). The
+traffic with the same unit on firmware 1.3.21 that day, each of its settings changed once. The
 base station answers every lookup and every read with the headset switched off, docked or
 not: it holds the feature table and the settings. The A50 Gen 5's frames are HeadsetControl
 PR 531's, checked on one; Logitech's release of 2024-09-17 says the Gen 5 "is based on the

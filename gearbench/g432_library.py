@@ -84,7 +84,7 @@ def _bands(*gains: int) -> tuple[Band, ...]:
 #: The G933's Media, Gaming and Everyday, made to sound like the A50 X's with its tuned three
 #: (the owner's decision of 2026-10-23, "Sound like the A50 X"): fitted on RTINGS' measurement
 #: of a G933 to the A50 X's sound with each, on G HUB's ten bands in whole dB, with no preamp
-#: cut (research-eq/like-a50x-hidpp.md, outside the repository). The G933 measures 4 to 6 dB
+#: cut. The G933 measures 4 to 6 dB
 #: over the target from 30 to 200 Hz and at 3.15 to 4 kHz, so the three are mostly cuts.
 G933_LIKE_A50X = (
     Preset(MEDIA, _bands(-2, -2, -4, -2, 2, -2, 2, -5, 2, 1)),

@@ -85,17 +85,16 @@ G_KEYS = ("G1", "G2", "G3", "G4", "G5")
 F_ROW_KEYS = tuple(f"F{n}" for n in range(1, 13))
 #: The G515 TKL's and the G515 LIGHTSPEED TKL's F1 to F12, under names of their own, so a
 #: binding made for the G915 TKL's F1 is not theirs (the owner's decisions of 2026-10-18,
-#: "Their own", and of 2026-10-21). The names are Claude Code's call of 2026-10-21, pending the
-#: owner: the model and the keycap, with no space, as `gearbench-ctl bind` takes a name.
+#: "Their own", and of 2026-10-21). The names are the model and the keycap, with no space, as
+#: `gearbench-ctl bind` takes a name.
 G515_F_KEYS = tuple(f"G515-F{n}" for n in range(1, 13))
 #: The PRO X TKL LIGHTSPEED's F1 to F12, its G1 to G12, under names of their own (the owner's
-#: decision of 2026-10-18, "Their own"). The names are Claude Code's call of 2026-10-21,
-#: pending the owner: the G515's form, the model and the keycap with no space.
+#: decision of 2026-10-18, "Their own"). The names are in the G515's form, the model and the
+#: keycap with no space.
 PRO_X_TKL_F_KEYS = tuple(f"PROXTKL-F{n}" for n in range(1, 13))
 #: The G515 generation's other keyboards' keys of their own, which their custom assignments
-#: bind, under names of their own in the G515s' form (the owner's decisions of 2026-10-18,
-#: "Their own", and of 2026-10-21, carried by Claude Code's calls of 2026-10-21, pending the
-#: owner): the G915 X's G1 to G9, shared with the G915 X LIGHTSPEED, which has its keys, and
+#: bind, under names of their own (the owner's decisions of 2026-10-18, "Their own", and of
+#: 2026-10-21) in the G515s' form: the G915 X's G1 to G9, shared with the G915 X LIGHTSPEED, which has its keys, and
 #: each other board's F1 to F12, shared by the two models on one board.
 G915X_G_KEYS = tuple(f"G915X-G{n}" for n in range(1, 10))
 G915XTKL_F_KEYS = tuple(f"G915XTKL-F{n}" for n in range(1, 13))
@@ -104,10 +103,9 @@ G512X75_F_KEYS = tuple(f"G512X75-F{n}" for n in range(1, 13))
 G512X98_F_KEYS = tuple(f"G512X98-F{n}" for n in range(1, 13))
 #: The G933's G1 to G3, on its left earcup, under names of their own (the owner's answer of
 #: 2026-10-25, "named like G933-G1", in each M profile and game profile): g432's
-#: HeadsetModel.g_keys. The G935's, G633's and G635's, taken to be the G933's, under each
-#: model's own in the same form (the owner's decision of 2026-10-25; the form Claude Code's
-#: call of that day, pending the owner). HEADSET_KEYS are every headset's, which take
-#: HEADSET_ACTIONS too.
+#: HeadsetModel.g_keys. The G935's, G633's and G635's, taken to be the G933's (the owner's
+#: decision of 2026-10-25), under each model's own in the same form. HEADSET_KEYS are every
+#: headset's, which take HEADSET_ACTIONS too.
 G933_G_KEYS = tuple(f"G933-G{n}" for n in range(1, 4))
 G935_G_KEYS = tuple(f"G935-G{n}" for n in range(1, 4))
 G633_G_KEYS = tuple(f"G633-G{n}" for n in range(1, 4))
@@ -120,8 +118,7 @@ HEADSET_KEYS = tuple(key for keys in HEADSET_G_KEYS for key in keys)
 HEADSET_ACTIONS = ("none", "brightness-cycle", "lights-toggle", "eq-next", "sidetone-toggle")
 #: What a headset's G key does while unbound: G1 the brightness cycle, as G HUB has it on a
 #: G933 (the owner's answer of 2026-10-25), and as the G933's on the models whose G keys are
-#: taken to be its (Claude Code's call of 2026-10-25, pending the owner: their setup guides
-#: give G1 a lighting cycle); the others nothing.
+#: taken to be its (their setup guides give G1 a lighting cycle); the others nothing.
 HEADSET_DEFAULTS = {keys[0]: "brightness-cycle" for keys in HEADSET_G_KEYS}
 #: Each model's keys bound under names of their own, beside the models whose keys they are,
 #: as a refusal and `gearbench-ctl bind`'s help name them: keyboard.MODEL_OF's names and
@@ -928,8 +925,7 @@ class Config:
     mouse_dpi: dict[str, int] = field(default_factory=dict)
     #: The report rate last set live on each mouse model whose onboard profile Gearbench does
     #: not write (Dpi.live_rate), by product id as mouse_dpi is: sent at each arm of
-    #: HOST mode in place of profile 1's, which the mouse keeps for when Gearbench stops
-    #: (Claude Code's call of 2026-10-18, pending the owner).
+    #: HOST mode in place of profile 1's, which the mouse keeps for when Gearbench stops.
     mouse_rate: dict[str, int] = field(default_factory=dict)
     #: The mouse last picked on the Mouse tab's switcher or with `gearbench-ctl mouse-select`,
     #: by the product id it was picked on: the one the window, the tray and a command without

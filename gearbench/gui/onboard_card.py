@@ -12,47 +12,44 @@ from typing import TYPE_CHECKING
 
 from gi.repository import Adw, Gtk
 
-from ..config import shown_config_dir
-from ..mouse import HostState, host_state, profile_jobs, profile_words, runs_another_profile
-from ..onboard import stage_dpi
-from ..wording import word_list
-from .style import explain
+from ..mouse import NO_ONBOARD, HostState, host_state, other_profile, profile_jobs
+from ..onboard import stage_dpi, stages_words
+from ..settings_files import backup_dir, shown_path
+from ..wording import capitalized, word_list
+from .style import PROFILE_WRITES_WAIT, explain, header_spinner, show_header_spinner
 
 if TYPE_CHECKING:                       # pragma: no cover
     from .mouse_page import OfferWrite
 
-#: The Programmable buttons row's first line in host mode with the spy armed. It says what
-#: profile 1 is for without "fallback", which the row keeps for what Write fallback… writes.
-HOST_BUTTONS = ("Host mode: G4 to G9 reach Gearbench directly; without Gearbench the mouse "
-                "runs profile 1.")
+#: The Programmable buttons row's first line in host mode with the spy armed. The group's
+#: description (ONBOARD_HELP) says what the mouse runs without Gearbench.
+HOST_BUTTONS = "Host mode: G4 to G9 reach Gearbench directly."
 #: HOST_BUTTONS on a model whose writes the daemon refuses (`flash_refused`): it is never
 #: switched to profile 1 (mouse.not_switched_untested), runs the profile it ran before once
 #: Gearbench stops, and its buttons need not be G4 to G9.
 REFUSED_HOST_BUTTONS = "Host mode: the buttons reach Gearbench directly."
 #: What the row says of a profile 1 that holds the fallback write's entries.
 FALLBACK_HELD = "Profile 1 holds the fallback: back, forward, DPI shift and steps, G9 nothing."
-#: The Profile backup row's subtitle, and in host mode, where no profile runs until Gearbench
-#: stops.
-RESTORE_HELP = "Writes back the newest backup of profile 1. Takes effect at once"
-RESTORE_HOST_HELP = ("Writes back the newest backup of profile 1. Gearbench uses its stages and "
-                     "rate at once, the rest when Gearbench stops")
+#: The fallback dialog's word over a profile 1 that holds it: the write changes nothing, and
+#: still risks what Re-apply anyway's does (OnboardCard.REAPPLY_NOTES).
+FALLBACK_AGAIN = ("Profile 1 holds it already: writing it again changes nothing, and a power or "
+                  "link loss mid-write can leave it corrupt.")
+#: The Profile backup row's subtitle in every state but a mouse whose writes the daemon
+#: refuses (hold_refused): its dialog says when the write is in effect (AT_ONCE,
+#: OTHER_PROFILE_NOTE, RESTORE_HOST_NOTE, RESTORE_GAME_NOTE).
+RESTORE_HELP = "Writes back the newest backup of profile 1"
 #: What the enable and restore dialogs say of when the write is in effect, outside host
 #: mode, while the mouse runs profile 1 or has not been read running another.
 AT_ONCE = "It takes effect at once."
 #: What the enable and restore dialogs say in place of AT_ONCE outside host mode while the
 #: mouse runs another profile, as the daemon's note after the write says
-#: (mouse.written_note); mouse.profile_words goes in.
+#: (mouse.written_note); mouse.other_profile's words go in.
 OTHER_PROFILE_NOTE = "The mouse runs {}, so it is not in effect until the mouse runs profile 1."
-#: The Profile backup row's subtitle then.
-RESTORE_OTHER_HELP = ("Writes back the newest backup of profile 1. Not in effect while the "
-                      "mouse runs {}")
 #: What the restore dialog says in place of AT_ONCE in host mode.
 RESTORE_HOST_NOTE = ("Gearbench uses its stages and rate at once; the mouse runs the rest when "
                      "Gearbench stops.")
-#: The row's subtitle and the dialog's note in host mode while a loaded game profile's own
-#: stages or rate are in force, which stay over profile 1's (ProfileWrites.flash_note).
-RESTORE_GAME_HELP = ("Writes back the newest backup of profile 1. Gearbench uses its stages and "
-                     "rate at once, except {}'s own, the rest when Gearbench stops")
+#: The dialog's note in host mode while a loaded game profile's own stages or rate are in
+#: effect, which stay over profile 1's (ProfileWrites.flash_note).
 RESTORE_GAME_NOTE = ("Gearbench uses its stages and rate at once, except {}'s own while it is "
                      "loaded; the mouse runs the rest when Gearbench stops.")
 #: What the enable dialog says in place of AT_ONCE for a mouse in host mode
@@ -62,7 +59,7 @@ ENABLE_HOST_NOTE = ("The mouse is in host mode, where no profile runs: G4 to G9 
 #: The Programmable buttons row's state when profile 1 holds none of the six entries, nor the
 #: fallback.
 NOT_ENABLED = "Not enabled: profile 1 sends none of G4 to G9 as mouse buttons 11 to 16."
-ONBOARD_HELP = "What the mouse runs without Gearbench, and in onboard mode."
+ONBOARD_HELP = "What the mouse runs without Gearbench, and in onboard mode"
 #: What the Stages and rate row says before profile 1's stages when a write failed and the
 #: sector could not be read back (the reply's `flash_unknown`).
 PROFILE_UNKNOWN = ("Not known: a write failed and profile 1 could not be read back. Leave the "
@@ -76,13 +73,17 @@ PROFILE_BAD_CRC_REFUSED = ("Profile 1 fails its CRC, as a blank one does; nothin
                            "As read:")
 #: The Programmable buttons row's state while the Stages and rate row says any of these.
 BUTTONS_IN_DOUBT = "Not known while profile 1 is in doubt: see Stages and rate."
-#: A write dialog's word on the backup made first; the config folder goes in.
-BACKED_UP = "Every profile sector is backed up to {}/backup/ first, and the write is verified."
+#: A write dialog's word on the backup made first; the backup folder goes in.
+BACKED_UP = "Every profile sector is backed up to {}/ first, and the write is verified."
 #: The restore dialog's word on the backup it makes of profile 1 first.
 RESTORE_UNDO = "The current profile is backed up first, so this can be undone."
 #: ... and of a profile 1 that fails its CRC, which is kept as a .bad-read file that no
 #: restore picks (OnboardProfiles.backup).
 RESTORE_BAD_CRC_NOTE = ("The current profile is backed up first; it fails its CRC, so no "
+                        "restore writes that copy back.")
+#: ... and of a profile 1 not known since a failed write (PROFILE_UNKNOWN): a sector that
+#: fails its CRC when the restore reads it is kept as a .bad-read too.
+RESTORE_UNKNOWN_NOTE = ("The current profile is backed up first; if it fails its CRC, no "
                         "restore writes that copy back.")
 
 
@@ -93,10 +94,8 @@ def profile_summary(onboard: dict) -> str:
         return "—"
     default = stage_dpi(stages, onboard.get("default_dpi_index", 0))
     shift = stage_dpi(stages, onboard.get("shift_dpi_index", 0))
-    listed = ", ".join(str(s) for s in stages)
     rate = onboard.get("report_rate")
-    return (f"{listed} DPI, default {default}, shift {shift}"
-            + (f"; {rate} Hz" if rate else ""))
+    return stages_words(stages, default, shift) + (f"; {rate} Hz" if rate else "")
 
 
 def profile_doubt(onboard: dict, refused: bool) -> str | None:
@@ -120,7 +119,8 @@ def buttons_state(info: dict, doubt: str | None, armed: bool) -> str:
     if doubt is not None:
         return BUTTONS_IN_DOUBT
     if any(isinstance(info.get(key), str) for key in ("flash_refused", "enable_refused")):
-        return f"Profile 1: {profile_jobs(info.get('button_table'))}."
+        # Onboard: on the same tab "Profile 1" is an M profile's name, "Editing M1 · Profile 1".
+        return f"Onboard profile 1: {profile_jobs(info.get('button_table'))}."
     if info.get("buttons_fallback"):
         return FALLBACK_HELD if armed else f"{FALLBACK_HELD} Enable… gives them their bindings."
     if info.get("buttons_enabled"):
@@ -171,19 +171,16 @@ class OnboardCard:
     #: The profile other than 1 the last reply's mouse was read running, in words, or None.
     #: Host mode's notes, where no profile runs, come first.
     _other: str | None = None
-    #: The Stages and rate row says the last reply's profile 1 fails its CRC and asks for a
-    #: restore (PROFILE_BAD_CRC); a model whose writes are refused is told none is needed
-    #: (PROFILE_BAD_CRC_REFUSED), and a profile unknown since a failed write (PROFILE_UNKNOWN)
-    #: is said in their place.
-    _bad_crc = False
+    #: What the Stages and rate row says of the last reply's profile 1 in doubt
+    #: (profile_doubt), or None: the restore dialog's word on its backup follows it.
+    _doubt: str | None = None
     #: What a re-apply does, checked against this mouse's own profile: the image it writes is
-    #: byte-identical to the one on the device.
+    #: byte-identical to the one on the device. Its risk and the way back follow.
+    REAPPLY_LEAD = "Re-applying changes nothing, but still writes the mouse's onboard memory:"
     REAPPLY_NOTES = (
-        "It changes nothing: profile 1 already holds these six entries, byte for byte.",
-        "It still writes to the mouse's onboard memory.",
-        ("If the mouse loses power or its link mid-write, profile 1 can be "
-         "left corrupt; that is the only risk."),
-        "Restore profile backup… recovers from that; the mouse's factory copy is the last resort.",
+        "If the mouse loses power or its link mid-write, profile 1 can be left corrupt.",
+        ("Restore profile backup… recovers profile 1; failing that, RECOVERY in "
+         "gearbench-ctl(1) says how to write the factory copy back."),
     )
 
     def __init__(self, parent: Adw.ApplicationWindow, offer_write: OfferWrite) -> None:
@@ -214,20 +211,17 @@ class OnboardCard:
         self.fallback_button = Gtk.Button(label="Write fallback…", valign=Gtk.Align.CENTER,
                                           visible=False)
         self.fallback_button.connect("clicked", self.on_fallback_buttons)
-        # Shown while any of the page's writes is in flight, a loaded game profile's stages or
-        # rate included. One to profile 1 backs up the directory and each profile sector (six on
-        # the G502 X PLUS), then erases, rewrites and reads one back, 0.4 to 0.9 s in the
-        # journal, far longer if the mouse stops answering part way. On the group, not a row:
-        # show_able hides the Programmable buttons row for a mouse without the button table,
-        # whose writes would then show no spinner.
-        self.write_spinner = Adw.Spinner(valign=Gtk.Align.CENTER, visible=False)
-        self.write_spinner.update_property([Gtk.AccessibleProperty.LABEL],
-                                           ["Writing to the mouse"])
-        onboard.set_header_suffix(self.write_spinner)
+        # Shown while a write one of its rows started is in flight (MousePage._write). One to
+        # profile 1 backs up the directory and each profile sector (six on the G502 X PLUS),
+        # then erases, rewrites and reads one back, 0.4 to 0.9 s in the journal, far longer if
+        # the mouse stops answering part way. On the group, not a row: show_able hides the
+        # Programmable buttons row for a mouse without the button table.
+        self.write_spinner = header_spinner(onboard)
         self.enable_row.add_suffix(self.enable_button)
         self.enable_row.add_suffix(self.fallback_button)
-        # A row of its own: it rewrites the flash, where Restore defaults
-        # only resets bindings. Not markup: its subtitle can name a game profile.
+        # A row of its own: it rewrites the flash, where Use factory bindings… only resets
+        # bindings. Not markup: hold_refused puts the daemon's reason, which names the mouse,
+        # in its subtitle.
         self.restore_row = Adw.ActionRow(title="Profile backup", subtitle=RESTORE_HELP,
                                          use_markup=False)
         restore = Gtk.Button(label="Restore profile backup…", valign=Gtk.Align.CENTER)
@@ -244,15 +238,20 @@ class OnboardCard:
 
     def show_able(self, able: set[str]) -> None:
         """Show the group for a mouse with `onboard`, and the Programmable buttons row for one
-        with `buttons`: Enable… and Write fallback… write the G502 X PLUS's six entries, which
-        the daemon refuses for a mouse without its button table."""
+        with `buttons`: Enable… and Write fallback… write its model's button table's entries
+        to profile 1, which the daemon refuses for a model without one
+        (ProfileWrites.no_button_table)."""
         self.group.set_visible("onboard" in able)
         self.enable_row.set_visible("buttons" in able)
 
-    def show_writing(self, busy: bool, usable: bool) -> None:
-        """The spinner while one of the page's writes is in flight, and the rows on while
-        `usable`, off again where hold_without_profile and hold_refused keep them."""
-        self.write_spinner.set_visible(busy)
+    def show_spinner(self, label: str | None) -> None:
+        """The group's spinner, named `label` while a write its rows started is in flight,
+        hidden for None."""
+        show_header_spinner(self.write_spinner, label)
+
+    def show_writing(self, usable: bool) -> None:
+        """The rows on while `usable`, off again where hold_without_profile and hold_refused
+        keep them."""
         for row in self.flash_rows:
             row.set_sensitive(usable)
         self.hold_without_profile()
@@ -267,49 +266,41 @@ class OnboardCard:
 
     def hold_refused(self) -> None:
         """Keep the rows off for a mouse whose every write to profile 1 the daemon refuses
-        (`flash_refused`), with the reason as Profile backup's subtitle: said before a click,
-        not after it. A reply or the end of a write turns the rows back on (show_writing), and
+        (`flash_refused`), the group's description saying so (show): said before a click, not
+        after it. A reply or the end of a write turns the rows back on (show_writing), and
         this off again."""
         if self._refused is None:
             return
-        self.restore_row.set_subtitle(self._refused)
         for row in self.flash_rows:
             row.set_sensitive(False)
 
     def show(self, info: dict) -> None:
-        """The Stages and rate row, always profile 1's own, and the Programmable buttons and
-        Profile backup rows: what profile 1 holds of G4 to G9 (buttons_state), with Write
-        fallback… in place of Enable… in host mode with the spy armed, and neither outside it
-        where the daemon refuses the enable write (`enable_refused`). For a mouse with no
-        onboard profile or one whose writes the daemon refuses, show_writing, which the page
-        calls after this (_set_writing), keeps both rows off (hold_without_profile,
-        hold_refused); the refused mouse's row gives its own buttons' jobs and offers neither
-        write as the next step.
-
-        A profile 1 in doubt, unknown since a write failed (`flash_unknown`) or failing its
-        CRC, is said first on the Stages and rate row, and the Programmable buttons row then
-        claims nothing of it, nor offers its writes as the next step."""
+        """Put a `mouse` reply on the group: its description (PROFILE_WRITES_WAIT on a mouse
+        whose writes the daemon refuses), the Stages and rate row, always profile 1's own,
+        with a profile 1 in doubt (profile_doubt) said first; the Programmable buttons row's
+        state (buttons_state) and its write, the next step only for a profile 1 in no doubt
+        on a mouse whose writes the daemon takes. show_writing, which the page calls after
+        this (_set_writing), keeps the Programmable buttons and Profile backup rows off for a
+        mouse with no onboard profile or one whose writes the daemon refuses."""
         onboard = info.get("onboard") or {}
         refused = info.get("flash_refused")
         self._refused = refused if isinstance(refused, str) else None
+        self.group.set_description(ONBOARD_HELP if self._refused is None else PROFILE_WRITES_WAIT)
         doubt = profile_doubt(onboard, self._refused is not None)
         summary = profile_summary(onboard)
         self.profile_row.set_subtitle(summary if doubt is None else f"{doubt} {summary}")
-        self._bad_crc = doubt is PROFILE_BAD_CRC
+        self._doubt = doubt
         host = bool((info.get("host") or {}).get("active"))
         self._no_onboard = not onboard
         self._host = host and bool(onboard)
         game = info.get("game_profile") or {}
         self._game_own = (str(game.get("name")) if self._host and game.get("applies")
                           and (game.get("dpi_stages") or game.get("report_rate")) else None)
-        running = onboard.get("running_profile")
-        self._other = profile_words(running) if runs_another_profile(running) else None
-        self.restore_row.set_subtitle(
-            RESTORE_GAME_HELP.format(self._game_own) if self._game_own
-            else RESTORE_HOST_HELP if self._host
-            else RESTORE_OTHER_HELP.format(self._other) if self._other else RESTORE_HELP)
+        self._other = other_profile(onboard.get("running_profile"))
+        self.restore_row.set_subtitle(RESTORE_HELP)
         if not onboard:
-            self.enable_row.set_subtitle("This mouse has no onboard profile feature")
+            self.enable_row.set_subtitle(
+                capitalized(NO_ONBOARD.format(info.get("name") or "mouse")))
             return
         # Neither is said of a profile in doubt: Re-apply…'s dialog would say the write
         # changes nothing, and an edit over a bad CRC is refused.
@@ -344,7 +335,7 @@ class OnboardCard:
             ("Onboard profile 1 is rewritten so G4 to G9 send mouse buttons "
              "11 to 16, which Gearbench reads."),),
             bullets=(
-                BACKED_UP.format(shown_config_dir()),
+                BACKED_UP.format(shown_path(backup_dir())),
                 ENABLE_HOST_NOTE if self._host
                 else OTHER_PROFILE_NOTE.format(self._other) if self._other else AT_ONCE,
                 "The keyboard is not touched.",
@@ -356,39 +347,40 @@ class OnboardCard:
     def _confirm_reapply(self) -> None:
         """Enabling again when it is already done. Say what that costs."""
         dialog = Adw.AlertDialog(heading="The buttons are already enabled")
-        explain(dialog, paragraphs=("Re-applying is not needed:",),
-                bullets=self.REAPPLY_NOTES)
+        explain(dialog, paragraphs=(self.REAPPLY_LEAD,), bullets=self.REAPPLY_NOTES)
         self._offer_write(dialog, "reapply", "Re-apply anyway",
                           Adw.ResponseAppearance.DESTRUCTIVE, {"command": "mouse_enable_buttons"})
-        dialog.set_default_response("cancel")
-        dialog.set_close_response("cancel")
         dialog.present(self._parent)
 
     def on_fallback_buttons(self, _b: Gtk.Button | None) -> None:
-        """The fallback write, which the row offers in host mode."""
+        """The fallback write, offered in place of Enable… in host mode with the spy armed."""
         dialog = Adw.AlertDialog(heading="Write the fallback to profile 1?")
         explain(dialog, paragraphs=(
             ("Onboard profile 1 is what the mouse runs without Gearbench. This sets G4 and "
              "G5 to back and forward, G6 to DPI shift, and G7 and G8 to DPI down and up; G9 "
              "does nothing."),
-            *(("Profile 1 holds it already; writing it again changes nothing.",)
-              if self._fallback_held else ())),
+            *((FALLBACK_AGAIN,) if self._fallback_held else ())),
             bullets=(
-                BACKED_UP.format(shown_config_dir()),
+                BACKED_UP.format(shown_path(backup_dir())),
                 "In host mode, G4 to G9 keep their bindings.",
                 "In onboard mode, G4 to G9 do these things instead of their bindings.",
             ))
-        self._offer_write(dialog, "write", "Write", Adw.ResponseAppearance.SUGGESTED,
+        # Over a profile 1 that holds it, a flash write that changes nothing: Re-apply
+        # anyway's guard, so Enter answers Cancel.
+        self._offer_write(dialog, "write", "Write",
+                          Adw.ResponseAppearance.DESTRUCTIVE if self._fallback_held
+                          else Adw.ResponseAppearance.SUGGESTED,
                           {"command": "mouse_fallback_buttons"})
         dialog.present(self._parent)
 
     def on_restore_buttons(self, _b: Gtk.Button | None) -> None:
         dialog = Adw.AlertDialog(heading="Restore the newest backup?")
         explain(dialog, paragraphs=(
-            (f"The newest backup of profile 1 in {shown_config_dir()}/backup/ is "
+            (f"The newest backup of profile 1 in {shown_path(backup_dir())}/ is "
              "written back to the mouse."),),
             bullets=(
-                RESTORE_BAD_CRC_NOTE if self._bad_crc else RESTORE_UNDO,
+                (RESTORE_BAD_CRC_NOTE if self._doubt is PROFILE_BAD_CRC
+                 else RESTORE_UNKNOWN_NOTE if self._doubt is PROFILE_UNKNOWN else RESTORE_UNDO),
                 (RESTORE_GAME_NOTE.format(self._game_own) if self._game_own
                  else RESTORE_HOST_NOTE if self._host
                  else OTHER_PROFILE_NOTE.format(self._other) if self._other else AT_ONCE),

@@ -2,10 +2,10 @@
 
 The debug information is the version, the daemon's `status` reply and its problems, whether
 this user may open each device's hidraw node and /dev/uinput, what systemd and PipeWire say
-of spatial sound, and the daemon's last 30 journal lines. `gather` reads it on the worker
-thread, since a socket round trip or a process can take seconds; the dialog opens at once
-and takes the text when it lands, which libadwaita shows even on an open page. A source that
-fails says so in its own section.
+of spatial sound, and the daemon's last 30 journal lines, with the home folder written ~.
+`gather` reads it on the worker thread, since a socket round trip or a process can take
+seconds; the dialog opens at once and takes the text when it lands, which libadwaita shows
+even on an open page. A source that fails says so in its own section.
 """
 
 from __future__ import annotations
@@ -14,35 +14,36 @@ import json
 import os
 import platform
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from gi.repository import Adw, Gtk
 
-from .. import __version__, spatial
+from .. import __version__, pipewire_client, spatial
+from ..a50x import PRODUCTS as CENTURION_MODELS, find_each_a50x
 from ..astro import PRODUCTS as HEADSET_MODELS, VENDOR_ID as HEADSET_VENDOR, find_base
 from ..daemon import send_command
-from ..desktop import APP_NAME, DESKTOP_ENTRY
+from ..desktop import APP_NAME, APP_SUMMARY, DESKTOP_ENTRY
 from ..g432 import PRODUCTS as G432_MODELS, find_g432
 from ..hidpp import NO_RULE, VENDOR_ID as LOGITECH_VENDOR
-from ..keyboard import find_attached_keyboard
+from ..keyboard import MODELS as KEYBOARD_MODELS, attached_keyboards
 from ..mouse import MODELS as MOUSE_MODELS, find_attached_mice
 from ..uinput import UINPUT as UINPUT_NODE
-from ..wording import ended, escaped, reason
+from ..wording import SERVICE, ended, escaped, home_shortened, reason
 
 #: The journal section's command: the daemon's last lines and the user manager's about it.
 #: The sender is matched by fields journald sets; USER_UNIT, which any program of this user can
 #: set (a Flatpak with no permissions included), counts only on init.scope's lines, unlike -u.
 _UID = f"_UID={os.getuid()}"
-JOURNAL = ["journalctl", "--user", "_SYSTEMD_USER_UNIT=gearbench.service", _UID, "+",
-           "_SYSTEMD_USER_UNIT=init.scope", "USER_UNIT=gearbench.service", _UID,
+JOURNAL = ["journalctl", "--user", f"_SYSTEMD_USER_UNIT={SERVICE}.service", _UID, "+",
+           "_SYSTEMD_USER_UNIT=init.scope", f"USER_UNIT={SERVICE}.service", _UID,
            "-n", "30", "--no-pager", "-o", "cat"]
 #: How long journalctl gets. It answers in well under a second.
 JOURNAL_TIMEOUT = 10.0
 #: Where the virtual keyboard and mouse are made.
 UINPUT = Path(UINPUT_NODE)
-#: What the dialog shows until `gather` lands.
-GATHERING = "Gathering the debug information…"
+#: What the dialog shows until `gather` lands, on libadwaita's Debugging Information page.
+GATHERING = "Gathering the debugging information…"
 #: The Problems section's line when the daemon sent no list: "none" would say nothing is
 #: wrong.
 PROBLEMS_NOT_KNOWN = "not known: the daemon sent no problems list"
@@ -59,7 +60,7 @@ SADIE_LICENSE = ('Used under the <a href="https://www.apache.org/licenses/LICENS
                  "/usr/share/gearbench/spatial/sadie-ii/LICENSE.txt from the package.")
 
 
-def read_journal(run: spatial.Run = subprocess.run) -> str:
+def read_journal(run: pipewire_client.Run = subprocess.run) -> str:
     """The daemon's last journal lines, or a sentence saying why not."""
     try:
         # A byte that is not UTF-8 becomes U+FFFD; raising would blank the page.
@@ -85,24 +86,25 @@ def device_nodes() -> list[tuple[str, Path]]:
     it with its user manager's groups, which can differ from this process's
     (evdev.group_denied), and reports a refusal as mouse_buttons_no_permission. Cabled,
     find_event_nodes also returns interface 01's node, which no rule grants."""
-    nodes: list[tuple[str, Path]] = []
-    found = find_attached_keyboard()
-    if found is not None:
-        nodes.append((f"keyboard {LOGITECH_VENDOR:04x}:{found[1]:04x}", found[0]))
-    for path, product, _index in find_attached_mice():
-        model = MOUSE_MODELS.get(product, "mouse")
-        nodes.append((f"{model} {LOGITECH_VENDOR:04x}:{product:04x}", path))
-    base = find_base()
-    if base is not None:
-        model = HEADSET_MODELS.get(base[1], "headset")
-        nodes.append((f"{model} {HEADSET_VENDOR:04x}:{base[1]:04x}", base[0]))
-    adapter = find_g432()
-    if adapter is not None:
-        # find_g432 finds only the ids PRODUCTS names.
-        model = G432_MODELS[adapter[1]]
-        nodes.append((f"{model} {LOGITECH_VENDOR:04x}:{adapter[1]:04x}", adapter[0]))
+    # Each finder looks only for the ids its module's names table holds. Each keyboard model
+    # plugged in: the daemon drives one of each.
+    nodes = [_node(KEYBOARD_MODELS, LOGITECH_VENDOR, path, product)
+             for path, product, _index in attached_keyboards()]
+    nodes += [_node(MOUSE_MODELS, LOGITECH_VENDOR, path, product)
+              for path, product, _index in find_attached_mice()]
+    if (base := find_base()) is not None:
+        nodes.append(_node(HEADSET_MODELS, HEADSET_VENDOR, *base))
+    if (adapter := find_g432()) is not None:
+        nodes.append(_node(G432_MODELS, LOGITECH_VENDOR, *adapter))
+    # Each node the daemon tries in turn until one attaches.
+    nodes += [_node(CENTURION_MODELS, LOGITECH_VENDOR, *found) for found in find_each_a50x()]
     nodes.append(("virtual keyboard and mouse", UINPUT))
     return nodes
+
+
+def _node(names: Mapping[int, str], vendor: int, path: Path, product: int) -> tuple[str, Path]:
+    """`path` with what it is: its model's name in `names`, then its vendor and product ids."""
+    return f"{names[product]} {vendor:04x}:{product:04x}", path
 
 
 def access_lines(nodes: list[tuple[str, Path]],
@@ -126,38 +128,43 @@ def access_lines(nodes: list[tuple[str, Path]],
 
 def debug_info(status: dict | Exception, access: list[str],
                spatial_rows: list[tuple[str, str]], journal: str) -> str:
-    """The text of the Troubleshooting page. The daemon's error, the
-    problems, the spatial rows and the journal go through `wording.escaped`:
-    a PipeWire client names its own stream, the saved gearbench-debug.txt is
-    read in a terminal, and a newline in a name would start a section of its
-    own."""
+    """The text of the Troubleshooting page, the home folder written ~. The
+    daemon's status or its error, the problems, the spatial rows and the journal go through
+    `wording.escaped`: a PipeWire client names its own stream, the saved
+    gearbench-debug.txt is read in a terminal, and a newline in a name would
+    start a section of its own."""
     gtk = f"{Gtk.get_major_version()}.{Gtk.get_minor_version()}.{Gtk.get_micro_version()}"
     adw = f"{Adw.get_major_version()}.{Adw.get_minor_version()}.{Adw.get_micro_version()}"
+    # The problems first, as the tray's menu and the window put them.
     parts = [f"Gearbench {__version__}",
              f"Python {platform.python_version()}, GTK {gtk}, libadwaita {adw}",
-             "", "== Daemon status =="]
-    if isinstance(status, Exception):
-        parts.append(f"The daemon's status could not be read: {escaped(reason(status))}")
-        listed = None
-    else:
-        parts.append(json.dumps(status, indent=2, sort_keys=True))
-        listed = status.get("problems")
-    parts += ["", "== Problems =="]
+             "", "== Problems =="]
+    listed = None if isinstance(status, Exception) else status.get("problems")
     if isinstance(listed, list):
         parts += [escaped(f"- {p.get('message')} ({p.get('code')})")
                   for p in listed if isinstance(p, dict)] or ["none"]
     else:
         parts.append(PROBLEMS_NOT_KNOWN)
+    parts += ["", "== Daemon status =="]
+    if isinstance(status, Exception):
+        parts.append(f"The daemon's status could not be read: {escaped(reason(status))}")
+    else:
+        # Not ensure_ascii, which writes each letter of a home folder outside ASCII as a JSON
+        # escape, where home_shortened does not find it. A line break in a string is JSON's
+        # escape too, so each line split here is one of the dump's own.
+        parts += [escaped(line) for line in json.dumps(status, indent=2, sort_keys=True,
+                                                       ensure_ascii=False).split("\n")]
     parts += ["", "== Device access =="] + access
     parts += ["", "== Spatial sound =="] + [escaped(f"{label}: {value}")
                                              for label, value in spatial_rows]
     parts += ["", f"== Journal ({' '.join(JOURNAL)}) =="]
     parts += [escaped(line) for line in journal.split("\n")]
-    return "\n".join(parts)
+    # The page is pasted into a public issue: a path in the home folder would name the login.
+    return home_shortened("\n".join(parts))
 
 
 def gather(send: Callable[..., dict] = send_command,
-           run: spatial.Run = subprocess.run,
+           run: pipewire_client.Run = subprocess.run,
            nodes: Callable[[], list[tuple[str, Path]]] = device_nodes) -> str:
     """Everything the page shows. For the worker thread: a round trip,
     processes and a walk of sysfs."""
@@ -175,10 +182,7 @@ def about_dialog() -> Adw.AboutDialog:
         application_name=APP_NAME, application_icon=DESKTOP_ENTRY, version=__version__,
         developer_name="wmuschetto", license_type=Gtk.License.GPL_3_0,
         website="https://github.com/gearbench/gearbench",
-        comments="G and M keys, lighting, DPI and macros for Logitech G keyboards and "
-                 "mice, and the settings of the Logitech G432 and Astro A50 Gen 4 "
-                 "headsets, through the Gearbench daemon."
-                 f"\n\n{NOT_AFFILIATED}",
+        comments=f"{APP_SUMMARY}.\n\n{NOT_AFFILIATED}",
         debug_info=GATHERING, debug_info_filename="gearbench-debug.txt")
     # Apache-2.0 asks for the attribution wherever the files go.
     dialog.add_legal_section(

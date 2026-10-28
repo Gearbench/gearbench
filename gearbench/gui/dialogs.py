@@ -6,14 +6,16 @@ be reachable there.
 
 Both are `Adw.Dialog`s, drawn inside the window that opens them. Their keys
 pass through that window, but an Adw.Dialog sets limit-events: the window's
-own controllers see no key while the focus is in the dialog, so F10 is
-captured or recorded and does not open the main menu.
+own controllers see no key while the focus is in the dialog, except those
+set to propagation-limit none (`track_keys_down`, `swallow_held_keys`), so
+F10 is captured or recorded and does not open the main menu.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterable
+import weakref
+from collections.abc import Callable
 from typing import cast
 
 from gi.repository import Adw, Gdk, GObject, Gtk
@@ -28,15 +30,14 @@ from ..macros import (
 from ..uinput import (
     KEY_GROUPS,
     KEY_LABELS,
-    KEY_LIST,
     MODIFIER_KINDS,
     UinputError,
     key_matches,
     resolve,
     spec_for_keys,
 )
-from ..wording import counted, reason
-from .style import held_while_shown, plain_row, pointer_button, weakly
+from ..wording import capitalized, counted, service_command
+from .style import held_while_shown, pointer_button, say_in_place, weakly
 from .worker import (
     BUSY,
     DOWN,
@@ -44,7 +45,7 @@ from .worker import (
     DaemonWorker,
     Reply,
     failure,
-    socket_path,
+    unreachable,
 )
 
 #: The key list's modifier boxes, (spec name, label), in `spec_for_keys`'s order.
@@ -57,8 +58,18 @@ KEY_LIST_HEIGHT = 560
 #: The Super keys, the one modifier whose release may never arrive: GNOME
 #: Shell keeps a lone Super's for its Activities overview.
 SUPER_CODES = frozenset(code for code, kind in MODIFIER_KINDS.items() if kind == "super")
-#: The capture dialog's macro button, which the Macros tab's description names.
-USE_A_MACRO = "Use a macro…"
+#: The capture dialog's buttons that open a list, each saying what its page does, as that
+#: page's title: Choose a key and Choose a macro.
+CHOOSE_A_KEY = "Choose a key…"
+CHOOSE_A_MACRO = "Choose a macro…"
+#: A read of the macros that failed, in the macro list and the Macros tab's toast.
+MACROS_UNREAD = "The macros could not be read"
+#: The macro list's next step under unreachable's words, by `failure`'s kind. A socket that
+#: cannot be used has none: its words name the path and the cause.
+MACROS_NEXT_STEP = {UNREAD: "Press Back and try again", BUSY: "Press Back and try again",
+                    DOWN: f"Start it with `{service_command('start')}`"}
+#: The keys each window's one guard keeps from it (swallow_held_keys).
+_GUARDED: weakref.WeakKeyDictionary[Gtk.Window, set[int]] = weakref.WeakKeyDictionary()
 
 
 def held_modifiers(state: Gdk.ModifierType) -> dict[str, bool]:
@@ -69,12 +80,64 @@ def held_modifiers(state: Gdk.ModifierType) -> dict[str, bool]:
             "meta": bool(state & Gdk.ModifierType.SUPER_MASK)}
 
 
+def track_keys_down(window: Gtk.Window) -> set[int]:
+    """The keys down in `window`, by GDK hardware keycode, each from its press there to its
+    release, all forgotten as the keyboard comes or goes: what a dialog opening over the
+    window keeps from it (swallow_held_at_open). Window holds it as `keys_down`."""
+    down: set[int] = set()
+
+    def pressed(_c: Gtk.EventControllerKey, _keyval: int, keycode: int,
+                _state: Gdk.ModifierType) -> bool:
+        down.add(keycode)
+        return False
+
+    def released(_c: Gtk.EventControllerKey, _keyval: int, keycode: int,
+                 _state: Gdk.ModifierType) -> None:
+        down.discard(keycode)
+
+    # No propagation limit: a dialog is an Adw.Dialog, which sets limit-events.
+    keys = Gtk.EventControllerKey(name="keys-down",
+                                  propagation_phase=Gtk.PropagationPhase.CAPTURE,
+                                  propagation_limit=Gtk.PropagationLimit.NONE)
+    keys.connect("key-pressed", pressed)
+    keys.connect("key-released", released)
+    window.add_controller(keys)
+    # The releases go where the keyboard goes.
+    window.connect("notify::is-active", lambda *_args: down.clear())
+    return down
+
+
+def keys_held(window: Gtk.Window) -> set[int]:
+    """The keys down in `window` (track_keys_down), none in a window that does not count
+    them."""
+    return getattr(window, "keys_down", set())
+
+
+def swallow_held_at_open(window: Gtk.Window) -> None:
+    """Keep the keys still held in `window` as a dialog opens over it from the dialog until
+    each comes up (swallow_held_keys)."""
+    if held := keys_held(window):
+        swallow_held_keys(window, held)
+
+
 def swallow_held_keys(window: Gtk.Window, keycodes: set[int]) -> None:
-    """Keep the presses of `keycodes`, still held as a dialog over `window` closes, from the
-    window until each comes up. The desktop repeats a held key's press, and a repeated Space
-    or Enter presses what has the focus next: what opened the dialog, or a response of a
-    confirmation the dialog's callback put up."""
-    held = set(keycodes)
+    """Keep the presses of `keycodes`, still held as a dialog over `window` opens or closes,
+    from the window until each comes up there or the keyboard leaves the window, taking the
+    releases with it. The desktop repeats a held key's press, and a repeated Space or Enter
+    presses what has the focus next: what opened the dialog, a response of a confirmation
+    the dialog's callback put up, or the dialog's own capture or recording.
+
+    One guard to a window, which a later call adds its keys to: a newer guard that took a
+    key's press takes its release from the older, which would then eat the key's next press."""
+    if (guarded := _GUARDED.get(window)) is not None:
+        guarded |= keycodes
+        return
+    held = _GUARDED[window] = set(keycodes)
+
+    def let_go(owner: Gtk.Window, controller: Gtk.EventControllerKey) -> None:
+        owner.disconnect(watch)
+        owner.remove_controller(controller)
+        _GUARDED.pop(owner, None)
 
     def pressed(_c: Gtk.EventControllerKey, _keyval: int, keycode: int,
                 _state: Gdk.ModifierType) -> bool:
@@ -83,17 +146,31 @@ def swallow_held_keys(window: Gtk.Window, keycodes: set[int]) -> None:
     def released(controller: Gtk.EventControllerKey, _keyval: int, keycode: int,
                  _state: Gdk.ModifierType) -> None:
         held.discard(keycode)
+        owner = cast(Gtk.Window, controller.get_widget())
+        # GTK runs a widget's controllers newest first, and a key controller that took a
+        # press takes its release from those after it, the window's count among them
+        # (GTK 4.22.4, measured 2026-10-24).
+        keys_held(owner).discard(keycode)
         if not held:
             # Kept to the last release: off the window, it would see none.
-            cast(Gtk.Widget, controller.get_widget()).remove_controller(controller)
+            let_go(owner, controller)
 
-    # No propagation limit: the confirmation is an Adw.Dialog, which sets limit-events.
+    def inactive(owner: Gtk.Window, _pspec: GObject.ParamSpec) -> None:
+        # The keyboard went to another window or the overview, the releases with it: kept
+        # on, the guard would eat each key's next press here.
+        if not owner.is_active():
+            let_go(owner, guard)
+
+    # No propagation limit: the dialog and the confirmation are Adw.Dialogs, which set
+    # limit-events.
     guard = Gtk.EventControllerKey(name="held-keys",
                                    propagation_phase=Gtk.PropagationPhase.CAPTURE,
                                    propagation_limit=Gtk.PropagationLimit.NONE)
     guard.connect("key-pressed", pressed)
     guard.connect("key-released", released)
     window.add_controller(guard)
+    # The window's is-active handler, which goes with the guard.
+    watch = window.connect("notify::is-active", inactive)
 
 
 def close_keeping_held(dialog: Adw.Dialog, window: Gtk.Window, keys_down: set[int]) -> None:
@@ -124,11 +201,13 @@ class CaptureDialog(Adw.Dialog):
     completes; a chord with Super arrives as any other. A Super that GDK's
     state no longer holds is dropped at the next press, and every key is
     forgotten when the keyboard leaves the dialog, so no key stays counted as
-    down. Closing keeps a key still held from the window until it comes up
-    (`close_keeping_held`): Enter held at a pick from a list repeats into what
-    gets the focus back, and on a G key or Change… opens the dialog again.
+    down. Opening and closing keep a key still held from the dialog and the
+    window until it comes up (`swallow_held_at_open`, `close_keeping_held`):
+    Enter held on a G key or Change… would repeat into the capture as its
+    binding, and Enter held at a pick from a list into what gets the focus
+    back, opening the dialog again.
 
-    **Choose from a list…** is the second way to pick (the owner's decisions of
+    **Choose a key…** is the second way to pick (the owner's decisions of
     2026-09-24): a search, Ctrl, Shift, Alt and Super boxes sent with the key
     picked, and a curated list of keys (the owner's decision of 2026-09-25). It
     binds Escape, which closes the capture, and Super alone. It takes one key;
@@ -139,7 +218,9 @@ class CaptureDialog(Adw.Dialog):
     step: a macro cannot run a macro.
 
     `can_unbind=False` drops the Unbind button, for a caller with nothing to
-    unbind, such as a macro step. `title` replaces "Bind `target`" on the capture page.
+    unbind, such as a macro step, or one whose row clears with Nothing, as a mouse
+    button's and a headset G key's do. `title` replaces "Bind `target`" on the capture
+    page.
     """
 
     def __init__(self, parent: Gtk.Window, target: str,
@@ -174,7 +255,7 @@ class CaptureDialog(Adw.Dialog):
         self.label = Gtk.Label(label="Press a key", css_classes=["title-1"])
         self.hint = Gtk.Label(
             label=f"{target} will send it.\nHold keys together, or tap a modifier alone.\n"
-                  "Pick Super alone from the list.",
+                  f"For Super alone, use {CHOOSE_A_KEY}",
             justify=Gtk.Justification.CENTER, css_classes=["dimmed"])
         self._build_header()
         self._build_capture(can_unbind)
@@ -198,7 +279,7 @@ class CaptureDialog(Adw.Dialog):
         self.back = Gtk.Button(label="Back", visible=False)
         self.back.connect("clicked", weakly(self._back))
         cancel = Gtk.Button(label="Cancel")
-        cancel.connect("clicked", weakly(self._cancel))
+        cancel.connect("clicked", weakly(self._close))
         self.header.pack_start(self.back)
         self.header.pack_start(cancel)
 
@@ -210,11 +291,11 @@ class CaptureDialog(Adw.Dialog):
         # The other ways to pick get their own row: four buttons on one row do not fit.
         others = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
                          halign=Gtk.Align.CENTER)
-        choose = Gtk.Button(label="Choose from a list…")
+        choose = Gtk.Button(label=CHOOSE_A_KEY)
         choose.connect("clicked", weakly(self._ask_keys))
         others.append(choose)
         if self._worker is not None:
-            macro = Gtk.Button(label=USE_A_MACRO)
+            macro = Gtk.Button(label=CHOOSE_A_MACRO)
             macro.connect("clicked", weakly(self._ask_macros))
             others.append(macro)
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
@@ -270,7 +351,7 @@ class CaptureDialog(Adw.Dialog):
                                  margin_start=12, margin_end=12)
         self._key_rows.append(self.key_empty)
         # The list is curated; a last line points to the CLI for the rest.
-        self.key_more = Gtk.Label(label="Other keys: gearbench-ctl keys",
+        self.key_more = Gtk.Label(label="Other keys: `gearbench-ctl keys`",
                                   css_classes=["dimmed"], wrap=True)
         self._key_rows.append(self.key_more)
         top = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
@@ -305,10 +386,7 @@ class CaptureDialog(Adw.Dialog):
     def _on_closed(self, _dialog: Adw.Dialog) -> None:
         self._closed = True
 
-    def _cancel(self, _b: Gtk.Button | None) -> None:
-        self._close()
-
-    def _close(self) -> None:
+    def _close(self, *_args: object) -> None:
         close_keeping_held(self, self._parent, self._keys_down)
 
     # -- the pages ---------------------------------------------------------
@@ -331,59 +409,37 @@ class CaptureDialog(Adw.Dialog):
 
     def _ask_macros(self, _b: Gtk.Button | None) -> None:
         self._show_page(self.macro_box, "Choose a macro")
-        self._set_macro_rows([Adw.ActionRow(title="Reading the macros…")])
+        say_in_place(self.macro_list, "Reading the macros…", waiting=True)
         # A worker: __init__ makes the button that leads here, and `run` opens here, only
         # with one.
         cast(DaemonWorker, self._worker).call({"command": "macros"}, self._show_macros)
 
-    def _set_macro_rows(self, rows: Iterable[Gtk.Widget]) -> None:
-        self.macro_list.remove_all()
-        for row in rows:
-            self.macro_list.append(row)
-
     def _show_macros(self, reply: Reply) -> None:
         if self._closed:
             return
-        # An empty library and an unreachable daemon get different rows; the Macros tab
-        # lists the macros either way, since it reads the files itself.
+        # An empty library and an unreachable daemon get different placeholders; the Macros
+        # tab lists the macros either way, since it reads the files itself.
         if isinstance(reply, Exception):
-            kind = failure(reply)
-            if kind == UNREAD:
-                row = Adw.ActionRow(title="The daemon's reply could not be read",
-                                    subtitle="Press Back and try again")
-            elif kind == BUSY:
-                row = Adw.ActionRow(title="The daemon did not answer in time",
-                                    subtitle="It may be busy; press Back and try again")
-            elif kind == DOWN:
-                row = Adw.ActionRow(title="The daemon is not running",
-                                    subtitle="Start it with: systemctl --user start gearbench")
-            else:
-                # A socket that cannot be used: whether a daemon runs is unknown, so
-                # show the error.
-                row = plain_row(Adw.ActionRow, "The daemon could not be reached",
-                                f"{socket_path()}: {reason(reply)}")
-            self._set_macro_rows([row])
+            say_in_place(self.macro_list, capitalized(unreachable(reply)),
+                         MACROS_NEXT_STEP.get(failure(reply), ""))
             return
         if not reply.get("ok"):
             error = str(reply.get("error") or "")
-            self._set_macro_rows([plain_row(
-                Adw.ActionRow, "The macros could not be read", error[:1].upper() + error[1:])])
+            say_in_place(self.macro_list, MACROS_UNREAD, capitalized(error))
             return
         macros = reply.get("macros") or []
         if not macros:
-            self._set_macro_rows([Adw.ActionRow(
-                title="No macros yet",
-                subtitle="Make one on the Macros tab, then come back")])
+            say_in_place(self.macro_list, "No macros yet",
+                         "Make one on the Macros tab, then come back")
             return
-        rows = []
+        self.macro_list.remove_all()
         for macro in macros:
             # Not markup: a name with "&" would leave the row empty.
             row = Adw.ActionRow(title=macro["name"], use_markup=False,
                                 subtitle=macro_summary(macro["steps"], macro["repeat"]),
                                 activatable=True)
             row.connect("activated", weakly(self._pick_macro), macro["name"])
-            rows.append(row)
-        self._set_macro_rows(rows)
+            self.macro_list.append(row)
 
     def _pick_macro(self, _row: Adw.ActionRow, name: str) -> None:
         self._done(f"{MACRO_PREFIX}{name}")
@@ -418,7 +474,7 @@ class CaptureDialog(Adw.Dialog):
         """Keep the rows that match, and the groups that still have one."""
         self._key_query = entry.get_text().strip()
         shown = 0
-        for (group, listbox), names in zip(self.key_lists, KEY_LIST, strict=True):
+        for (group, listbox), names in zip(self.key_lists, KEY_GROUPS.values(), strict=True):
             listbox.invalidate_filter()
             matches = sum(key_matches(name, self._key_query) for name in names)
             group.set_visible(matches > 0)
@@ -499,7 +555,7 @@ class CaptureDialog(Adw.Dialog):
             self.spec = None
             self.accept.set_sensitive(False)
             self.label.set_text("Cannot use this key")
-            self.hint.set_text(str(exc))
+            self.hint.set_text(capitalized(str(exc)))
             return
         self._show(spec)
 
@@ -530,6 +586,7 @@ class CaptureDialog(Adw.Dialog):
         if macros and self._worker is not None:
             self._ask_macros(None)
         held_while_shown(self)
+        swallow_held_at_open(self._parent)
         self.present(self._parent)
 
 
@@ -550,9 +607,11 @@ class RecordDialog(Adw.Dialog):
 
     Presses and releases are both watched, so a held key records as a hold, and
     the recorder drops the auto-repeats. Stop adds a release for anything still
-    held, so no recording presses and never lets go. Closing keeps a key still
-    held from the window until it comes up (`swallow_held_keys`), since its
-    repeats would press what gets the focus back.
+    held, so no recording presses and never lets go. Opening and closing keep a
+    key still held from the dialog and the window until it comes up
+    (`swallow_held_keys`): Space held on Record… would repeat into the
+    recording, and a key held at the close would press what gets the focus
+    back.
 
     Clicks are watched on the body alone, so Cancel and Stop are in the header
     bar: a button that is both a control and a recordable click is neither
@@ -574,7 +633,7 @@ class RecordDialog(Adw.Dialog):
 
         header = Adw.HeaderBar(show_end_title_buttons=False)
         cancel = Gtk.Button(label="Cancel")
-        cancel.connect("clicked", weakly(self._cancel))
+        cancel.connect("clicked", weakly(self._close))
         stop = Gtk.Button(label="Stop", css_classes=["suggested-action"])
         stop.connect("clicked", weakly(self._stop))
         header.pack_start(cancel)
@@ -682,7 +741,9 @@ class RecordDialog(Adw.Dialog):
             self._after(self.recorder.keyboard_left(time.monotonic()))
 
     def _on_button(self, controller: Gtk.EventControllerLegacy, *_args: object) -> bool:
-        if (change := pointer_button(controller)) is not None:
+        # Only while recording: a click's state can find up the Super press that filled the
+        # recording, and letting go of it would make room again under a status of Full.
+        if self._recording and (change := pointer_button(controller)) is not None:
             self._lost_super(change.event.get_modifier_state())
             self._click(change.button, change.pressed)
         return False
@@ -729,10 +790,7 @@ class RecordDialog(Adw.Dialog):
 
     # -- leaving -----------------------------------------------------------
 
-    def _cancel(self, _b: Gtk.Button | None) -> None:
-        self._close()
-
-    def _close(self) -> None:
+    def _close(self, *_args: object) -> None:
         close_keeping_held(self, self._parent, self._keys_down)
 
     def _stop(self, _b: Gtk.Button | None) -> None:
@@ -755,4 +813,5 @@ class RecordDialog(Adw.Dialog):
         since its caller keeps no reference and its handlers are weakly's (held_while_shown)."""
         self._on_done = on_done
         held_while_shown(self)
+        swallow_held_at_open(self._parent)
         self.present(self._parent)

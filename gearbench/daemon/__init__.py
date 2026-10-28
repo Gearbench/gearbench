@@ -1,8 +1,9 @@
-"""The Gearbench daemon: holds the keyboard's lighting claim, diverts its keys, drives the mice
-and the headset's base station, and answers the CLI and the window on a control socket.
+"""The Gearbench daemon: holds each keyboard's lighting claim, diverts its keys, drives the mice
+and the headsets, and answers the CLI and the window on a control socket.
 
-This module is the core: the select loop, the control socket, `status`, saving config.json,
-the virtual keyboard and mouse, and the shutdown. The controllers it builds do the rest, and
+This module is the core: the select loop, the control socket, `status`, the color a synced
+mouse and a synced headset's lights take from the leader, saving config.json, the virtual
+keyboard and mouse, and the shutdown. The controllers it builds do the rest, and
 shared.py holds what they share. client.py is the front ends' side of the socket; this module
 gives again the names the front ends and the probes in tools/ take from it, so that they
 import the daemon alone. The claim must be held, or the first keypress hands the lighting
@@ -27,30 +28,31 @@ from pathlib import Path
 from typing import cast
 
 from ..apps import candidates
-from ..config import (
-    PROFILE_IDS,
-    SHARED_FOLDER,
-    Config,
-    ConfigError,
-    FileUnreadable,
-    changed_on_disk,
-    config_path,
-    file_stamp,
-    format_color,
-    open_to_others,
-    profile_label,
-    unusable,
-)
-from ..hidpp import DeviceGone, HidppFailure
+from ..config import PROFILE_IDS, Config, config_path, format_color, profile_label, unusable
+from ..hidpp import DeviceGone, HidppFailure, one_listing
+from ..json_text import NUMBER_TOO_LONG, TOO_DEEP, codec_words
 from ..lighting import LightingError
 from ..mouse import MouseError
 from ..report import untested
+from ..runtime_folder import LISTEN_REFUSED, make_private, missing_folders, shared_problem
+from ..settings_files import (
+    FIX_AND_RELOAD,
+    ConfigError,
+    FileUnreadable,
+    changed_on_disk,
+    file_stamp,
+)
 from ..uinput import UinputError, VirtualKeyboard, VirtualMouse
-from ..wording import escaped, reason
+from ..wording import SERVICE_JOURNAL, escaped, quoted, reason, service_command
+from .a50x import A50XHeadset
 from .bindings import Bindings
 from .client import (
     BUSY as BUSY,
     DOWN as DOWN,
+    NOT_REACHED as NOT_REACHED,
+    NOT_RUNNING as NOT_RUNNING,
+    REPLY_UNREAD as REPLY_UNREAD,
+    UCRED as UCRED,
     UNKNOWN as UNKNOWN,
     UNREAD as UNREAD,
     failure as failure,
@@ -62,17 +64,17 @@ from .client import (
 )
 from .g432 import G432Headset
 from .games import Games
-from .headset import Headset, headset_refusal
-from .keyboard import Keyboard
+from .headset import Headset, HeadsetError, headset_refusal
+from .keyboard import AIMED, Keyboard, Keyboards
 from .mice import Mice
 from .per_keyboard import PerKeyboard
+from .plugs import Plugs
 from .session import Session
 from .shared import (
-    RECONNECT_DELAY,
     UINPUT_NOT_OPENED,
-    HeadsetError,
     checked_layer,
     hidpp_refusal,
+    kept_pick,
     mouse_refusal,
     nested_past,
     not_a_request,
@@ -83,8 +85,9 @@ from .tray import Tray
 
 log = logging.getLogger("gearbench")
 
-#: Longest select wait: a backstop for a mislaid deadline, not a polling rate.
-MAX_POLL_INTERVAL = 1.0
+#: Longest select wait: a backstop for a mislaid deadline, not a polling rate. Each timed
+#: look is a deadline of its own, so an idle loop wakes at those times alone.
+MAX_POLL_INTERVAL = 5.0
 
 #: A dispatch or connect holding the loop longer logs at info, to match the window's "busy" banner.
 SLOW_STEP = 1.0
@@ -100,8 +103,9 @@ VIRTUAL_KEYBOARD_MISSING = "no virtual keyboard, so key bindings and macros type
 VIRTUAL_MOUSE_MISSING = ("no virtual mouse, so macro clicks, wheel tilt and Back or Forward "
                          "bindings fail")
 
-#: handle_command's answer to an OSError, with its reason in words.
-CONFIG_NOT_SAVED = "Could not save the configuration ({})."
+#: handle_command's answer to an OSError, with the file and its reason in words, the
+#: window's SAVE_FAILED shape.
+CONFIG_NOT_SAVED = "could not save {}: {}"
 
 #: Longest pause between a request's segments (the timeout is per recv): a longer gap is a
 #: client that stopped talking, and waiting on it stalls key handling.
@@ -124,16 +128,17 @@ MAX_DEPTH = 32
 #: the error's text would not do: the stack's, and int()'s past 4300 digits, whose text asks
 #: for sys.set_int_max_str_digits(), which no client can call. JSONDecodeError gives its own
 #: text, with its position; serve_one words a UnicodeDecodeError by its codec.
-UNREADABLE = {RecursionError: "nested too deeply to read",
-              ValueError: "holds a number too long to read"}
+UNREADABLE = {RecursionError: TOO_DEEP, ValueError: NUMBER_TOO_LONG}
 
-#: The reply to a request that met a bug: a handler raised what nothing expects, or its
-#: reply could not be written as JSON. log.exception puts the traceback in the daemon's log.
-INTERNAL_ERROR = "internal error, a bug in Gearbench: the daemon's log has the traceback"
+#: The reply to a request that met a fault: a handler raised what nothing expects, or its
+#: reply could not be written as JSON. log.exception puts the traceback in the journal, or in
+#: the terminal of a daemon run there.
+INTERNAL_ERROR = (f"internal error, a fault in Gearbench: `{SERVICE_JOURNAL}`, or the terminal "
+                  "it ran in, has the traceback; please report it")
 
 #: The next step for a daemon refused beside another, which is the service or one in a
 #: terminal: either may be the one refused.
-STOP_THE_OTHER = "Stop it first with `systemctl --user stop gearbench`, or Ctrl+C in its terminal."
+STOP_THE_OTHER = f"stop it first with `{service_command('stop')}`, or Ctrl+C in its terminal"
 
 def loggable(request: dict) -> dict:
     """The request as the debug log shows it: macro steps show only their types, since a step's
@@ -171,7 +176,16 @@ class LayerChanged(Exception):
 
 
 #: check_layer's refusal, with the layer now in force.
-LAYER_NOW = "The keyboard is now on {}, so the change was not made."
+LAYER_NOW = "the keyboard is now on {}, so the change was not made"
+#: check_layer's refusal of a stage or rate edit, with whose stages and rate the mouse takes now
+#: (tuning_of).
+TUNING_NOW = "the mouse's stages and rate are now {}, so the change was not made"
+
+
+def tuning_of(overlay: str | None) -> str:
+    """Whose stages and rate a mouse takes, for TUNING_NOW: game profile `overlay`'s, its name
+    quoted (wording.quoted), or with None onboard profile 1's."""
+    return "onboard profile 1's" if overlay is None else f"{quoted(overlay)}'s"
 
 
 class BadRequest(Exception):
@@ -188,6 +202,10 @@ BOTH = "both"
 #: Which game profile is loaded, if any: the stages and the rate edit its own, or else onboard
 #: profile 1's, which no M profile has.
 GAME_PROFILE = "game profile"
+#: The requests that take `keyboard`, the keyboard they are for (Keyboards.aimed): the
+#: lighting changes, and the game profile list and save, which go by what that keyboard shows.
+#: The window's Keyboard tab sends its keyboard with each. `status` takes it too.
+KEYBOARD_REQUESTS = frozenset({*AIMED, "profiles", "save_profile"})
 LAYER_EDITS = {
     **dict.fromkeys(("paint", "color", "effect", "preview", "bind", "mouse_bind",
                      "mouse_bind_defaults", "save_profile"), SHOWN),
@@ -212,7 +230,9 @@ class Daemon:
         #: reads it.
         self.config, self.config_error = load_config()
         self._unsaved_warned = False
-        self.keyboard = Keyboard(self)
+        self.per_keyboard = PerKeyboard(self)
+        #: Every keyboard driven, a controller each; `keyboard` is the leader's.
+        self.keyboards = Keyboards(self)
         self.kbd: VirtualKeyboard | None = None
         #: Back and forward for the mouse buttons, the wheel tilt and a macro's clicks.
         #: Optional: without it each is logged at debug and dropped.
@@ -221,6 +241,11 @@ class Daemon:
         self.mice = Mice(self)
         self.headset = Headset(self)
         self.g432 = G432Headset(self)
+        self.a50x = A50XHeadset(self)
+        #: The headset controllers, each attached on its own, in the order they are asked in
+        #: turn.
+        self.headsets: tuple[Headset | G432Headset | A50XHeadset, ...] = (
+            self.headset, self.g432, self.a50x)
         self.bindings = Bindings(self)
         #: When to retry a missing virtual device, and the failures already warned of (a repeat
         #: logs at debug).
@@ -230,14 +255,16 @@ class Daemon:
         #: another or an accept that works.
         self._accept_said: str | None = None
         #: The `why` of the last slow connect line logged at info, per device (note_slow's
-        #: `repeats`) and per attempt on it (its `what`, which names the node): the keyboard's
-        #: pass can try two nodes (PerKeyboard.stand_in).
+        #: `repeats`) and per attempt on it (its `what`, which names the node): the keyboards'
+        #: pass can try more than one node (Keyboards.connect_due).
         self._slow_said: dict[str, dict[str, str]] = {}
         self.selector = selectors.DefaultSelector()
+        #: The watch on /dev that runs the looks for devices as their nodes appear; started in
+        #: start_up.
+        self.plugs = Plugs(self)
         self.running = False
         self.session = Session(self)
         self.games = Games(self)
-        self.per_keyboard = PerKeyboard(self)
         self.tray = Tray(self)
         self._sock_path = socket_path()
         #: The single-instance lock's fd while listen() holds it, and (st_dev, st_ino) of the
@@ -247,6 +274,12 @@ class Daemon:
         #: Built once, so the command names can be read without running a command.
         self.commands = self.command_table()
 
+    @property
+    def keyboard(self) -> Keyboard:
+        """The leader's keyboard's controller (Keyboards.leading): the one the mice follow and
+        a command acts on."""
+        return self.keyboards.leading()
+
     # -- slow steps ------------------------------------------------------
 
     def note_slow(self, started: float, what: str, why: str = "",
@@ -255,7 +288,7 @@ class Daemon:
 
         `repeats` names a connect attempt's device, which the loop retries on a timer: the same
         line again for it and `what` logs at debug, since a keyboard off behind its receiver is
-        slow every time, and the keyboard's pass can try two nodes (PerKeyboard.stand_in).
+        slow every time.
         """
         took = time.monotonic() - started
         if took <= SLOW_STEP:
@@ -271,6 +304,32 @@ class Daemon:
     def forget_slow(self, repeats: str) -> None:
         """Log the next slow step of `repeats` at info again: its device's attempt changed."""
         self._slow_said.pop(repeats, None)
+
+    # -- the color a synced mouse and headset take ------------------------
+
+    def synced_color(self, shown: int | None = None) -> int:
+        """The color a synced mouse and a synced headset's lights take from the leader, before
+        Keyboard.at_level: the loaded
+        game profile's mouse color where it has one (the owner's decision of 2026-10-23), else
+        `shown`, the leader's board's color around its painted keys, the one it shows now
+        (Keyboard.shown_color) by default."""
+        own = self.profile_color()
+        if own is not None:
+            return own
+        return self.keyboard.shown_color() if shown is None else shown
+
+    def profile_color(self) -> int | None:
+        """The loaded game profile's mouse color, None with none loaded or none in it."""
+        overlay = self.games.overlay
+        return None if overlay is None else overlay.mouse_color
+
+    def sync_to_leader(self, shown: int | None = None, repeat: bool = True) -> None:
+        """The color the synced devices take for `shown` (synced_color) to the mice, then to
+        the headset's lights, each where its switch is on (MouseLighting.sync_mouse_color,
+        HeadsetLighting.sync); `repeat` False is a drag's preview."""
+        color = self.synced_color(shown)
+        self.mice.color.sync_mouse_color(color, repeat=repeat)
+        self.g432.lights.sync(color, repeat=repeat)
 
     # -- saving config.json ----------------------------------------------
 
@@ -314,25 +373,20 @@ class Daemon:
         if self.config_error is not None:
             raise FileUnreadable(
                 f"{config_path()} could not be read ({self.config_error}); nothing is "
-                f"saved over it. Fix it and run `gearbench-ctl reload`."
+                f"saved over it; {FIX_AND_RELOAD}"
             )
-        if (changed := self._disk_refusal()) is not None:
-            raise changed
-
-    def _disk_refusal(self) -> ConfigError | None:
-        """The refusal for config.json changed on disk since its last read or write here, or
-        None. While the file is as a refused reload found it, that is the reload's error, as
-        another reload would refuse it the same way."""
         stamp = file_stamp(config_path())
         if stamp == self._config_stamp:
-            return None
+            return
         refused = self._reload_refused
+        # While the file is as a refused reload found it, the refusal is that reload's error,
+        # as another reload would refuse it the same way.
         if refused is not None and refused[0] == stamp:
-            return FileUnreadable(
+            raise FileUnreadable(
                 f"{config_path()} could not be read at the last reload ({refused[1]}); "
-                f"nothing is saved over it. Fix it and run `gearbench-ctl reload`; "
-                f"`gearbench-ctl save` writes the daemon's copy over it.")
-        return changed_on_disk(config_path())
+                f"nothing is saved over it; {FIX_AND_RELOAD}, or `gearbench-ctl save` writes "
+                f"the daemon's copy over it")
+        raise changed_on_disk(config_path())
 
     def check_layer(self, command: str, request: dict) -> None:
         """Raise LayerChanged if `request` names a layer other than the one in force for what
@@ -349,14 +403,16 @@ class Daemon:
         if edits is None or named is None:
             return
         named = checked_layer(named)
-        if edits == GAME_PROFILE and not self.mice.dpi.tunes_game_profile(request):
-            if named.get("overlay") is None:
-                return      # onboard profile 1's stages and rate, whatever is loaded
-            # Built on a game profile's stages and rate, out of force since host mode went off:
-            # made, it would go to profile 1 in flash.
-            raise LayerChanged(f"The mouse now takes onboard profile 1's stages and rate, not "
-                               f"{named['overlay']}'s own, so the change was not made.")
         overlay = self.games.overlay.name if self.games.overlay is not None else None
+        if edits == GAME_PROFILE:
+            # The loaded game profile's own where the mouse wants host mode, else onboard
+            # profile 1's, whatever is loaded. A load, an unload or the host mode switch since
+            # the window's read moves the edit: made, it would go to the other, a game
+            # profile's file or profile 1 in flash.
+            tuned = overlay if self.mice.dpi.tunes_game_profile(request) else None
+            if named.get("overlay") == tuned:
+                return
+            raise LayerChanged(TUNING_NOW.format(tuning_of(tuned)))
         if edits == SHOWN:
             edits = GAME_PROFILE if overlay is not None else BOTH
         if ((edits == GAME_PROFILE or named.get("profile") == self.config.active)
@@ -364,7 +420,7 @@ class Daemon:
             return
         where = profile_label(self.config.active, self.config.profile.name)
         if overlay is not None:
-            where += f" with {overlay} loaded"
+            where += f" with {quoted(overlay)} loaded"
         raise LayerChanged(LAYER_NOW.format(where))
 
     def check_layer_writable(self) -> None:
@@ -384,18 +440,23 @@ class Daemon:
         else:
             self.save_config()
 
-    def save_config(self, over_an_edit: bool = False) -> Path:
-        """Write config.json and answer its path, or raise ConfigError if it could not be read
-        at load or has changed on disk since, or if its folder is or sits behind a link to
-        nothing (Config.save).
+    def save_refused(self) -> bool:
+        """Whether `gearbench-ctl save` refuses to write over config.json: one unreadable at
+        the start and read by no reload since, while the daemon holds only the defaults
+        (config_error)."""
+        return self.config_error is not None
 
-        The first two are not written over until `reload` reads it: the first holds the user's
-        profiles behind one bad field, the second is a hand edit. `over_an_edit` is
-        `gearbench-ctl save`, which writes over a hand edit, one the last reload could not read
-        included, but never over a file unreadable at load, while the daemon holds only the
-        defaults.
+    def save_config(self, over_an_edit: bool = False) -> Path:
+        """Write config.json and answer its path, or raise ConfigError: check_config_writable's
+        refusal, or Config.save's.
+
+        A file unreadable at load or changed on disk is not written over until `reload` reads
+        it: the first holds the user's profiles behind one bad field, the second is a hand
+        edit. `over_an_edit` is `gearbench-ctl save`, which writes over a hand edit, one the
+        last reload could not read included, but never over a file unreadable at load, while
+        the daemon holds only the defaults.
         """
-        if not over_an_edit or self.config_error is not None:
+        if not over_an_edit or self.save_refused():
             self.check_config_writable()
         path = self.config.save()
         # The refused reload's record is of a version this save replaced, and its stamp can
@@ -410,7 +471,10 @@ class Daemon:
     def listen(self) -> None:
         """Open the control socket for this user only, or exit if another daemon is running,
         a file sits where the socket's folder should be, or another account could put a folder
-        of its own there (config.open_to_others).
+        of its own there, as far as runtime_folder.open_to_others can tell: under the unit's
+        PrivateUsers=yes it cannot tell another account's folder or link on the way from root's,
+        which the unit checks first, outside it, making a missing folder there
+        (runtime_folder.main).
 
         The lock beside the socket is held until shutdown: without it, a second daemon's probe
         could land between the first's bind and listen, be refused, and remove the new socket
@@ -418,34 +482,19 @@ class Daemon:
         """
         folder = self._sock_path.parent
         try:
-            # 0700, as logind makes /run/user/<uid>, and so is each missing folder above it:
-            # under umask 002 the group would write there, and could put its own folder here.
-            for parent in reversed(folder.parents):
-                with contextlib.suppress(FileExistsError):
-                    parent.mkdir(mode=0o700)
-            folder.mkdir(mode=0o700, exist_ok=True)
+            make_private(folder, missing_folders(folder))
         except FileExistsError:
             # mkdir's own words, "File exists", name neither which path nor what to do.
             raise SystemExit(
-                f"Gearbench daemon cannot listen: a file is at {folder}, where its runtime "
-                f"folder should be. Remove the file, or set XDG_RUNTIME_DIR to a folder, then "
-                f"start the daemon again.") from None
+                f"Gearbench daemon cannot listen: a file is at {escaped(folder)}, where its "
+                f"runtime folder should be; remove the file, or set XDG_RUNTIME_DIR to a "
+                f"folder, then start the daemon again") from None
         # Another account that may write here, through the folder's group or as any account,
         # or that may swap the folder for its own through one on the way, could bind the
         # socket first, swap its name for a link between bind and chmod, or plant the lock as
         # a link to a file this process may create.
-        on_the_way = open_to_others(folder)
-        if on_the_way == folder:
-            raise SystemExit(
-                f"Gearbench daemon cannot listen in {folder}: "
-                f"{SHARED_FOLDER.format(uid=os.geteuid())}, then start the daemon again.")
-        if on_the_way is not None:
-            raise SystemExit(
-                f"Gearbench daemon cannot listen in {folder}: {on_the_way}, on the way to it, is "
-                f"another account's or lets other accounts rename what it holds, so one could "
-                f"put a folder of its own where the runtime folder is. Set XDG_RUNTIME_DIR to a "
-                f"folder only you may write in, below folders only you or root may change, as "
-                f"/run/user/{os.geteuid()} is, then start the daemon again.")
+        if (problem := shared_problem(folder)) is not None:
+            raise SystemExit(LISTEN_REFUSED.format(folder=escaped(folder), problem=problem))
         lock = self._sock_path.with_name("gearbench.lock")
         fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
         try:
@@ -454,7 +503,7 @@ class Daemon:
             os.close(fd)
             if isinstance(exc, BlockingIOError):
                 raise SystemExit(f"another Gearbench daemon is already running: it holds "
-                                 f"{lock}. {STOP_THE_OTHER}") from None
+                                 f"{escaped(lock)}; {STOP_THE_OTHER}") from None
             raise
         self._lock = fd
         if self._sock_path.exists():
@@ -462,7 +511,7 @@ class Daemon:
             # connect removes it.
             if listening(self._sock_path):
                 raise SystemExit(f"another Gearbench daemon is already listening on "
-                                 f"{self._sock_path}. {STOP_THE_OTHER}")
+                                 f"{escaped(self._sock_path)}; {STOP_THE_OTHER}")
             self._sock_path.unlink()
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server.bind(str(self._sock_path))
@@ -483,10 +532,10 @@ class Daemon:
             "reload": self._cmd_reload,
             "quit": self._cmd_quit,
             "apps": self._cmd_apps,
-            **self.keyboard.commands(),
+            **self.keyboards.commands(),
             **self.mice.commands(),
-            **self.headset.commands(),
-            **self.g432.commands(),
+            **{name: handler for headset in self.headsets
+               for name, handler in headset.commands().items()},
             **self.bindings.commands(),
             **self.games.commands(),
             **self.per_keyboard.commands(),
@@ -506,7 +555,7 @@ class Daemon:
         if not isinstance(request, dict) or not isinstance(request.get("command", ""), str):
             return {"ok": False, "error": not_a_request(request)}
         command = request.get("command", "").lower()
-        if command not in ("status", "mouse", "headset", "g432"):
+        if command not in ("status", "mouse", "headset", "g432", "a50x"):
             log.debug("command %s", loggable(request))
         handler = self.commands.get(command)
         if handler is None:
@@ -542,42 +591,60 @@ class Daemon:
         except (LightingError, UinputError) as exc:
             return {"ok": False, "error": str(exc)}
         except OSError as exc:
-            return refusal(CONFIG_NOT_SAVED.format(reason(exc)), exc)
+            return refusal(CONFIG_NOT_SAVED.format(config_path(), reason(exc)), exc)
 
     # -- the core's commands ---------------------------------------------
 
     def _cmd_status(self, request: dict) -> dict:
-        m_lighting = self.per_keyboard.shown(self.config.profile.lighting)
+        """The daemon's state, the keyboard entries of the keyboard `keyboard` names, else the
+        leader's (Keyboards.shown_in)."""
+        keyboard = self.keyboards.shown_in(request)
+        m_lighting = self.per_keyboard.shown(self.config.profile.lighting, keyboard)
         return {
             "ok": True,
             # Before problems(): its reads can tear the keyboard down, which problems() must see.
-            **self.keyboard.handlers.status(),
+            **keyboard.handlers.status(),
             "problems": self.problems(),
+            "save_refused": self.save_refused(),
             "profile": self.config.active,
             "profile_name": self.config.profile.name,
             "profile_names": {str(i): self.config.profiles[i].name for i in PROFILE_IDS},
             **self.games.status(),
-            # The window's poll asks the keyboards plugged in and not driven whether they answer.
-            **self.per_keyboard.status(asking=request.get("ask_keyboards") is True),
-            # The M profile's color, whatever is loaded, as the keyboard model in force shows
-            # it: its background in per-key mode, its Static color in static and under an
-            # animation.
+            **self.per_keyboard.status(keyboard),
+            "keyboards_attached": self.keyboards.plugged_in(),
+            "keyboards_driven": self.keyboards.summary(),
+            # The M profile's color, whatever is loaded, as that keyboard shows it: its
+            # background in per-key mode, its Static color in static and under an animation.
             "color": format_color(m_lighting.mode_color()),
+            # Pulsar Point's second color, which `status` gives beside `color` under it.
+            "second_color": format_color(m_lighting.second_color),
             "effect": m_lighting.effect,
             # Static or per-key, which `effect` static leaves open.
             "mode": m_lighting.mode,
             "shifted": self.bindings.shifted,
-            "brightness": self.per_keyboard.brightness(),
+            "brightness": self.per_keyboard.model_brightness(keyboard),
             # Which macro runs and the seconds before a played one starts: a repeating macro
             # shows nowhere else.
             **self.bindings.macro_state(),
             "mouse": self.mice.current is not None,
-            # A base station attached; its detail is the `headset` request.
-            "headset": self.headset.a50 is not None,
-            # Each headset attached, by name; the G432's detail is the `g432` request.
-            "headsets": [name for name in (self.headset.name if self.headset.a50 else None,
-                                           self.g432.name) if name is not None],
+            # The A50 Gen 4's base station attached; its detail is the `headset` request.
+            "headset": self.headset.attached_name() is not None,
+            # Each headset attached, by name, and of those each that does not answer, which the
+            # window's switcher shows switched off, as it does a keyboard or a mouse.
+            "headsets": [name for headset in self.headsets
+                         if (name := headset.attached_name()) is not None],
+            "headsets_silent": [name for headset in self.headsets
+                                if (name := headset.attached_name()) is not None
+                                and not headset.answers()],
+            # Each mouse and each headset attached, as `status` names them (attached_entry).
+            "mice_attached": self.mice.reply.status_entries(),
+            "headsets_attached": [entry for headset in self.headsets
+                                  if (entry := headset.status_entry()) is not None],
             "mouse_sync_color": self.config.mouse_sync_color,
+            # The color a synced mouse gets from the leader before its brightness scales it
+            # (synced_color): a status of another keyboard carries only that one's
+            # capabilities, and the leader's cut it.
+            "mouse_sync_base": format_color(self.synced_color()),
             # Whether any attached mouse has lighting for the sync to color.
             "mouse_lights": self.mice.color.mouse_with_lights(),
             # Each attached mouse whose lighting is driven before its hardware test, by name.
@@ -598,7 +665,7 @@ class Daemon:
             "tray": self.tray.status(),
             # The lowest low-battery threshold the keyboard was warned of since the notices were
             # last armed again (BatteryNotices.battery_rearmed), or None.
-            "battery_warned": self.session.keyboard_battery.battery_warned,
+            "battery_warned": self.keyboard.battery.battery_warned,
             "virtual_keyboard": self.kbd is not None,
             "virtual_mouse": self.ptr is not None,
             # A restarted daemon comes up under the same profile and overlay names, so the
@@ -611,15 +678,19 @@ class Daemon:
         }
 
     def problems(self) -> list[dict]:
-        """What is wrong, as {"code", "message"}, for `status` to carry. Only sysfs and the
-        files are read: nothing is sent to a device."""
+        """What is wrong, as {"code", "message"}, a keyboard's with "keyboard", its model's
+        key, the leader's first. Only sysfs and the files are read: nothing is sent to a
+        device."""
         found: list[dict] = []
 
         def add(code: str, message: str) -> None:
             found.append({"code": code, "message": message})
 
-        for code, message in (*self.keyboard.handlers.problems(), *self.mice.problems(),
-                              *self.headset.problems(), *self.g432.problems()):
+        found +=[{"code": code, "message": message, "keyboard": model}
+                  for code, message, model in self.keyboards.problems()]
+        for code, message in (*self.mice.problems(),
+                              *(entry for headset in self.headsets
+                                for entry in headset.problems())):
             add(code, message)
         for message in self.games.other_tool_problems():
             add("other_hid_tool", message)
@@ -643,8 +714,7 @@ class Daemon:
             add("no_virtual_keyboard", f"{VIRTUAL_KEYBOARD_MISSING}: {UINPUT_NOT_OPENED}")
         if self.ptr is None:
             add("no_virtual_mouse", f"{VIRTUAL_MOUSE_MISSING}: {UINPUT_NOT_OPENED}")
-        missing = self.session.desktop_missing() if self.config.lights_off_when_locked else None
-        if missing:
+        if self.config.lights_off_when_locked and (missing := self.session.desktop_missing()):
             add("desktop_unavailable", missing)
         return found
 
@@ -656,26 +726,27 @@ class Daemon:
                 reply["profile_path"] = str(overlay.save(over_an_edit=True))
             except OSError as exc:
                 # config.json is written by now, which handle_command's own answer leaves out.
-                return refusal(f"Saved {reply['path']}, but not game profile {overlay.name!r} "
-                               f"({reason(exc)}).", exc)
+                return refusal(f"saved {reply['path']}, but not game profile "
+                               f"{quoted(overlay.name)} ({reason(exc)})", exc)
             except ConfigError as exc:
                 # As above, for a save the profile's own checks refuse.
-                return {"ok": False, "error": f"Saved {reply['path']}, but not game profile "
-                                              f"{overlay.name!r}: {exc}"}
+                return {"ok": False, "error": f"saved {reply['path']}, but not game profile "
+                                              f"{quoted(overlay.name)}: {exc}"}
         return reply
 
     def _cmd_reload(self, request: dict) -> dict:
         """Discard live changes and go back to what is on disk, on both layers.
 
         Config.load() runs before anything is assigned, so a broken config.json leaves the
-        daemon as it was, and its error is kept for a refusal (_disk_refusal) until the file
+        daemon as it was, and its error is kept for a refusal (check_config_writable) until the file
         changes; after a start that could not use the file, it replaces the start's
         (config_error). The game profile loaded by hand follows active_game_profile as at a
         start (Games.follow_record), and the loaded one is read again (Games.reread); the macro
         files are read again, so one edited by hand can be saved over. A switch edited by hand
-        is acted on as its command would, a leader as `sync_keyboard` takes one
-        (PerKeyboard.switch_at_reload). Device state that is not configuration, the mouse's
-        onboard profile and the lighting claim, is left alone.
+        is acted on as its command would, and a `mouse_selected` edited by hand is the
+        selection, as at a start (kept_pick). Every keyboard driven is painted, a leader
+        edited by hand among what it shows. Device state that is not configuration, the
+        mouse's onboard profile and the lighting claim, is left alone.
         """
         stamp = file_stamp(config_path())
         try:
@@ -688,31 +759,31 @@ class Daemon:
                 raise
             # A read failure, not the failed save that handle_command's OSError answer says.
             return {"ok": False,
-                    "error": f"could not read {config_path()}: {self._reload_refused[1]}"}
-        before, leader = self.keyboard.idle_settings(), self.per_keyboard.leader()
+                    "error": f"{config_path()} could not be read ({self._reload_refused[1]})"}
+        before = self.keyboard.idle.idle_settings()
         old = self.config
         # The color a synced mouse shows now, which sync turned off leaves it on.
-        synced = self.keyboard.shown_color()
+        synced = self.synced_color()
         self.config = config
         self.config_error, self._unsaved_warned = None, False
         self._config_stamp, self._reload_refused = stamp, None
-        # Switches edited by hand; paint=False because apply_profile below paints.
-        times = self.keyboard.idle_changed(before, paint=False)
+        # Switches edited by hand; paint=False because apply_each below paints.
+        times = self.keyboards.idle_changed(before, paint=False)
         if config.lights_off_when_locked != old.lights_off_when_locked:
             self.session.lock_lights_changed(config.lights_off_when_locked, paint=False)
         overlay_news = self.games.reload()
         self.bindings.macros.reread()
-        if self.per_keyboard.switch_at_reload(leader):
-            # The connect painted the profile, or left none driven.
-            failed = self.keyboard.change_unreached()
-        else:
-            self.keyboard.wake_for_change()
-            failed = self.keyboard.apply_profile()
+        self.keyboards.wake_each()
+        failed = self.keyboards.apply_each()
         # After the keyboard's paint, so a slow mouse never delays it.
         if config.mouse_sync_color != old.mouse_sync_color:
             self.mice.color.sync_changed(config.mouse_sync_color, synced, paint=False)
+        if config.headset_sync_color != old.headset_sync_color:
+            self.g432.lights.sync_changed(config.headset_sync_color)
         if config.mouse_host_mode != old.mouse_host_mode:
             self.mice.host_mode_changed(config.mouse_host_mode)
+        if config.mouse_selected != old.mouse_selected:
+            self.mice.selected = kept_pick(config.mouse_selected)
         self.bindings.stop_orphaned_macro()
         self.mice.dpi.follow_tuning()
         if config.tray != old.tray:
@@ -724,8 +795,10 @@ class Daemon:
                           "profile_name": self.config.profile.name,
                           "overlay": overlay, **overlay_news},
                          # New times the keyboard did not take, as `idle` says them, after a
-                         # paint it did not show and before the lights-down note.
-                         self.keyboard.last_apply_error or times or failed,
+                         # paint it did not show and before the lights-down note, which a
+                         # reload, saving nothing, gives without "saved; ".
+                         self.keyboard.last_apply_error or times
+                         or (failed and self.keyboard.lights_note(saved=False)),
                          self.keyboard.last_apply_detail)
 
     def _cmd_quit(self, request: dict) -> dict:
@@ -772,8 +845,8 @@ class Daemon:
                 try:
                     request = json.loads(received or b"{}")
                 except UnicodeDecodeError as exc:
-                    # The codec json.loads chose by the first bytes, as config.read_json says it.
-                    raise BadRequest(f"not {exc.encoding.upper()} text ({exc.reason})") from None
+                    # As settings_files.read_json says it.
+                    raise BadRequest(codec_words(exc, received)) from None
                 except (RecursionError, ValueError) as exc:
                     raise BadRequest(UNREADABLE.get(type(exc), str(exc))) from None
                 # The same words: which of the two refuses a deep body depends on the stack.
@@ -843,11 +916,11 @@ class Daemon:
             self.listen()
         except OSError as exc:
             # Only around listen: a later OSError from the loop is no socket problem.
-            raise SystemExit(f"Gearbench daemon cannot listen on {self._sock_path}: "
+            raise SystemExit(f"Gearbench daemon cannot listen on {escaped(self._sock_path)}: "
                              f"{reason(exc)}") from exc
         have = self.make_virtual_devices()
-        log.info("virtual %s ready; control socket at %s",
-                 " and ".join(have) or "devices: none", self._sock_path)
+        made = f"virtual {' and '.join(have)} ready" if have else "no virtual device ready"
+        log.info("%s; control socket at %s", made, escaped(self._sock_path))
         # Once listening: a second daemon, refused there, writes nothing.
         self.games.load_remembered()
         # Stamped from here, so a macro file edited by hand is not saved over.
@@ -855,34 +928,15 @@ class Daemon:
         self.session.start_desktop()
         self.tray.start()
         self.games.focus.start(self.selector, "focus")
+        self.plugs.start()
 
     def one_pass(self, next_attempt: float) -> float:
         """One pass of the loop: the work that is due, the wait in select, then the reports
         queued meanwhile. `next_attempt` is when the keyboard's connect is next tried, and
         the answer is that time for the next pass."""
-        if self.keyboard.keyboard_moved_to_cable() or self.keyboard.look_for_cable_again():
-            next_attempt = 0.0
-        if self.per_keyboard.tend():
-            # Its connect was the try: one that failed waits out the delay, as below.
-            next_attempt = time.monotonic() + RECONNECT_DELAY
-        if (self.keyboard.dev is None and time.monotonic() >= next_attempt
-                and not self.keyboard.connect()):
-            next_attempt = time.monotonic() + RECONNECT_DELAY
-            log.debug("keyboard not present; retrying")
-        self.bindings.runner.tick(time.monotonic())
-        self.games.focus.tick()
-        self.games.scan_processes()
-        self.mice.maybe_connect_mouse()
-        self.mice.tend_mice()
-        self.mice.buttons.tend_tilts()
-        self.mice.buttons.open_mouse_inputs()
-        self.headset.maybe_connect()
-        self.headset.tend()
-        self.g432.maybe_connect()
-        self.retry_virtual_devices()
-        self.session.tend_desktop()
-        self.keyboard.tend_idle()
-        self.keyboard.write_due_leds()
+        # The looks for devices and cables below share one walk of sysfs.
+        with one_listing():
+            next_attempt = self.due_work(next_attempt)
         wake_at = time.monotonic() + self.next_wakeup(next_attempt)
         # Motion alone, up to 1000 reports a second on a mouse's receiver node, changes
         # nothing the steps above or next_wakeup read: select again with the time left.
@@ -894,21 +948,51 @@ class Daemon:
         for attached in list(self.mice.attached):
             self.mice.mouse_events(attached)
         self.mice.pump_waiting_queued()
-        # The keyboard's too: otherwise a G key pressed during a status read or a
-        # command waits for the next report, and a quick tap comes out with its release.
-        if self.keyboard.dev is not None and self.keyboard.dev.pending:
-            self.keyboard.pump()
+        self.keyboards.pump_queued()
+        # The headsets' too: the G432 family's battery broadcasts, the Centurion headsets' events.
+        for headset in self.headsets:
+            if headset.pending():
+                headset.pump()
+        return next_attempt
+
+    def due_work(self, next_attempt: float) -> float:
+        """The top of a pass (one_pass): the work that is due, and `next_attempt` for the
+        next pass."""
+        plugged = self.plugs.came()
+        if plugged:
+            # A node came, went or was opened to this user: each look runs now, as at its time.
+            next_attempt = 0.0
+            self.keyboards.look_now()
+            self.mice.routes.look_now()
+            self.a50x.look_now()
+            self.tray.due_now()
+        if self.keyboards.look_for_cables(force=plugged):
+            next_attempt = 0.0
+        next_attempt = self.keyboards.connect_due(next_attempt)
+        self.bindings.runner.tick(time.monotonic())
+        self.games.focus.tick()
+        self.games.scan_processes()
+        self.mice.maybe_connect_mouse()
+        self.mice.tend_mice()
+        self.mice.buttons.tend_tilts()
+        self.mice.buttons.open_mouse_inputs()
+        for headset in self.headsets:
+            headset.maybe_connect()
+            headset.tend()
+        self.retry_virtual_devices()
+        self.session.tend_desktop()
+        self.keyboards.tend()
+        self.tray.tend()
         return next_attempt
 
     def make_virtual_devices(self) -> list[str]:
         """Create whichever of the virtual keyboard and mouse is missing, and answer which
         were made now.
 
-        Both are optional: the lighting and the M/MR LEDs need no uinput, whose ACL comes from
-        70-gearbench-uinput.rules, but on a keyboard whose G keys type its own keys, which is
-        left on its own profile without the virtual keyboard (OnboardHold.keep_onboard).
-        A failure is warned of once, `status` carries it, and retry_virtual_devices tries
-        again.
+        Neither is required: the lighting and the M/MR LEDs need no uinput, except on a
+        keyboard whose G keys type its own keys, which is left on its own profile without the
+        virtual keyboard (OnboardHold.keep_onboard). A failure is warned of once a cause,
+        `status` carries it, and retry_virtual_devices tries again.
         """
         made = []
         for attr, name, make, lost in (
@@ -932,8 +1016,6 @@ class Daemon:
 
     def retry_virtual_devices(self, now: bool = False) -> None:
         """Retry a missing virtual device once VIRTUAL_RETRY has passed, or `now`, for a bind."""
-        if self.kbd is not None and self.ptr is not None:
-            return
         if not now and time.monotonic() < self._virtual_retry:
             return
         if made := self.make_virtual_devices():
@@ -943,26 +1025,33 @@ class Daemon:
         """Hand each ready fd of one select batch to its handler, timed (note_slow), and answer
         whether the batch was motion alone: mouse HID++ nodes only, each pump_mouse True.
 
-        A handler can close an fd later in the batch, so one no longer registered is skipped.
+        A handler can close an fd later in the batch, and another node can be opened on its
+        number: a key that is no longer the one registered is skipped.
         """
         motion = bool(batch)
-        # The nodes a pump reads whole, by kind, with what note_slow calls their reports.
-        pumps = {"headset": (self.headset.pump, "the headset's reports"),
-                 "g432": (self.g432.pump, "the G432's reports")}
+        # The nodes a pump reads whole, by kind: a headset's, whose reports note_slow names by
+        # the model attached, since its node is registered only while one is, and the watch on
+        # /dev's, whose reads make the looks due at the next pass, or at a deadline of Plugs
+        # (due_work).
+        pumps: dict[str, Headset | G432Headset | A50XHeadset | Plugs] = {
+            "headset": self.headset, "g432": self.g432, "a50x": self.a50x, "plug": self.plugs}
+        # A node kept open for its device to answer, by its path: a mouse's connect from
+        # there logs its own time (Mice.connect_mouse); a keyboard's read only brings its
+        # look forward (Waiting.pump_waiting).
+        waits = {"mouse-wait": self.mice.pump_waiting,
+                 "keyboard-wait": self.keyboards.waiting.pump_waiting}
         for key, mask in batch:
             kind = key.data[0] if isinstance(key.data, tuple) else key.data
             if kind != "mouse-hid":
                 motion = False
-            try:
-                self.selector.get_key(key.fileobj)
-            except KeyError:
-                continue
+            if self.selector.get_map().get(key.fd) is not key:
+                continue        # select reports the node on that number now, if any, next time
             started = time.monotonic()
             if kind == "control":
                 command = self.serve_one()
                 what = f"command {command!r}" if command else "a client's request"
             elif kind == "hid":
-                self.keyboard.pump()
+                key.data[1].pump()
                 what = "the keyboard's reports"
             elif kind == "signal":
                 # The stop signal's byte; its handler has already cleared `running`.
@@ -975,13 +1064,15 @@ class Daemon:
                 if not self.mice.pump_mouse(key.data[1]):
                     motion = False
                 what = f"{key.data[1].name}'s reports"
-            elif kind == "mouse-wait":
-                self.mice.pump_waiting(key.data[1])
-                # An attach from here logs its own time (connect_mouse).
+            elif kind in waits:
+                waits[kind](key.data[1])
                 continue
             elif kind in pumps:
-                pump, what = pumps[kind]
-                pump()
+                source = pumps[kind]
+                # Named before the pump, which can let the headset go.
+                what = ("the watch on /dev" if isinstance(source, Plugs)
+                        else f"the {source.attached_name()}'s reports")
+                source.pump()
             elif kind == "desktop":
                 # The session buses' replies and signals; Session's on_* callbacks run in here.
                 self.session.desktop.dispatch()
@@ -999,14 +1090,15 @@ class Daemon:
         """Seconds to wait in select: the nearest deadline of any part of the daemon, at most
         MAX_POLL_INTERVAL."""
         # A queued report does not wake select: handle it first.
-        if (self.keyboard.dev is not None and self.keyboard.dev.pending) or any(m.dev.pending for m in self.mice.attached):
+        if self.keyboards.pending() or any(headset.pending() for headset in self.headsets):
             return 0.0
         now = time.monotonic()
-        deadlines = [*self.keyboard.deadlines(), *self.per_keyboard.deadlines(),
+        deadlines = [*self.keyboards.deadlines(),
                      *self.mice.deadlines(),
-                     *self.headset.deadlines(), *self.g432.deadlines(),
+                     *(at for headset in self.headsets for at in headset.deadlines()),
                      *self.bindings.deadlines(),
-                     *self.games.deadlines(), *self.session.deadlines()]
+                     *self.games.deadlines(), *self.session.deadlines(),
+                     *self.plugs.deadlines(), *self.tray.deadlines()]
         if self.keyboard.dev is None:
             deadlines.append(next_attempt)
         if (self.kbd is None or self.ptr is None) and self._virtual_retry:
@@ -1050,9 +1142,10 @@ class Daemon:
         self.bindings.runner.cancel()
         keep_dark = going_down and self.config.mouse_sync_color
         if keep_dark:
-            # Before the keyboard's darken, which writes a synced mouse black.
+            # Before the keyboard's lights out (Keyboard.lights_out), which writes a synced
+            # mouse black.
             self.mice.ready_for_dark()
-        said = [self.keyboard.teardown_device(lights_off=going_down, stopping=True)]
+        said = self.keyboards.teardown_all(going_down)
         # Before the virtual keyboard closes: it types the release of a key a mouse button
         # holds.
         self.bindings.let_go_of_keys(mouse=True)
@@ -1068,14 +1161,18 @@ class Daemon:
             self.server.close()
             self.server = None
         said.append(self.mice.teardown_all(keep_dark))
-        said.append(self.headset.teardown())
-        # Named only when one was attached, unlike the base station and the mice.
-        if (g432 := self.g432.teardown()) is not None:
-            said.append(g432)
+        if going_down:
+            # A synced headset's lights stay dark as a synced mouse does.
+            self.g432.lights.go_dark()
+        # Each headset named only when attached; "no headset" only when none was, as the mice.
+        headsets_let_go = [let_go for headset in self.headsets
+                           if (let_go := headset.teardown()) is not None]
+        said.extend(headsets_let_go or ["no headset"])
         # After the devices: closing lets a suspend waiting on the inhibitor go, once the
         # keyboard has been handed back or darkened.
         self.session.stop_desktop()
         self.games.focus.close()
+        self.plugs.close()
         if self._sock_id is not None:
             # A file another daemon bound there since is its socket, not this one's.
             with contextlib.suppress(OSError):

@@ -1,0 +1,31 @@
+# Logitech G512 X keyboards, wired, vendor HID++ interface -> uaccess for
+# the seat user: the G512 X 75 (046d:c35f) and the G512 X 98 (046d:c360).
+# Not yet checked on this hardware: the ids are from Logitech G HUB's device
+# database and from the device descriptors in their firmware images
+# (181.5.20 and 177.5.20), read 2026-10-21.
+#
+# Interface 02. Each image's configuration has three HID interfaces: 00 a
+# boot keyboard, 01 another collection and 02 a vendor one whose report
+# descriptor is the length of the G915 TKL's HID++ collection, so HID++ is
+# taken to be on 02 alone. A keyboard's other interfaces carry its
+# keystrokes, and read access there would be a keylogger surface.
+# gearbench-ctl report gives each node's interface and whether its report
+# descriptor holds HID++, read from sysfs, so it needs no access to the node.
+# Gearbench opens interface 02 alone, so if HID++ is on another, put a copy of
+# this file in /etc/udev/rules.d/ without that model's line: it overrides
+# this file by name, and a reinstall or upgrade leaves it alone. Then run sudo
+# udevadm control --reload, replug the keyboard, and paste the report's block
+# into a device report.
+#
+# Once a host writes 0x8051 fn 3 `03 ff`, as Gearbench does at each setup to
+# light the FN keys, interface 02 is taken to carry the modifier keys held
+# (Ctrl, Shift, Alt, Super and FN, each press and release) until a replug or
+# a power cycle, as the wired G515 TKL's does (70-g515.rules). Gearbench
+# reads FN alone. Any program of the seat's user can write that and read
+# them, and one that holds the node open reads another account's after a
+# user switch; 70-g515.rules says how to limit the node to a group's
+# accounts.
+#
+# Matched on properties, as 70-g915.rules is, for the reason it gives.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c35f", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c360", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"

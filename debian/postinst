@@ -5,11 +5,19 @@ set -e
 # 70-g502x.rules grants the G502 X PLUS's event nodes to this one. The package adds no account,
 # since it cannot know who uses the mouse.
 make_group() {
-    getent group gearbench >/dev/null && return 0
-    addgroup --system --quiet gearbench
-    # udev may have read the rule already and dropped the group's lines; the reload re-reads a
-    # changed file only.
-    touch -c /usr/lib/udev/rules.d/70-g502x.rules
+    # In another root (DPKG_ROOT, a chrootless install) the group goes in that root's
+    # /etc/group, and the host's udev is left alone: that root's udev reads the rules at boot.
+    # groupadd is passwd's, which adduser depends on.
+    if [ -n "$DPKG_ROOT" ]; then
+        grep -q '^gearbench:' "$DPKG_ROOT/etc/group" && return 0
+        groupadd --prefix "$DPKG_ROOT" --system gearbench
+    else
+        getent group gearbench >/dev/null && return 0
+        addgroup --system --quiet gearbench
+        # udev may have read the rule already and dropped the group's lines; the reload
+        # re-reads a changed file only.
+        touch -c /usr/lib/udev/rules.d/70-g502x.rules
+    fi
     echo "gearbench: with host mode off, the G502 X PLUS's G4 to G9 need your account" \
         "in the gearbench group: run sudo usermod -aG gearbench <you>, then log out of" \
         "every session and back in, or, with lingering on, restart the machine" >&2
@@ -19,11 +27,31 @@ if [ "$1" = "configure" ]; then
     make_group
 fi
 
+# udev reads /etc/udev/hwdb.bin over /usr/lib/udev/hwdb.bin. Where an /etc one is there, only
+# a rebuild of it takes 71-gearbench-mouse-dpi.hwdb in or out of the hwdb udev reads. Where
+# none is, udev's own dpkg trigger rebuilds /usr/lib's (systemd-hwdb --usr update), but only
+# after this script's input trigger has read the old one, which leaves each mouse without the
+# entry until it is plugged in again (measured on a first install, 2026-10-27); so the rebuild
+# is made here first, as install.sh's hwdb_update does.
+hwdb_update() {
+    command -v systemd-hwdb >/dev/null 2>&1 || return 0
+    if [ -e /etc/udev/hwdb.bin ]; then
+        systemd-hwdb update || true
+    else
+        systemd-hwdb --usr update || true
+    fi
+}
+
+# Before the reload, so the input trigger gives each mouse the entry; with udev not running
+# too, as in a chroot, since udev reads the hwdb at its next start.
+if [ "$1" = "configure" ] && [ -z "$DPKG_ROOT" ]; then
+    hwdb_update
+fi
+
 # All three triggers are needed: a usb trigger does not re-run the hidraw rules, input
 # covers the G502 X PLUS's event nodes, and misc covers /dev/uinput. install.sh runs the same
 # four commands.
-if [ "$1" = "configure" ] && [ -d /run/udev ] && command -v udevadm >/dev/null 2>&1
-then
+if [ "$1" = "configure" ] && [ -z "$DPKG_ROOT" ] && [ -d /run/udev ]; then
     udevadm control --reload || true
     udevadm trigger --subsystem-match=hidraw --action=add || true
     udevadm trigger --subsystem-match=input --action=add || true
@@ -46,8 +74,20 @@ checkout_rules() {
         70-g502-lightspeed.rules \
         70-pro-wireless.rules \
         70-g903-hero.rules \
+        70-hidpp-headsets.rules \
+        70-pro-x-superlight-2.rules \
+        70-pro-x2-superstrike.rules \
+        70-g203-lightsync.rules \
+        70-pro-x-tkl.rules \
+        70-g213.rules \
+        70-g915-x.rules \
+        70-g316-x.rules \
+        70-g512-x.rules \
         70-gearbench-uinput.rules \
-        70-g432.rules
+        70-g432.rules \
+        70-astro-a50x.rules \
+        70-astro-a50-gen5.rules \
+        70-lightspeed-headsets.rules
     do
         [ -e "$1/$rule" ] || continue
         echo "gearbench: $1/$rule, from an install from a checkout, overrides this" \
@@ -56,45 +96,75 @@ checkout_rules() {
 }
 
 if [ "$1" = "configure" ]; then
-    checkout_rules /usr/local/lib/udev/rules.d
+    checkout_rules "$DPKG_ROOT/usr/local/lib/udev/rules.d"
 fi
 
 #DEBHELPER#
+
+# The most seconds one call to an account's user manager may take: systemctl reaches the
+# manager through a bridge and a bus that, like the manager, run as that account, so the
+# account can leave a call unanswered until sd-bus gives up, minutes for a reload. As
+# prerm's STOP_WAIT.
+CALL_WAIT=15
+
+# One call to the user manager of account $1, bounded by CALL_WAIT. What systemctl prints of
+# a failure comes unescaped from that account's side of the bus, so it stays off the admin's
+# terminal, and manager_call's line stands in for it.
+user_manager() {
+    account=$1
+    shift
+    timeout "$CALL_WAIT" systemctl --user --machine "$account@" "$@" 2>/dev/null
+}
+
+manager_call() {
+    user_manager "$@" && return 0
+    account=$1
+    shift
+    echo "gearbench: systemctl --user $* failed or took over $CALL_WAIT seconds for" \
+        "uid $account; run it as that account to see why" >&2
+}
 
 # On an upgrade, each logged-in user's running unit restarts on the new code (the
 # owner's decision of 2026-10-02). A unit not running stays stopped, and a daemon
 # started by hand with gearbench-ctl daemon runs outside the unit, so a window from
 # this version talks to it until it is stopped. On a first install, which dpkg calls
-# with no earlier version ($1 empty here), the unit starts in each manager whose
-# desktop session is running, so the devices work before the next login (the owner's
-# decision of 2026-10-16). Needs systemd 249 or later for --machine.
+# with no earlier version, or a reinstall after a remove, which preinst marks ($1 empty
+# here for both), the unit starts in each manager whose desktop session is running, so
+# the devices work before the next login (the owner's decisions of 2026-10-16 and
+# 2026-10-25). Needs systemd 249 or later for --machine.
 restart_daemons() {
-    if [ -z "$1" ] && command -v udevadm >/dev/null 2>&1; then
-        # The uaccess grants of the trigger above land asynchronously, and the daemon
-        # opens /dev/uinput once, at its start. Bounded, so a stuck queue cannot hold
-        # dpkg; checked by hand only.
+    if [ -z "$1" ]; then
+        # The uaccess grants of the trigger above land asynchronously, and a daemon that
+        # finds /dev/uinput shut has no virtual keyboard or mouse until it tries again, 30 s
+        # later or at a bind. Bounded, so a stuck queue cannot hold dpkg; checked by hand only.
         udevadm settle --timeout=10 || true
     fi
     for unit in $(systemctl --no-legend --plain list-units 'user@*.service' | awk '{print $1}')
     do
         uid=${unit#user@}
         uid=${uid%.service}
-        systemctl --user --machine "$uid@" daemon-reload || true
+        manager_call "$uid" daemon-reload
         # Queued, not waited for: the account can override the unit, and a stop that
         # never ends would hold dpkg here.
         if [ -n "$1" ]; then
-            systemctl --user --machine "$uid@" --no-block try-restart gearbench.service || true
+            manager_call "$uid" --no-block try-restart gearbench.service
         # Only where a desktop session runs: the unit is part of graphical-session.target,
         # which a manager kept by an ssh login or lingering does not have.
-        elif systemctl --user --machine "$uid@" --quiet is-active graphical-session.target; then
-            systemctl --user --machine "$uid@" --no-block start gearbench.service || true
+        elif user_manager "$uid" --quiet is-active graphical-session.target; then
+            manager_call "$uid" --no-block start gearbench.service
         fi
     done
 }
 
 # After debhelper's lines, whose enable reloads no user manager: a running one
 # sees the enable only through this reload, and until then its next graphical
-# login starts no daemon.
+# login starts no daemon. dpkg passes the removed version to a reinstall after a remove,
+# whose daemons prerm stopped, so preinst's mark stands for "no earlier version".
 if [ "$1" = "configure" ] && [ -z "$DPKG_ROOT" ] && [ -d /run/systemd/system ]; then
-    restart_daemons "$2"
+    if [ -e /run/gearbench-was-removed ]; then
+        rm -f /run/gearbench-was-removed
+        restart_daemons ""
+    else
+        restart_daemons "$2"
+    fi
 fi

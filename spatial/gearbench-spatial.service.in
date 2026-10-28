@@ -3,7 +3,7 @@ Description=Gearbench - Gearbench Spatial, a 7.1 output for headphones
 # Runs from the login on once switched on, in the window's Headset tab or with
 # `gearbench-ctl headset-spatial on`; an install never switches it on. Its
 # process follows PipeWire and runs the chain only while a headset Gearbench
-# plays to is there, so it needs no device unit: one unit plays to either
+# plays to is there, so it needs no device unit: one unit serves every
 # headset.
 # A client of the session's PipeWire, stopped and restarted with it, as
 # PipeWire's own filter-chain.service is.

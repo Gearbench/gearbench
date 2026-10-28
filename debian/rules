@@ -4,8 +4,6 @@
 # builds: the user units are made below and dh_installsystemduser installs
 # them; debian/gearbench.install, .docs and .manpages place the rest.
 
-export PYBUILD_NAME = gearbench
-
 # dh_installsystemduser names the installed unit after the package:
 # usr/lib/systemd/user/gearbench.service.
 UNIT = debian/gearbench.user.service
@@ -23,8 +21,10 @@ SPATIAL_UNIT = debian/gearbench.gearbench-spatial.user.service
 # python3 -s -P, an empty element ("$PYTHONPATH:/opt/x" with none set before)
 # names the working directory, $HOME, which -P leaves on sys.path.
 # The greps are guards: a templated unit that reached a .deb would start a
-# daemon that cannot import itself, and one without the settings folder's
-# ExecStartPre would fail every start where ReadWritePaths= applies.
+# daemon that cannot import itself, one without the settings folder's
+# ExecStartPre would fail every start where ReadWritePaths= applies, and one
+# without the runtime folder's would let the daemon start below another
+# account's folder, which its user namespace hides.
 execute_after_dh_auto_build:
 	sed -e 's|^Environment="PYTHONPATH=.*|UnsetEnvironment=PYTHONPATH PYTHONHOME|' \
 	    -e '/^WorkingDirectory=/d' \
@@ -33,6 +33,7 @@ execute_after_dh_auto_build:
 	! grep -q @CHECKOUT@ $(UNIT)
 	grep -qx 'ExecStart=/usr/bin/gearbench-ctl daemon' $(UNIT)
 	grep -qx 'ExecStartPre=+/usr/bin/install -d -m 0700 %E/gearbench' $(UNIT)
+	grep -qx 'ExecStartPre=+/usr/bin/python3 -s -P -m gearbench.runtime_folder' $(UNIT)
 	grep -qx 'UnsetEnvironment=PYTHONPATH PYTHONHOME' $(UNIT)
 	sed -e 's|^Environment="PYTHONPATH=.*|UnsetEnvironment=PYTHONPATH PYTHONHOME|' \
 	    spatial/gearbench-spatial.service.in > $(SPATIAL_UNIT)
@@ -56,6 +57,28 @@ override_dh_python3:
 override_dh_installsystemduser:
 	dh_installsystemduser
 	dh_installsystemduser --name=gearbench-spatial --no-enable
+
+# README.md and SECURITY.md link docs/GUIDE.md, which links both back, as the
+# repository lays them out; the README also links the images, the icon, spatial/
+# and LICENSE. In /usr/share/doc/gearbench the three pages and images/ sit side
+# by side, the other files are where debian/gearbench.install puts them and the
+# license text is in /usr/share/common-licenses, so the installed copies link
+# those places. They stay uncompressed, or a link to one would lead nowhere.
+# The grep stops the build if a link of a form rewritten here is left.
+DOC = debian/gearbench/usr/share/doc/gearbench
+execute_after_dh_installdocs:
+	sed -i -e 's|](docs/GUIDE\.md|](GUIDE.md|g' -e 's|](docs/images/|](images/|g' \
+	    -e 's|](desktop/icons/scalable/|](/usr/share/icons/hicolor/scalable/apps/|g' \
+	    -e 's|](spatial/|](/usr/share/gearbench/spatial/|g' \
+	    -e 's|](LICENSE)|](/usr/share/common-licenses/GPL-3)|g' \
+	    $(DOC)/README.md $(DOC)/SECURITY.md
+	sed -i -e 's|](\.\./README\.md|](README.md|g' -e 's|](\.\./SECURITY\.md|](SECURITY.md|g' \
+	    $(DOC)/GUIDE.md
+	! grep -q -e '](docs/' -e '](\.\./' -e '](desktop/' -e '](spatial/' -e '](LICENSE)' \
+	    $(DOC)/*.md
+
+override_dh_compress:
+	dh_compress -X.md
 
 # The test suite needs no display (the widget tests start their own broadway
 # server, or skip), and it imports GTK 4 and libadwaita, which Build-Depends

@@ -11,6 +11,9 @@
 # hid-logitech-dj.c, a keyboard paired after the mouse could have its
 # keystrokes arrive on this node.
 #
+# The node also carries the keystrokes the mouse sends for a button its
+# onboard profile binds to a key, as 70-g502x.rules says of the G502 X PLUS's.
+#
 # Cabled, a published lsusb of one unit gives three interfaces, 00 a boot
 # mouse, 01 a boot keyboard and 02 a vendor collection, the X PLUS's layout,
 # where 02 holds HID++ alone; that 02 does here too is assumed. Interface 01

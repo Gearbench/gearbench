@@ -24,9 +24,9 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
-from .config import ConfigError, read_capped
 from .dbusloop import RETRY, RETRY_MAX
-from .wording import escaped, reason
+from .settings_files import ConfigError, read_capped
+from .wording import NO_REASON, escaped, reason
 
 log = logging.getLogger("gearbench")
 
@@ -84,8 +84,7 @@ TIMEOUT = 5.0
 #: The longest message taken from the server. The setup reply, the longest asked for, is a
 #: few kilobytes; a longer one is another protocol, which would be buffered forever.
 MAX_MESSAGE = 1 << 20
-#: parse_setup's words for a refusal with no reason, and for an accepted reply it cannot read.
-NO_REASON = "no reason given"
+#: parse_setup's words for an accepted reply it cannot read.
 TOO_SHORT = "a setup reply too short to read"
 NO_SCREEN = "a setup reply with no screen"
 #: What game profiles do while neither focus source is in force.
@@ -497,7 +496,7 @@ class XFocus:
                 size = 32
             if size > MAX_MESSAGE:
                 self._fail(f"the X server sent a message of {size} bytes, "
-                           "which is not the protocol this speaks")
+                           "longer than any Gearbench asks for")
                 return
             if len(self._in) < size:
                 return
@@ -518,7 +517,7 @@ class XFocus:
         if isinstance(found, str):
             # The server's words can hold a newline, and the journal takes each line as a
             # record of its own (cli.service.JournalFormatter).
-            what = ("set up a connection this cannot use" if reply[0] == 1
+            what = ("set up a connection Gearbench cannot use" if reply[0] == 1
                     else "refused the connection")
             self._fail(f"the X server {self.display} {what}: {escaped(found)}")
             return

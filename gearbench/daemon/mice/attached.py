@@ -1,31 +1,42 @@
-"""The attached-mouse record, `AttachedMouse`, what one torn down leaves for the next
-(`KeptMouse`), the waits for a mouse asleep or missing, and what the mice's controller and
-its parts share: a color in flight (`SentColor`), the keys a model's DPI and tuning are filed
-under (`dpi_keys`), a game profile's own stages (`own_stages`), a stage's place in an edited
-list (`same_place`), the DPI under a held shift moved to its place (`follow_shift`), what
-a `mouse_dpi_stages` request asks for (`stage_request`), the
-effects `mouse_effect` takes (`effect_names`), the error with no mouse attached
-(`no_mouse`) and why a game profile's own stages and rate skip a mouse outside host mode
-(`TUNING_HOST_ONLY`)."""
+"""The attached-mouse record (`AttachedMouse`), what one torn down leaves for the next
+(`KeptMouse`), a color in flight (`SentColor`), the waits for a mouse asleep or missing,
+and the sentences and helpers the mice's controller and its parts use."""
 
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import cast
 
 from ...evdev import EventReader
-from ...hidpp import NO_RULE, Hidpp
-from ...lighting import Cluster
-from ...mouse import GEARBENCH_LIGHTING, OWN_LIGHTING, WAITS_TO_CLAIM, Mouse, model_ids
+from ...hidpp import Hidpp
+from ...lighting import Cluster, effect_order
+from ...mouse import (
+    CABLED_IDS,
+    GEARBENCH_LIGHTING,
+    MODELS,
+    OWN_LIGHTING,
+    WAITS_TO_CLAIM,
+    MouseError,
+    key_name,
+    model_ids,
+    model_key,
+)
+from ...mouse_device import Mouse
 from ...mouse_lighting import MouseLights
 from ...profiles import MouseTuning
 from ...report import untested, untested_note
 from ...spy import ButtonSpy
 from ...wording import written
-from ..shared import MOUSE_SILENT_RECHECK, whole_number
+from ..shared import (
+    MOUSE_SILENT_RECHECK,
+    NODE_DENIED,
+    attached_list,
+    mouse_model_named,
+    whole_number,
+)
 
 # A mouse heard from within this long counts as awake (AttachedMouse.may_be_asleep).
 MOUSE_AWAKE = 1.0
@@ -52,24 +63,30 @@ def enable_refusal(name: str) -> str:
     """The refusal of the enable write on a model whose event node Gearbench does not read
     (ButtonTable.event_node): its buttons, sent as mouse buttons 11 to 16, would reach nothing
     outside host mode (the owner's decision of 2026-10-21, "All but Enable…")."""
-    return (f"nothing was written: Gearbench does not read the {name}'s event node, so its "
-            f"buttons, enabled in its onboard profile, would do nothing outside host mode. In "
+    return (f"nothing was sent: Gearbench does not read the {name}'s event node, so its "
+            f"buttons, enabled in its onboard profile, would do nothing outside host mode; in "
             f"host mode, the default, they reach Gearbench without this write "
-            f"(`gearbench-ctl mouse-host on`).")
+            f"(`gearbench-ctl mouse-host on`)")
 
 
-def no_mouse(denied: Sequence[tuple[Path, int]]) -> str:
-    """The error for a command that needs a mouse while none is attached, given the mouse
-    nodes this user may not open (Mice.denied_mice): one there and not granted is not a
-    mouse to switch on."""
-    return (f"no permission to open the mouse's {denied[0][0]}; {NO_RULE}" if denied
-            else NO_MOUSE)
+def denied_problem(path: Path, product: int) -> str:
+    """NODE_DENIED for a mouse node this user may not open, as Unattached.denied_mice gives it."""
+    return NODE_DENIED.format(path, MODELS[product])
+
+
+def no_mouse(found: Sequence[str]) -> str:
+    """The error for a command that needs a mouse while none is attached, given why each
+    mouse found is not attached (Unattached.found): one there and not granted, or refused at
+    its setup, is not a mouse to switch on."""
+    return found[0] if found else NO_MOUSE
 
 
 def effect_names(clusters: Iterable[Cluster]) -> list[str]:
-    """The effects `mouse_effect` takes on these clusters, sorted, by the names the clusters
-    resolve: an unnamed id shows as effect-0x0013 and the like, which has_effect cannot."""
-    return sorted({e.name for c in clusters for e in c.effects if c.has_effect(e.name)})
+    """The effects `mouse_effect` takes on these clusters, in every Effect row's order
+    (effect_order), the mouse's own sorted, by the names the clusters resolve: an unnamed id
+    shows as effect-0x0013 and the like, which has_effect cannot."""
+    return effect_order(sorted({e.name for c in clusters for e in c.effects
+                                if c.has_effect(e.name)}))
 
 
 def dpi_keys(product: int) -> list[str]:
@@ -80,23 +97,35 @@ def dpi_keys(product: int) -> list[str]:
     return [own, *(key for key in model_ids(own) if key != own)]
 
 
+def other_route(product: int) -> bool:
+    """Whether the model of `product` has a route of the other kind: a cable for an id through
+    its receiver, a receiver for an id on its cable (mouse.CABLED_IDS)."""
+    cabled = product in CABLED_IDS
+    return any((int(key, 16) in CABLED_IDS) != cabled for key in dpi_keys(product))
+
+
 def own_stages(tuning: MouseTuning | None) -> tuple[int, ...] | None:
     """A game profile's own stage list, or None where it leaves the stages to profile 1."""
     return tuning.dpi_stages if tuning is not None else None
 
 
 def same_place(dpi: int | None, was: Sequence[int], now: Sequence[int]) -> int | None:
-    """The stage of `now` at the place `dpi` held in `was`, or None where `was` does not hold
-    it or `now` ends before that place."""
+    """Where a mouse on `dpi` goes when the stages go from `was` to `now`: `dpi` itself while
+    `now` still holds it, though a stage written below it (place_stages sorts them) has moved
+    its place. Else the stage it was on was edited, and it goes to the stage of `now` at the
+    place `dpi` held in `was` (the owner's decision of 2026-10-25). None where `was` does not
+    hold `dpi`, or `now` ends before that place."""
     if dpi not in was:
         return None
+    if dpi in now:
+        return dpi
     at = was.index(dpi)
     return now[at] if at < len(now) else None
 
 
 def follow_shift(attached: AttachedMouse, was: Sequence[int], now: Sequence[int]) -> int | None:
     """After the stages in force went from `was` to `now` under a held DPI shift: the DPI under
-    the shift moves to its place in `now`, for the release to put back. The DPI under the
+    the shift follows the edit (same_place), for the release to put back. The DPI under the
     shift, or None with none held."""
     moved = same_place(attached.dpi_before_shift, was, now)
     if moved is not None:
@@ -110,10 +139,55 @@ def stage_request(request: dict) -> tuple[list[int], int | None, int | None]:
     command = "mouse_dpi_stages"
     if not isinstance(value, list):
         # Text and an object iterate too: "800" would be the stages 8, 0 and 0.
-        raise TypeError(f"{command} wants a list of DPI values, not {written(value)}")
-    stages = [whole_number(stage, command) for stage in value]
-    return (stages, None if default is None else whole_number(default, command),
-            None if shift is None else whole_number(shift, command))
+        raise TypeError(f"{command} is a list of DPI values, not {written(value)}")
+    stages = [whole_number(stage, f"{command}[{at}]") for at, stage in enumerate(value)]
+    return (stages, None if default is None else whole_number(default, f"{command}.default"),
+            None if shift is None else whole_number(shift, f"{command}.shift"))
+
+
+def named_in(mice: Sequence[AttachedMouse], text: str) -> AttachedMouse | None:
+    """The mouse among `mice` that `text` names: the one with that product id, else the first
+    of the model it names by any of its ids or its name (mouse_model_named), so a G502 X PLUS
+    named 4099 is found on its cable too; None where none of them is."""
+    wanted = text.strip().lower()
+    key = mouse_model_named(wanted)
+    return next((m for m in mice if f"{m.product:04x}" == wanted),
+                next((m for m in mice if model_key(m.product) == key), None))
+
+
+def asked(mice: Sequence[AttachedMouse], text: str,
+          unattached: Callable[[], Sequence[tuple[int, str]]], *, write: bool = False
+          ) -> AttachedMouse:
+    """The mouse among `mice` that `text` names (named_in), as `--mouse`, `mouse_select` and a
+    request's `device` give it. Where none of them is, a MouseError naming the mouse asked
+    for, by its model where `text` names one, and saying for a `write` that nothing was
+    written, then why where that model was found and not attached (`unattached`, by product
+    id: Unattached.found), then the mice attached, or with none why (no_mouse)."""
+    found = named_in(mice, text)
+    if found is not None:
+        return found
+    wanted = text.strip().lower()
+    key = mouse_model_named(wanted)
+    said = (f"no mouse {wanted!r} is attached" if key is None
+            else f"the {key_name(key)} ({wanted if wanted in model_ids(key) else key}) "
+                 f"is not attached")
+    nodes = unattached()
+    # The node of the model asked for: another model's is not why this one is missing.
+    own = [why for product, why in nodes if model_key(product) == key]
+    if mice:
+        listed = attached_list(m.label for m in mice)
+        if own:
+            listed = f"{own[0]}; {listed}"
+    else:
+        listed = no_mouse(own or [why for _product, why in nodes])
+    raise MouseError(f"{said}{'; nothing was sent' if write else ''}; {listed}")
+
+
+def aimed(target: AttachedMouse, reply: dict) -> dict:
+    """A write's `reply`, which names the mouse it went to first (`mouse`, its label) where the
+    write was made: with two attached, the one a command without `device` meant is the
+    selection's, which the window and another command can move."""
+    return {"ok": True, "mouse": target.label, **reply} if reply.get("ok") else reply
 
 
 @dataclass
@@ -190,7 +264,7 @@ class AttachedMouse:
     owed_lighting: bool = False
     #: It shows its own lighting, no claim having landed: a mouse that waits to claim
     #: (mouse.WAITS_TO_CLAIM), from its attach until a claim lands (MouseLighting.claim, before its
-    #: first lighting write), and again once a release lands (MouseLighting.let_go). A claim
+    #: first lighting write), and again once a release lands (MouseLighting.release). A claim
     #: that failed may have landed all the same (claim_unsure). False on any other mouse, which
     #: is claimed at its setup.
     own_lighting: bool = field(init=False)
@@ -201,7 +275,8 @@ class AttachedMouse:
     claim_unsure: bool = False
     #: A mouse that waits to claim is owed one release from its attach, for a claim an
     #: earlier run left, killed before its stop: sent by its first lighting setup with nothing
-    #: to write (MouseLighting.let_go), and due no more once that release has gone out (the
+    #: to write (MouseLighting.let_go), and due no more once that release has gone out or any
+    #: release has landed (MouseLighting.release), as `mouse_effect`'s `release` sends (the
     #: owner's decision of 2026-10-18, "Release at startup", made for the G502 HERO; that it
     #: goes once whether it lands or not, and to the G502 LIGHTSPEED and the PRO WIRELESS, is
     #: Claude Code's call under it, pending the owner's). False on any other mouse.
@@ -233,11 +308,14 @@ class AttachedMouse:
     #: A color sent without waiting whose answer is not in yet, or None. One at a time: a color
     #: asked for meanwhile is owed (check_mouse_write, tend_mice).
     sent: SentColor | None = None
-    #: The last reading `mouse` took, MOUSE_READINGS and the onboard mode, or None, and when:
-    #: monotonic for its age, wall-clock seconds for the reply.
+    #: The last reading `mouse` took, MOUSE_READINGS, the onboard mode and the `host` it was
+    #: taken under, or None, and when: monotonic for its age, wall-clock seconds for the reply.
     reading: dict | None = None
     read_at: float = 0.0
     read_wall: int | None = None
+    #: The DPI the daemon last put it on or read from it (on_dpi), or None: known_dpi's answer
+    #: with no reading, since a game profile's own stages put it on a DPI config.json lacks.
+    dpi_on: int | None = None
     #: The last battery any reading or report carried, and when, in wall-clock seconds.
     battery: dict | None = None
     battery_at: int | None = None
@@ -272,18 +350,24 @@ class AttachedMouse:
     tilt_at: float | None = None
     #: The loaded game profile's own stages and rate this mouse was last put on in HOST mode,
     #: None for profile 1's, and Games.loads then: a profile loaded since is told from the
-    #: same one edited or read again (retune).
+    #: same one edited or read again (retune). Both None once handed back (Dpi.out_of_force),
+    #: and the load None while a setup's move onto a load's own stages is not taken
+    #: (restore_dpi).
     tuning: MouseTuning | None = None
     tuning_load: int | None = None
     #: The DPI before a game profile's own stages came into force, put back when they go out
-    #: of force (desktop_dpi). Set with `tuning` still None while a move onto them is owed, or
-    #: after that move's retry was refused, until a DPI is chosen outside them (remember_dpi).
+    #: of force (desktop_dpi). Kept with no own stages in `tuning` while a move onto them is
+    #: owed, or after that move's retry was refused, or while a setup's move off them is not
+    #: taken (restore_dpi), until a DPI is chosen outside them (remember_dpi). Followed through
+    #: a write that edits profile 1's list (Dpi.follow_kept).
     dpi_before_tuning: int | None = None
     #: The DPI before the load in force, kept when own stages are dropped under it and the
     #: mouse stays on its stage (retune): put back at that load's end, by an unload or a load
     #: with none of its own, and the DPI before the next load's own stages (desktop_dpi).
     #: Cleared when a tuning is taken under another load (take_tuning), a DPI is chosen outside
-    #: own stages (remember_dpi), or the DPI outside them is put back (restore_dpi).
+    #: own stages (remember_dpi), or the DPI outside them is put back (restore_dpi), which
+    #: keeps it while the mouse has not taken it. Followed through a write that edits profile
+    #: 1's list (Dpi.follow_kept).
     dpi_before_load: int | None = None
     #: The DPI a stage edit under the same load was mapped from, kept while its move is owed:
     #: that move may have landed with its answer lost, so the retry maps from this, not from a
@@ -311,6 +395,11 @@ class AttachedMouse:
     #: kept across a replug: through a receiver the kernel writes the mode again at that
     #: connect, and on a cable hid-generic writes none.
     wheel_mode: int | None = None
+    #: When the loop next reads its battery (MouseBatteries.poll), or None before the loop's
+    #: first pass that polls it, which sets it a full interval on, so the passes of its attach
+    #: send nothing more. A recheck keeps it, so a mouse whose link drops more often than that
+    #: is still read.
+    battery_poll_at: float | None = None
 
     def __post_init__(self) -> None:
         self.own_lighting = self.release_owed = self.product in WAITS_TO_CLAIM
@@ -319,12 +408,26 @@ class AttachedMouse:
     def name(self) -> str:
         return self.mouse.name
 
+    @property
+    def label(self) -> str:
+        """How a reply and a refusal name it among other mice: its name and product id, "G502
+        X PLUS (4099)", the id telling its routes, and two of its model, apart."""
+        return f"{self.name} ({self.product:04x})"
+
+    @property
+    def capabilities(self) -> list[str]:
+        """What this build drives on it, for the `mouse` reply and the journal's connect line:
+        what the mouse probed (Mouse.capabilities), then `lighting` for clusters that
+        enumerate (find_lighting answers None for none)."""
+        return self.mouse.capabilities + (["lighting"] if self.lighting is not None else [])
+
     def connected_words(self, path: Path) -> str:
         """The journal's line for it attached on `path`: its model, its id, what this build
-        drives on it and whether it says when it is switched on, and for a model not yet run
-        on (report.untested) the note that asks for a device report from it."""
+        drives on it (capabilities) and whether it says when it is switched on, and for a
+        model not yet run on (report.untested) the note that asks for a device report from
+        it."""
         said = (f"{self.name} connected on {path} ({self.product:04x}): "
-                f"{', '.join(self.mouse.capabilities) or 'nothing this build drives'}; "
+                f"{', '.join(self.capabilities) or 'nothing this build drives'}; "
                 + ("says when it is switched on" if self.wireless is not None
                    else "cannot say when it is switched on (no 0x1D4B)"))
         return f"{said}; {untested_note(self.name)}" if untested(self.product) else said
@@ -378,8 +481,23 @@ class AttachedMouse:
     def may_be_asleep(self) -> bool:
         """Not heard from within MOUSE_AWAKE, or marked not answering: a write waited for
         could hold the loop for up to 1.63 s, or a timeout's three tries, so the lighting is
-        sent without waiting."""
+        sent without waiting, but for a mouse whose lighting claims each effect
+        (MouseLighting.send_or_write)."""
         return self.silent or time.monotonic() - self.heard_at >= MOUSE_AWAKE
+
+    def on_dpi(self, dpi: int) -> None:
+        """The mouse is on `dpi` as far as the daemon knows: `mouse` answers with it until the
+        mouse is next read, which a `mouse` with `ask` false never does, and known_dpi when
+        there is no reading."""
+        self.dpi_on = dpi
+        if self.reading is not None:
+            self.reading["dpi"] = dpi
+
+    def on_rate(self, rate: int) -> None:
+        """The mouse runs at `rate` Hz as far as the daemon knows: `mouse` answers with it
+        until the mouse is next read, which a `mouse` with `ask` false never does."""
+        if self.reading is not None:
+            self.reading["report_rate"] = rate
 
     def forget_showing(self) -> None:
         """What it shows may have changed: not known, and a color in flight is not taken as

@@ -14,8 +14,8 @@ from typing import cast
 
 from gi.repository import Adw
 
-from .. import spatial
-from ..wording import ended, reason
+from .. import pipewire_client
+from ..wording import SERVICE, SERVICE_JOURNAL, ended, reason
 from .worker import (
     BUSY,
     DOWN,
@@ -24,11 +24,11 @@ from .worker import (
     SetStatus,
     daemon_listening,
     failure,
-    socket_path,
+    unusable_socket,
 )
 
 #: What the banner's Start it runs, the command the guide's First-time setup gives.
-START_COMMAND = ["systemctl", "--user", "start", "gearbench"]
+START_COMMAND = ["systemctl", "--user", "start", SERVICE]
 #: Seconds to wait for systemctl, which blocks until the unit is up or has failed.
 START_TIMEOUT = 30.0
 #: Seconds to wait for the socket after a start: the unit is Type=simple, so systemctl
@@ -44,23 +44,25 @@ SOCKET_WAIT = 5.0
 #: it had set up stays in host mode with the G keys diverted, and the socket file it leaves
 #: refuses the connect.
 DOWN_TITLE = ("The Gearbench daemon is not running, so the G keys type their onboard "
-              "bindings, or may type nothing if it was killed.")
+              "bindings, or may type nothing if it was killed")
 BUSY_TITLE = "The Gearbench daemon did not answer in time; it may be busy"
 #: A reply that does not parse: something answered, so no Start it either.
 UNREAD_TITLE = "The Gearbench daemon's reply could not be read"
 #: A socket that could not be used (another user's, say): Start it would not help.
 UNREACHABLE_TITLE = "The Gearbench daemon could not be reached"
 START_LABEL = "Start it"
-#: The banner after Start it failed, with what systemctl said, or that it could not be run
-#: or did not finish, or NOT_LISTENING.
+#: The banner while Start it's systemctl run is out, with no button: up to START_TIMEOUT and
+#: SOCKET_WAIT with no other sign, where every other wait in the window shows one.
+STARTING_TITLE = "Starting the Gearbench daemon…"
+#: The banner after Start it failed, with the reason _on_start's done gives.
 START_FAILED = "The Gearbench daemon did not start: {}"
 #: Why a start systemctl took failed: the unit is Type=simple, so systemctl exits 0 for a
 #: daemon that exits at once, at an import error or a socket it cannot bind, say.
 NOT_LISTENING = (f"it exited at once or did not listen within {SOCKET_WAIT:g} s; "
-                 "journalctl --user -u gearbench says why")
+                 f"`{SERVICE_JOURNAL}` says why")
 
 
-def start_daemon(run: spatial.Run = subprocess.run) -> tuple[int, str]:
+def start_daemon(run: pipewire_client.Run = subprocess.run) -> tuple[int, str]:
     """Run START_COMMAND with `run` on the worker thread, as it blocks. Returns its exit code
     and stderr, or for a start that succeeded, 0 and "" once the daemon accepts, so the read
     that follows finds it listening, and 0 and NOT_LISTENING if it does not within
@@ -91,14 +93,15 @@ class DaemonBanner:
     _starting = False
 
     def __init__(self, worker: DaemonWorker, resync: Callable[[], None], failed: SetStatus,
-                 run: spatial.Run = subprocess.run) -> None:
+                 run: pipewire_client.Run = subprocess.run) -> None:
         self._worker = worker
         self._resync = resync
         self._failed = failed
         self._run = run
         # A banner for its Start it button: a header label could carry the command only in a
-        # tooltip, which the keyboard cannot reach and a screen reader is not given.
-        self.banner = Adw.Banner()
+        # tooltip, which the keyboard cannot reach and a screen reader is not given. Not
+        # markup: the title carries the socket's path and the error's words.
+        self.banner = Adw.Banner(use_markup=False)
         self.banner.connect("button-clicked", self._on_start)
 
     def show(self, error: Exception | None) -> None:
@@ -108,14 +111,16 @@ class DaemonBanner:
             title, button = UNREAD_TITLE, ""
         elif kind == BUSY:
             title, button = BUSY_TITLE, ""
+        elif kind == DOWN and self._starting:
+            # A poll while the start is out: it says so, until the start answers.
+            title, button = STARTING_TITLE, ""
         elif kind == DOWN:
             title = (START_FAILED.format(self._start_failed) if self._start_failed
                      else DOWN_TITLE)
             button = START_LABEL
         else:
             # Shown for a failure, so its caller gave the error.
-            why = reason(cast(Exception, error))
-            title, button = f"{UNREACHABLE_TITLE} at {socket_path()}: {why}", ""
+            title, button = f"{UNREACHABLE_TITLE} at {unusable_socket(cast(Exception, error))}", ""
         self.banner.set_title(title)
         self.banner.set_button_label(button)
         self.banner.set_revealed(True)
@@ -132,6 +137,8 @@ class DaemonBanner:
         if self._starting:
             return
         self._starting = True
+        self.banner.set_title(STARTING_TITLE)
+        self.banner.set_button_label("")
 
         def done(result: tuple[int, str] | Exception) -> None:
             self._starting = False

@@ -5,26 +5,22 @@ attached models it is asked of, those not yet run on (`untested`, `untested_note
 here too.
 
 It reads and never writes, by construction. READS lists each (feature id, function) the
-report may send, with the function's name in Logitech's specification and two sources that
-call it a read; `ReadOnly`, the one channel the report reaches a device through, refuses
-any other request before a byte is written (NotARead), its burst of reads sent back to back
-included, and offers no other send and no register function. A request goes only to an
-index a root lookup named: an index is what one
-firmware reports, never taken from another table.
+report may send, with the function's name and two sources that call it a read, or for
+0x1B10's two the one there is; `ReadOnly`, the one channel the report reaches a device
+through, refuses any other request before a byte is written (NotARead), its burst of reads
+sent back to back included, and offers no other send and no register function. A request
+goes only to an index a root lookup named: an index is what one firmware reports, never
+taken from another table.
 
 What it reads, a node at a time (`gather`): from sysfs, with nothing opened, the ids, the
 interface, the driver and the report descriptor (`describe`, which tells a HID++
 collection, a long-only one and key reports); then, on a node with a HID++ collection that
-this account may open, the device index, the protocol version, the feature table, the
-firmware, the name and type, and what the existing decoders read of each feature they know
-that the table lists: the lighting, the per-key zones a keyboard has an LED for, the zones,
-the onboard memory's layout and mode with its factory sectors, the battery, the DPI, the
-report rate, the sidetone and the equalizer; and last, how it answers two reads sent back
-to back, asked BURSTS times, each reply by the software id it carries. A node the daemon
-holds gets what the daemon itself says of it instead. Sent nothing are that node, every
-other on its USB device, a receiver's own node with devices paired to it as nodes of their
-own, and, while a daemon runs or may, a node of a model this build drives, since the
-daemon may open it too.
+this account may open, the device index and read_device's sections, every read with its
+reply. A node the daemon holds gets what the daemon itself says of it instead. Sent
+nothing are that node, every other on its USB device, a receiver's own node with devices
+paired to it as nodes of their own, a node sysfs no longer names as the device it listed,
+and, while a daemon runs or may, a node of a model this build drives, since the daemon may
+open it too.
 
 Nothing that names the unit or its owner is read: no serial number, no friendly name, no
 host names, no HID_PHYS or HID_UNIQ, no user sector of the onboard memory, which can hold
@@ -38,19 +34,35 @@ from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 from . import battery
-from .g432 import PRODUCTS as G432_PRODUCTS, SIDETONE as F_SIDETONE
+from .a50x import MODELS as A50X_OF
+from .g432 import (
+    CELLS as HEADSET_CELLS,
+    F_EQUALIZER,
+    F_FEATURE_SET,
+    MODEL_OF as HEADSET_OF,
+    SIDETONE as F_SIDETONE,
+    eq_frequencies,
+    signed_byte,
+)
 from .hidpp import (
+    CAPABILITIES_SINCE,
     DEVICE_INDEX,
     ENTITIES_MAX,
+    EXTENDED_MODEL_SINCE,
     F_DEVICE_INFO,
     FN_FW_INFO,
+    MODEL_IDS_SINCE,
     RECEIVER_INDEX,
     REPORT_LONG,
     REPORT_SHORT,
+    REQUEST_RETRIES,
+    REQUEST_TIMEOUT,
     ROOT_FEATURE,
+    SET_REGISTER,
+    UNIT_ID,
     DeviceGone,
     Feature,
     Hidpp,
@@ -62,46 +74,94 @@ from .hidpp import (
     firmware_entity,
     not_there,
     paired,
+    still_there,
     walk_nodes,
 )
-from .keyboard import CELLS as KEYBOARD_CELLS, MODEL_OF as KEYBOARD_OF, MODELS as KEYBOARD_MODELS
-from .lighting import F_BRIGHTNESS, F_PERKEY, F_RGB, Cluster, Lighting, LightingError
-from .mouse import (
-    CELLS as MOUSE_CELLS,
-    F_DPI,
-    F_REPORT_RATE,
-    MODEL_OF as MOUSE_OF,
-    MODELS as MOUSE_MODELS,
-    dpi_range,
-    report_rates,
+from .keyboard import CELLS as KEYBOARD_CELLS, MODEL_OF as KEYBOARD_OF
+from .keycontrol import (
+    CONTROLS_A_READ,
+    F_CONTROL_LIST,
+    FN_CONTROL_COUNT,
+    FN_CONTROLS,
+    read_controls,
 )
+from .lighting import (
+    F_BRIGHTNESS,
+    F_PERKEY,
+    F_RGB,
+    ZONE_PAGES,
+    ZONE_PRESENCE,
+    Cluster,
+    Lighting,
+    page_zones,
+)
+from .mouse import CELLS as MOUSE_CELLS, MODEL_OF as MOUSE_OF
 from .mouse_lighting import F_COLOR_LED, ZoneLighting
 from .onboard import F_ONBOARD, MODE_NAMES, ROM_SECTOR_BASE, OnboardError, OnboardProfiles
+from .sensor import (
+    EXTENDED_RATES,
+    F_DPI,
+    F_EXTENDED_DPI,
+    F_EXTENDED_RATE,
+    F_REPORT_RATE,
+    ExtendedDpi,
+    dpi_range,
+    extended_bitmap,
+    extended_rate,
+    extended_rates,
+    report_rates,
+)
 from .wording import counted, reason, word_list
 
 #: The JSON form's version: a reader of posted reports takes the fields by it.
 FORMAT = 1
 #: The public repository's Device report issue form, which asks for the report's block.
 REPORT_FORM = "https://github.com/gearbench/gearbench/issues/new?template=device-report.yml"
+#: The next step a line gives for a device report: the command, and where its block goes.
+SEND_REPORT = f"run `gearbench-ctl report` and paste its block into {REPORT_FORM}"
+
+
+class ModelRecord(Protocol):
+    """What the report reads of a model record of any family."""
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def tested(self) -> bool: ...
+
+
+#: The model records of each family on Logitech's vendor id this build drives, by product
+#: id: the products the daemon's finders open, which the report sends nothing while a
+#: daemon runs or may.
+MODEL_RECORDS: tuple[Mapping[int, ModelRecord], ...] = (KEYBOARD_OF, MOUSE_OF, HEADSET_OF,
+                                                        A50X_OF)
+
+
+def model_record(product: int) -> ModelRecord | None:
+    """The record of `product`'s model, None for a product this build does not drive."""
+    return next((records[product] for records in MODEL_RECORDS if product in records), None)
 
 
 def untested(product: int | None) -> bool:
-    """Whether `product` is the id of a keyboard or mouse model Gearbench has not yet run on
-    (KeyboardModel.tested, MouseModel.tested); None is no device."""
-    model = None if product is None else KEYBOARD_OF.get(product) or MOUSE_OF.get(product)
+    """Whether `product` is the id of a model this build drives that Gearbench has not yet run
+    on (its record's `tested`); None is no device."""
+    model = None if product is None else model_record(product)
     return model is not None and not model.tested
+
+
+#: The first letters that take "an" before a model's name: "an Astro A50 X".
+VOWELS = frozenset("AEIOU")
 
 
 def untested_note(name: str) -> str:
     """What the command line and the journal say of a model `untested` names, and what to
     do: a device report from it shows what works on it and what to fix."""
-    return (f"not yet checked on a {name}: run gearbench-ctl report and paste its block into "
-            f"{REPORT_FORM}")
+    article = "an" if name[:1] in VOWELS else "a"
+    return f"not yet tested on {article} {name}: {SEND_REPORT}"
 
 
-F_FEATURE_SET = 0x0001
 F_NAME = 0x0005
-F_EQUALIZER = 0x8310
 
 
 # -- the report descriptor -----------------------------------------------------
@@ -112,13 +172,18 @@ HIDPP_PAGES = frozenset({0xFF00, 0xFF43})
 #: Generic Desktop's page, and its keyboard and keypad usages: a top-level collection of
 #: either carries keystrokes (HUT 1.5, section 4).
 DESKTOP_PAGE, KEYBOARD_USAGES = 0x01, frozenset({0x06, 0x07})
+#: The Keyboard/Keypad page (HUT 1.5, section 10): an Input item on it carries keystrokes,
+#: whatever collection it is in.
+KEYBOARD_KEYPAD_PAGE = 0x07
 
 
 @dataclass(frozen=True)
 class Descriptor:
     """What a report descriptor declares, as the report says it: each report id with the
-    usage page of the top-level collection it is in, and whether a top-level collection is
-    a keyboard or keypad, whose keystrokes anyone who may open the node can read."""
+    usage page of the top-level collection it is in (declared between collections, the next
+    one), and whether the node carries keystrokes, which anyone who may open it can read: a
+    top-level collection that is a keyboard or keypad, or an Input item on the
+    Keyboard/Keypad page in any collection."""
 
     reports: Mapping[int, int]
     key_reports: bool
@@ -143,9 +208,9 @@ class Descriptor:
         return "short only" if self.hidpp_short else None
 
 
-#: Item tags (HID 1.11, section 6.2.2): main Collection and End Collection; global Usage
-#: Page, Report ID, Push and Pop; local Usage.
-_COLLECTION, _END_COLLECTION = (0, 0xA), (0, 0xC)
+#: Item tags (HID 1.11, section 6.2.2): main Input, Collection and End Collection; global
+#: Usage Page, Report ID, Push and Pop; local Usage.
+_INPUT, _COLLECTION, _END_COLLECTION = (0, 0x8), (0, 0xA), (0, 0xC)
 _USAGE_PAGE, _REPORT_ID, _PUSH, _POP = (1, 0x0), (1, 0x8), (1, 0xA), (1, 0xB)
 _USAGE = (2, 0x0)
 #: A long item's prefix byte.
@@ -159,6 +224,9 @@ def describe(data: bytes) -> Descriptor:
     key_reports = cut = False
     page, pages, depth, top_page = 0, [], 0, 0
     usage: tuple[int | None, int] = (None, 0)
+    # Report ids declared outside every collection: a Report ID is global (HID 1.11,
+    # 6.2.2.7), so one before a top-level collection numbers that collection's reports.
+    waiting: list[int] = []
     for kind, value, size in _items(data):
         if kind == _CUT:
             cut = True
@@ -168,6 +236,8 @@ def describe(data: bytes) -> Descriptor:
             pages.append(page)
         elif kind == _POP and pages:
             page = pages.pop()
+        elif kind == _INPUT:
+            key_reports |= page == KEYBOARD_KEYPAD_PAGE
         elif kind == _USAGE:
             # A four-byte usage carries its own page in its top half (HID 1.11, 6.2.2.8).
             usage = (value >> 16 if size == 4 else None, value & 0xFFFF)
@@ -177,10 +247,14 @@ def describe(data: bytes) -> Descriptor:
                 # shorter one (page None), on the page in effect at the collection.
                 top_page = page if usage[0] is None else usage[0]
                 key_reports |= top_page == DESKTOP_PAGE and usage[1] in KEYBOARD_USAGES
+                while waiting:
+                    reports.setdefault(waiting.pop(), top_page)
             depth += 1
             usage = (None, 0)
         elif kind == _END_COLLECTION:
             depth = max(depth - 1, 0)
+        elif kind == _REPORT_ID and depth == 0:
+            waiting.append(value)
         elif kind == _REPORT_ID:
             reports.setdefault(value, top_page)
     return Descriptor(reports, key_reports, cut=cut)
@@ -217,6 +291,10 @@ SPEC = "Logitech's {} specification"
 SOLAAR = "Solaar's {}"
 LIBRATBAG = "libratbag's hidpp20.c, {}"
 KERNEL = "Linux's hid-logitech-hidpp.c, {}"
+#: A read no public specification names, seen answered in a user's posted traffic.
+TRAFFIC = "the traffic in Solaar issue {}"
+#: A read no public source names, seen sent by G HUB and answered in a capture of its traffic.
+CAPTURE = "G HUB's traffic with a {}"
 
 
 def _any(_params: bytes) -> bool:
@@ -229,16 +307,33 @@ def _general_info(params: bytes) -> bool:
     return len(params) >= 3 and params[2] == 0
 
 
-#: 0x8081 getInfo's typeOfInfo for the zone bitmap, RGBZonePresence, and its pages, param1
-#: 0 to 2: each reply echoes the two, then gives 14 bytes, a bit a zone, bit 0 of the first
-#: byte the page's first zone, so the pages hold zones 0 to 111, 112 to 223 and 224 to 335
-#: (x8081 v0, tables 5 to 7, read as Solaar's PerKeyLighting reads them).
-ZONE_PRESENCE, ZONE_PAGES, ZONES_A_PAGE = 0x00, 3, 112
-
-
 def _zone_presence(params: bytes) -> bool:
     """0x8081 getInfo of a page of the zone bitmap, the one typeOfInfo x8081 v0 names."""
     return len(params) >= 2 and params[0] == ZONE_PRESENCE and params[1] < ZONE_PAGES
+
+
+#: 0x1B0C, the PRO X2 SUPERSTRIKE's HITS buttons' tuning (Solaar's AnalogButtonTuning): fn 0
+#: its capabilities, fn 2 one button's actuation, rapid trigger and haptics, fn 1 their write,
+#: never sent. Its capabilities count three buttons, of which the left and right, 0 and 1,
+#: are the ones Solaar reads; the report reads those alone.
+F_ANALOG_BUTTONS = 0x1B0C
+ANALOG_BUTTONS = (0, 1)
+
+
+def _analog_button(params: bytes) -> bool:
+    """0x1B0C fn 2 of the left or the right button (ANALOG_BUTTONS)."""
+    return len(params) >= 1 and params[0] in ANALOG_BUTTONS
+
+
+# 0x1B10, the control list of the G515 generation's keyboards (keycontrol.F_CONTROL_LIST):
+# G HUB alone sends it, so its reads are the list's only ones with a single source, and the
+# report sends them only to a model whose custom assignments need its key ids
+# (KeyboardModel.custom_assignments), the G515 TKL's generation.
+
+
+def _control_offset(params: bytes) -> bool:
+    """0x1B10 fn 1 from an entry at a multiple of CONTROLS_A_READ, as G HUB asks it."""
+    return len(params) >= 1 and params[0] % CONTROLS_A_READ == 0
 
 
 def _factory_sector(params: bytes) -> bool:
@@ -250,20 +345,20 @@ def _factory_sector(params: bytes) -> bool:
 
 @dataclass(frozen=True)
 class Read:
-    """One function on the list: its name in the specification, two sources that call it
-    a read, which parameters it may carry, and the reply bytes zeroed as it is read, since
-    they name the unit."""
+    """One function on the list: its name, two sources that call it a read (0x1B10's have
+    one, F_CONTROL_LIST), which parameters it may carry, and the reply bytes zeroed as it is
+    read, since they name the unit."""
 
     name: str
-    sources: tuple[str, str]
+    sources: tuple[str] | tuple[str, str]
     allowed: Callable[[bytes], bool] = _any
     private: slice | None = None
 
 
 #: Every (feature id, function) the report may send. A function only one source calls a
-#: read stays off, as do reads of what names the unit or its owner: 0x0003's serial number
-#: (function 2), 0x0007's friendly name, 0x1814 and 0x1815's host names. The DFU features
-#: (0x00C0 to 0x00D0) and 0x1802's reset are never on it.
+#: read stays off but 0x1B10's (F_CONTROL_LIST), as do reads of what names the unit or its
+#: owner: 0x0003's serial number (function 2), 0x0007's friendly name, 0x1814 and 0x1815's
+#: host names. The DFU features (0x00C0 to 0x00D0) and 0x1802's reset are never on it.
 READS: Mapping[tuple[int, int], Read] = {
     (ROOT_FEATURE, 0): Read("getFeature", (SPEC.format("x0000 root v2"),
                                            SOLAAR.format("hidpp20.py, FeaturesArray"))),
@@ -275,7 +370,7 @@ READS: Mapping[tuple[int, int], Read] = {
                                               SOLAAR.format("hidpp20.py, get_feature"))),
     (F_DEVICE_INFO, 0): Read("getDeviceInfo", (SPEC.format("x0003 device information v4"),
                                                SOLAAR.format("hidpp20.py, get_firmware")),
-                             private=slice(1, 5)),
+                             private=UNIT_ID),
     (F_DEVICE_INFO, 1): Read("getFwInfo", (SPEC.format("x0003 device information v4"),
                                            SOLAAR.format("hidpp20.py, get_firmware"))),
     (F_NAME, 0): Read("getDeviceNameCount", (SPEC.format("x0005 device type and name v2"),
@@ -323,6 +418,36 @@ READS: Mapping[tuple[int, int], Read] = {
                                                                  "ReportRate"))),
     (F_REPORT_RATE, 1): Read("getReportRate", (SPEC.format("x8060 report rate v0"),
                                                SOLAAR.format("hidpp20.py, get_polling_rate"))),
+    # No specification of 0x2202 or 0x8061 is public: the names are those of the 0x2201 and
+    # 0x8060 functions each mirrors, and getSensorCapabilities for 0x2202's flags.
+    (F_EXTENDED_DPI, 1): Read("getSensorCapabilities", (SOLAAR.format("settings_templates.py, "
+                                                             "ExtendedAdjustableDpi"),
+                                               TRAFFIC.format("2207, its log of 2024-03-29"))),
+    (F_EXTENDED_DPI, 2): Read("getSensorDpiList", (SOLAAR.format("settings_templates.py, "
+                                                         "ExtendedAdjustableDpi"),
+                                           TRAFFIC.format("2207, its log of 2024-03-29"))),
+    (F_EXTENDED_DPI, 5): Read("getSensorDpi", (SOLAAR.format("settings_templates.py, "
+                                                    "ExtendedAdjustableDpi"),
+                                      TRAFFIC.format("3353, whose read found lift-off 3"))),
+    (F_EXTENDED_RATE, 1): Read("getReportRateList", (SOLAAR.format("settings_templates.py, "
+                                                           "ExtendedReportRate"),
+                                             TRAFFIC.format("2631"))),
+    (F_EXTENDED_RATE, 2): Read("getReportRate", (SOLAAR.format("hidpp20.py, get_polling_rate"),
+                                        TRAFFIC.format("2904, read at bit 5"))),
+    (F_ANALOG_BUTTONS, 0): Read("getCapabilities", (
+        SOLAAR.format("settings_templates.py, AnalogButtonTuning"),
+        TRAFFIC.format("3132, whose listing reads it"))),
+    (F_ANALOG_BUTTONS, 2): Read("getButtonConfig", (
+        SOLAAR.format("settings_templates.py, AnalogButtonTuning"),
+        TRAFFIC.format("3132, whose listing reads both buttons")),
+        allowed=_analog_button),
+    # No source names 0x1B10's functions: these say what each answers, as 0x1B04's count is
+    # getCount.
+    (F_CONTROL_LIST, FN_CONTROL_COUNT): Read("getCount", (
+        CAPTURE.format("G515 TKL, 2026-10-21: the count, then the list"),)),
+    (F_CONTROL_LIST, FN_CONTROLS): Read("getControlList", (
+        CAPTURE.format("G515 TKL, 2026-10-21: 16 reads, 8 entries each"),),
+        allowed=_control_offset),
     (battery.F_STATUS, 0): Read("getBatteryLevelStatus",
                                 (KERNEL.format("CMD_BATTERY_LEVEL_STATUS_GET_BATTERY_LEVEL_STATUS"),
                                  SOLAAR.format("hidpp20.py, get_battery_status"))),
@@ -331,6 +456,9 @@ READS: Mapping[tuple[int, int], Read] = {
                                   SOLAAR.format("hidpp20.py, get_battery_voltage"))),
     (battery.F_UNIFIED, 1): Read("getStatus", (KERNEL.format("CMD_UNIFIED_BATTERY_GET_STATUS"),
                                                SOLAAR.format("hidpp20.py, get_battery_unified"))),
+    (battery.F_ADC, 0): Read("getADCMeasurement",
+                             (KERNEL.format("CMD_ADC_MEASUREMENT_GET_ADC_MEASUREMENT"),
+                              SOLAAR.format("hidpp20.py, get_adc_measurement"))),
     (F_SIDETONE, 0): Read("getSidetoneLevel", (SPEC.format("x8300 sidetone adjustment v1"),
                                                SOLAAR.format("settings_templates.py, Sidetone"))),
     (F_EQUALIZER, 0): Read("getEqInfo", (SPEC.format("x8310 audio equalizer v2"),
@@ -351,7 +479,8 @@ class NotARead(Exception):
 
 class UnsureIndex(HidppFailure):
     """The device named one index for two features, so which feature a request to it
-    reaches is not known: the read is not sent."""
+    reaches is not known, or an index of SET_REGISTER (0x80) and up, the range that holds
+    HID++ 1.0's register requests and the error replies: no read goes to that index."""
 
 
 class Absent(HidppFailure):
@@ -360,8 +489,9 @@ class Absent(HidppFailure):
 
 #: The ping byte getProtocolVersion's reply echoes.
 PING = 0x5A
-#: How long a burst's replies are waited for, in seconds: the timeout of each other read.
-BURST_WAIT = 1.0
+#: How long a burst's replies are waited for, in seconds: as long as one try of a read
+#: waits for its reply.
+BURST_WAIT = REQUEST_TIMEOUT
 
 
 def _cut(read: Read, reply: bytes) -> bytes:
@@ -375,12 +505,12 @@ def _cut(read: Read, reply: bytes) -> bytes:
 
 @dataclass
 class ReadOnly:
-    """A `Hidpp` that sends only READS, each to an index a root lookup named. It offers what
-    the decoders call on a read path, `feature`, `require` and `request`, `read` by feature
-    id for the report's own reads, and `burst`, the same check's requests sent back to
-    back; no other send, no register function. `log` keeps each read and its reply or failure,
-    and each request of a burst with its software id, or the failure that ended the burst,
-    for the JSON form."""
+    """A wrapper of a `Hidpp` that sends only READS, each to an index a root lookup named.
+    It offers what the decoders call on a read path, `feature`, `require` and `request`,
+    `read` by feature id for the report's own reads, and `burst`, the same check's requests
+    sent back to back; no other send, no register function. `log` keeps each read and its
+    reply or failure, and each request of a burst with its software id, or the failure that
+    ended the burst, for the JSON form."""
 
     dev: Hidpp
     #: Each index a root lookup named, and its feature id: index 0 is the root's.
@@ -391,6 +521,9 @@ class ReadOnly:
     #: whole, None before. A feature off it is not looked up: the G432 answers a lookup of a
     #: feature it lacks with an error, where the other models answer index 0 (2026-10-18).
     listed: frozenset[int] | None = None
+    #: Each index the device named for two features, and the UnsureIndex text that says so:
+    #: no read goes to it.
+    unsure: dict[int, str] = field(default_factory=dict)
 
     @classmethod
     def open(cls, path: str | os.PathLike[str], device_index: int, *,
@@ -402,20 +535,27 @@ class ReadOnly:
     def close(self) -> None:
         self.dev.close()
 
-    def feature(self, feature_id: int, *, timeout: float = 1.0,
-                retries: int = 2) -> Feature | None:
-        """A feature id's index as the root lookup answers it, or None if absent; asked once,
-        and never for a feature the table does not list (`listed`)."""
+    def feature(self, feature_id: int, *, timeout: float = REQUEST_TIMEOUT,
+                retries: int = REQUEST_RETRIES) -> Feature | None:
+        """A feature id's index as the root lookup answers it, or None if absent. An answer is
+        kept, so a feature is asked again only after its lookup raised, UnsureIndex included,
+        and never asked when the table does not list it (`listed`)."""
         if feature_id not in self.found:
             found = None
             if self.listed is None or feature_id in self.listed:
                 found = feature_of(self.request(0, 0, feature_id.to_bytes(2, "big"),
                                                 timeout=timeout, retries=retries))
                 if found is not None:
+                    if found.index >= SET_REGISTER:
+                        raise UnsureIndex(f"the device gave 0x{feature_id:04x} index "
+                                          f"0x{found.index:02x}, in the range that holds HID++ "
+                                          "1.0's register requests and the error replies")
                     named = self.ids.setdefault(found.index, feature_id)
                     if named != feature_id:
-                        raise UnsureIndex(f"the device gave index 0x{found.index:02x} to both "
-                                          f"0x{named:04x} and 0x{feature_id:04x}")
+                        self.unsure[found.index] = (
+                            f"the device gave index 0x{found.index:02x} to both "
+                            f"0x{named:04x} and 0x{feature_id:04x}")
+                        raise UnsureIndex(self.unsure[found.index])
             self.found[feature_id] = found
         return self.found[feature_id]
 
@@ -427,9 +567,11 @@ class ReadOnly:
         return found
 
     def request(self, feature_index: int, function: int, params: bytes = b"", *,
-                timeout: float = 1.0, long: bool = False, retries: int = 2) -> bytes:
+                timeout: float = REQUEST_TIMEOUT, long: bool = False,
+                retries: int = REQUEST_RETRIES) -> bytes:
         """One request of READS, as Hidpp.request sends it; NotARead, with nothing
-        written, for any other, or for an index no root lookup named."""
+        written, for any other, or for an index no root lookup named, and UnsureIndex for
+        one the device named for two features."""
         read, kept = self._checked(feature_index, function, params)
         try:
             reply = self.dev.request(feature_index, function, params, timeout=timeout,
@@ -445,8 +587,8 @@ class ReadOnly:
               params: Sequence[bytes]) -> tuple[list[int], list[tuple[int, bytes | HidppError]]]:
         """Requests of one read of READS, one per `params`, sent back to back as
         Hidpp.send_burst sends them, and what came back for BURST_WAIT: each request's
-        software id, and each reply with the id it carries. NotARead, with nothing written,
-        as `request` refuses, for any of them."""
+        software id, and each reply with the id it carries. NotARead or UnsureIndex, with
+        nothing written, as `request` refuses, for any of them."""
         index = self.require(feature_id, "feature").index
         checked = [self._checked(index, function, each) for each in params]
         try:
@@ -463,7 +605,8 @@ class ReadOnly:
     def _checked(self, feature_index: int, function: int,
                  params: bytes) -> tuple[Read, dict[str, object]]:
         """The read of READS a request is, and how `log` names it; NotARead for one off the
-        list or to an index no root lookup named."""
+        list or to an index no root lookup named, and UnsureIndex for one to an index the
+        device named for two features."""
         feature_id = self.ids.get(feature_index)
         read = READS.get((feature_id, function)) if feature_id is not None else None
         if read is None or not read.allowed(params):
@@ -471,6 +614,8 @@ class ReadOnly:
                            f"({'not looked up' if feature_id is None else f'0x{feature_id:04x}'}) "
                            f"with {params.hex(' ') or 'no parameters'} is not a read "
                            "the report sends")
+        if feature_index in self.unsure:
+            raise UnsureIndex(self.unsure[feature_index])
         return read, {"feature": f"0x{feature_id:04x}", "function": function,
                       "params": params.hex()}
 
@@ -500,10 +645,6 @@ DEVICE_TYPES = ("keyboard", "remote control", "numpad", "mouse", "trackpad", "tr
                 "gamepad")
 #: getDeviceInfo's transport bits, bit 0 first (x0003 v4).
 TRANSPORTS = ("Bluetooth", "Bluetooth Low Energy", "eQuad", "USB")
-#: The x0003 version that added each getDeviceInfo field after the entity count, which v0
-#: returns alone (x0003 v4's changelog): the unit id, the transports and the model ids in
-#: v1, the extended model id in v2, the capabilities in v4.
-MODEL_IDS_SINCE, EXTENDED_MODEL_SINCE, CAPABILITIES_SINCE = 1, 2, 4
 #: The x0001 version that added featureVersion to getFeatureID's reply (x0001 v2's
 #: changelog): a v0 FeatureSet, as the G432's, gives no version.
 FEATURE_VERSIONS_SINCE = 1
@@ -512,8 +653,6 @@ FEATURE_VERSIONS_SINCE = 1
 #: and EFFECTS_MAX for the lighting walks: a byte the device gets wrong cannot lengthen
 #: those walks.
 NAME_MAX, FACTORY_SECTORS_MAX = 64, 16
-#: getFrequencies' bands a reply carries (x8310 v2).
-BANDS_A_REPLY = 7
 
 
 def _hex16(value: int) -> str:
@@ -564,14 +703,15 @@ def device_info(dev: ReadOnly) -> dict | None:
 
 
 def device_name(dev: ReadOnly) -> dict | None:
-    """getDeviceName's characters, in as many reads as the name takes, and getDeviceType."""
+    """getDeviceName's characters, at most NAME_MAX, in as many reads as they take, and
+    getDeviceType."""
     if not dev.has(F_NAME):
         return None
-    count = dev.read(F_NAME, 0)
+    wanted = min(dev.read(F_NAME, 0)[0], NAME_MAX)
     name = b""
-    while len(name) < min(count[0], NAME_MAX):
+    while len(name) < wanted:
         chunk = dev.read(F_NAME, 1, bytes([len(name)]), long=True)
-        name += chunk[:count[0] - len(name)]
+        name += chunk[:wanted - len(name)]
     kind = dev.read(F_NAME, 2)[0]
     return {"name": name.rstrip(b"\x00").decode("utf-8", errors="replace"),
             "type": DEVICE_TYPES[kind] if kind < len(DEVICE_TYPES) else f"type {kind}"}
@@ -586,14 +726,16 @@ def _clusters(clusters: Sequence[Cluster]) -> list[dict]:
             for c in clusters]
 
 
-def lighting(dev: ReadOnly) -> dict | None:
-    """0x8071's clusters and their effects, and 0x8040's levels and brightness where it has
-    both, as lighting.Lighting reads them."""
-    found = Lighting.find(_as_hidpp(dev))
+def lighting(dev: ReadOnly, product: int) -> dict | None:
+    """0x8071's clusters and their effects, the whole board's after them on a keyboard whose
+    model reads it (keyboard.KeyboardModel.whole_board), and 0x8040's levels and brightness
+    where it has both, as lighting.Lighting reads them."""
+    model = KEYBOARD_OF.get(product)
+    found = Lighting.find(_as_hidpp(dev), whole_board=model.whole_board if model else ())
     if found is None:
         return None
     levels = list(found.brightness_levels)
-    return {"clusters": _clusters(found.clusters), "brightness_levels": levels,
+    return {"clusters": _clusters(found.effect_clusters), "brightness_levels": levels,
             "brightness": found.get_brightness() if levels else None}
 
 
@@ -616,8 +758,7 @@ def per_key(dev: ReadOnly) -> dict | None:
             pages.append({"page": page, "refused": str(exc)})
             continue
         # A bitmap cut short raises IndexError, which read_device says in words.
-        zones += [page * ZONES_A_PAGE + bit for bit in range(ZONES_A_PAGE)
-                  if bitmap[bit // 8] >> bit % 8 & 1]
+        zones += page_zones(page, bitmap)
         pages.append({"page": page, "bitmap": bitmap.hex()})
     return {"zones": runs(zones), "pages": pages}
 
@@ -679,8 +820,18 @@ def refusal(exc: HidppError) -> str:
     return f"refused: {exc}"
 
 
+def battery_reading(dev: ReadOnly, cell: battery.CellCurves | None) -> dict | None:
+    """The first battery feature of battery.READERS the table lists, read and decoded as
+    battery.read decodes it, None for none. A refusal is raised, where battery.read gives
+    None, so that read_device names it in `failed`."""
+    for feature_id, function, decode in battery.READERS:
+        if dev.has(feature_id):
+            return decode(dev.read(feature_id, function), cell)
+    return None
+
+
 def dpi(dev: ReadOnly) -> dict | None:
-    """0x2201's sensor count, and sensor 0's DPI list, as mouse.dpi_range decodes it, its DPI
+    """0x2201's sensor count, and sensor 0's DPI list, as sensor.dpi_range decodes it, its DPI
     and its default."""
     if not dev.has(F_DPI):
         return None
@@ -688,26 +839,70 @@ def dpi(dev: ReadOnly) -> dict | None:
     found = dpi_range(dev.read(F_DPI, 1, bytes([0x00]), long=True))
     now = dev.read(F_DPI, 2, bytes([0x00]))
     return {"sensors": count[0],
-            "range": None if found is None else [found.minimum, found.maximum, found.step],
+            "range": None if found is None else found.reply,
             "dpi": int.from_bytes(now[1:3], "big"), "default": int.from_bytes(now[3:5], "big")}
 
 
 def report_rate(dev: ReadOnly) -> dict | None:
-    """0x8060's rates, in Hz as mouse.report_rates gives them, and its interval now in ms."""
+    """0x8060's rates, in Hz as sensor.report_rates gives them, and its interval now in ms."""
     if not dev.has(F_REPORT_RATE):
         return None
-    rates = dev.read(F_REPORT_RATE, 0)
-    return {"rates": report_rates(rates[0]),
+    return {"rates": report_rates(dev.read(F_REPORT_RATE, 0)[0]),
             "interval_ms": dev.read(F_REPORT_RATE, 1)[0]}
+
+
+def extended_dpi(dev: ReadOnly) -> dict | None:
+    """0x2202's flags, sensor 0's list, as sensor.banded_range decodes it, and its DPI."""
+    found = dev.feature(F_EXTENDED_DPI)
+    if found is None:
+        return None
+    sensor = ExtendedDpi(_as_hidpp(dev), found)
+    span = sensor.read_range()
+    now = sensor.params()
+    return {"flags": sensor.flags, "range": None if span is None else span.reply,
+            "bands": [] if span is None else [list(band) for band in span.bands],
+            "dpi": now.x, "dpi_y": now.y, "lift_off": now.lift_off}
+
+
+def extended_report_rate(dev: ReadOnly) -> dict | None:
+    """0x8061's rates, every one it lists: in Hz, and by bit where no source names the rate;
+    and the one in force: its bit, and its Hz where a source names the bit."""
+    if not dev.has(F_EXTENDED_RATE):
+        return None
+    listed = extended_bitmap(dev.read(F_EXTENDED_RATE, 1))
+    bit = dev.read(F_EXTENDED_RATE, 2)[0]
+    return {"rates": extended_rates(listed),
+            "unnamed_bits": [each for each in range(len(EXTENDED_RATES), listed.bit_length())
+                             if listed >> each & 1],
+            "bit": bit, "hz": extended_rate(bit)}
+
+
+def analog_buttons(dev: ReadOnly) -> dict | None:
+    """0x1B0C's capabilities and the left and right buttons' tuning, as the device gives them:
+    Solaar has changed how it reads their bytes (issue 3202), so the report keeps them raw."""
+    if not dev.has(F_ANALOG_BUTTONS):
+        return None
+    return {"capabilities": dev.read(F_ANALOG_BUTTONS, 0)[:5].hex(" "),
+            "buttons": [dev.read(F_ANALOG_BUTTONS, 2, bytes([button]))[:4].hex(" ")
+                        for button in ANALOG_BUTTONS]}
+
+
+def control_list(dev: ReadOnly, product: int) -> dict | None:
+    """0x1B10's count, and each entry in hex, the control id at that key id, from 0
+    (keycontrol.read_controls), on a keyboard whose custom assignments need its key ids
+    (KeyboardModel.key_ids); None for any other model, which is sent nothing of it."""
+    model = KEYBOARD_OF.get(product)
+    if model is None or not model.custom_assignments or not dev.has(F_CONTROL_LIST):
+        return None
+    # A reply cut short raises IndexError, which read_device says in words.
+    controls = read_controls(lambda function, params: dev.read(F_CONTROL_LIST, function,
+                                                               params))
+    return {"count": len(controls), "controls": [f"{control:04x}" for control in controls]}
 
 
 def sidetone(dev: ReadOnly) -> dict | None:
     """0x8300's level."""
     return {"level": dev.read(F_SIDETONE, 0)[0]} if dev.has(F_SIDETONE) else None
-
-
-def _signed(byte: int) -> int:
-    return byte - 0x100 if byte > 0x7F else byte
 
 
 def equalizer(dev: ReadOnly) -> dict | None:
@@ -720,14 +915,10 @@ def equalizer(dev: ReadOnly) -> dict | None:
         return None
     info = dev.read(F_EQUALIZER, 0)
     bands = info[0]
-    frequencies: list[int] = []
-    while len(frequencies) < bands:
-        reply = dev.read(F_EQUALIZER, 1, bytes([len(frequencies)]))
-        frequencies += [int.from_bytes(reply[1 + 2 * i:3 + 2 * i], "big")
-                        for i in range(min(BANDS_A_REPLY, bands - len(frequencies)))]
+    frequencies = eq_frequencies(lambda params: dev.read(F_EQUALIZER, 1, params), bands)
     gains = {location: _gains(dev, location, bands + 1) for location in (0, 1)}
     return {"bands": bands, "db_range": info[1], "capabilities": info[2],
-            "db_min": _signed(info[3]), "db_max": _signed(info[4]),
+            "db_min": signed_byte(info[3]), "db_max": signed_byte(info[4]),
             "frequencies": frequencies, "saved_gains": gains[0], "active_gains": gains[1]}
 
 
@@ -739,7 +930,7 @@ def _gains(dev: ReadOnly, location: int, count: int) -> list[int] | str:
         reply = dev.read(F_EQUALIZER, 2, bytes([location]))
     except HidppError as exc:
         return refusal(exc)
-    return [_signed(byte) for byte in reply[:count]]
+    return [signed_byte(byte) for byte in reply[:count]]
 
 
 #: The reply-order check's requests: getFeatureID of the table's rows 1 and 2, two reads of
@@ -826,10 +1017,11 @@ def times(count: int) -> str:
     return {1: "once", 2: "twice"}.get(count) or counted(count, "time")
 
 
-#: What a section can fail with, named in `failed`: a failed request, and a reply a decoder
-#: found out of shape. A device not there ends the rest (read_device); a reply too short to
-#: index is said apart.
-SECTION_FAILURES = (HidppFailure, LightingError, OnboardError)
+#: What a section can fail with, named in `failed`: a failed request or a reply Gearbench
+#: cannot read (HidppFailure, UnreadableAnswer among them, a lighting reply too short to
+#: decode too), and a reply onboard found out of shape. A device not there ends the rest
+#: (read_device); a reply too short to index is said apart.
+SECTION_FAILURES = (HidppFailure, OnboardError)
 
 
 def read_device(dev: ReadOnly, product: int) -> dict:
@@ -837,15 +1029,20 @@ def read_device(dev: ReadOnly, product: int) -> dict:
     report's order. A section that fails is named in `failed` with why, and the rest go on;
     the first that finds the device not there (hidpp.not_there) ends the reads, which would
     each wait out their timeout, and so does a device gone. NotARead is let through."""
-    cell = KEYBOARD_CELLS.get(product) or MOUSE_CELLS.get(product)
+    cell = (KEYBOARD_CELLS.get(product) or MOUSE_CELLS.get(product)
+            or HEADSET_CELLS.get(product))
     sections: tuple[tuple[str, Callable[[], object]], ...] = (
         ("protocol", lambda: protocol(dev)), ("features", lambda: feature_table(dev)),
         ("device", lambda: device_info(dev)), ("name", lambda: device_name(dev)),
-        ("lighting", lambda: lighting(dev)), ("per_key", lambda: per_key(dev)),
+        ("lighting", lambda: lighting(dev, product)), ("per_key", lambda: per_key(dev)),
         ("zones", lambda: zones(dev)),
         ("onboard", lambda: onboard(dev)),
-        ("battery", lambda: battery.read(_as_hidpp(dev), cell)),
+        ("battery", lambda: battery_reading(dev, cell)),
         ("dpi", lambda: dpi(dev)), ("report_rate", lambda: report_rate(dev)),
+        ("extended_dpi", lambda: extended_dpi(dev)),
+        ("extended_report_rate", lambda: extended_report_rate(dev)),
+        ("analog_buttons", lambda: analog_buttons(dev)),
+        ("control_list", lambda: control_list(dev, product)),
         ("sidetone", lambda: sidetone(dev)), ("equalizer", lambda: equalizer(dev)),
         ("reply_order", lambda: reply_order(dev)))
     out: dict = {"failed": []}
@@ -853,8 +1050,7 @@ def read_device(dev: ReadOnly, product: int) -> dict:
         try:
             value = section()
         except DeviceGone as exc:
-            # Its own text is the OSError's, errno and all.
-            out["failed"].append(f"{name}: the device went away: {reason(exc.__cause__ or exc)}")
+            out["failed"].append(f"{name}: the device went away: {exc}")
             break
         except IndexError:
             out["failed"].append(f"{name}: a reply too short to read")
@@ -884,28 +1080,35 @@ DEV = Path("/dev")
 READ = "read"
 NOT_HIDPP = "no HID++ collection, so nothing was sent"
 HELD = "held by the Gearbench daemon, so nothing was sent"
+BESIDE_HELD = "on the USB device of a node the Gearbench daemon holds, so nothing was sent"
 UNSURE = "not read: the daemon is running or may be, and may open it"
 RECEIVER = "a receiver, sent nothing: each device paired to it has a node of its own"
 NO_PERMISSION = "not read: no permission to open it"
+#: Any other failed open, with its cause.
+NOT_OPENED = "not read: it could not be opened: {}"
 NO_ANSWER = "no HID++ 2.0 device answered on it"
+#: A node unplugged, or taken by another device, between the listing and its open.
+REPLACED = "not read: unplugged or taken by another device after the report listed it"
 
 
 def model_name(product: int) -> str | None:
     """The name of a model this build drives, None for any other."""
-    return (KEYBOARD_MODELS.get(product) or MOUSE_MODELS.get(product)
-            or G432_PRODUCTS.get(product))
+    model = model_record(product)
+    return None if model is None else model.name
 
 
-def gather(held: Mapping[str, Mapping[str, object]], unsure: bool) -> list[dict]:
+def gather(held: Mapping[str, Mapping[str, object]], unsure: Callable[[], bool]) -> list[dict]:
     """Every Logitech USB node's part of the report, in the kernel's order (walk_nodes).
 
-    `held` is what the daemon says of each node it holds, by node name: such a node, and
-    every other on its USB device but a receiver's own node with devices paired to it as
-    nodes of their own, is sent nothing and gets the daemon's fields; that receiver's node
-    is sent nothing as a receiver. With `unsure`, for a daemon that runs or may,
-    a model this build drives is not opened either: the daemon may hold it, and its attach
+    `held` is what the daemon says of each node it holds, by node name: such a node is sent
+    nothing and gets the daemon's fields (HELD). Every other node with a HID++ collection on
+    its USB device is sent nothing too, with empty daemon fields (BESIDE_HELD), but a
+    receiver's own node with devices paired to it as nodes of their own, which is sent
+    nothing as a receiver. `unsure` says whether a daemon runs or may, and while one does, a
+    model this build drives is not opened either: the daemon may hold it, and its attach
     retries open and probe such a node it does not hold, where two processes on one node
-    take each other's replies.
+    take each other's replies. It is asked again for each node it may leave unopened, since
+    a daemon may start while the nodes before it are read.
     """
     nodes = walk_nodes()
     taken = {node.usb for node in nodes if node.name in held and node.usb is not None}
@@ -916,8 +1119,9 @@ def gather(held: Mapping[str, Mapping[str, object]], unsure: bool) -> list[dict]
     return [node_report(node, held, unsure, taken, behind) for node in nodes]
 
 
-def node_report(node: SysfsNode, held: Mapping[str, Mapping[str, object]], unsure: bool,
-                taken: set[Path], behind: Mapping[Path, list[str]]) -> dict:
+def node_report(node: SysfsNode, held: Mapping[str, Mapping[str, object]],
+                unsure: Callable[[], bool], taken: set[Path],
+                behind: Mapping[Path, list[str]]) -> dict:
     """One node's part: its sysfs part, then what its state lets the report read."""
     found = describe(node.descriptor)
     record: dict = {
@@ -932,11 +1136,16 @@ def node_report(node: SysfsNode, held: Mapping[str, Mapping[str, object]], unsur
     receiving = (behind.get(node.usb) if node.usb is not None
                  and not paired(node.product, node.usb_product) else None)
     if node.name in held or (node.usb in taken and receiving is None):
-        return {**record, "state": HELD, "daemon": dict(held.get(node.name, {}))}
-    if unsure and record["model"] is not None:
+        return {**record, "state": HELD if node.name in held else BESIDE_HELD,
+                "daemon": dict(held.get(node.name, {}))}
+    if record["model"] is not None and unsure():
         return {**record, "state": UNSURE}
     if receiving is not None:
         return {**record, "state": RECEIVER, "paired": receiving}
+    # The nodes before this one were read since the listing: a node unplugged meanwhile can
+    # now be another device's, of any vendor.
+    if not still_there(node):
+        return {**record, "state": REPLACED}
     if not os.access(DEV / node.name, os.R_OK | os.W_OK):
         return {**record, "state": NO_PERMISSION}
     return {**record, **read_node(DEV / node.name, node, found)}
@@ -956,6 +1165,8 @@ def read_node(path: Path, node: SysfsNode, found: Descriptor) -> dict:
                             else DEVICE_INDEX)
     except PermissionError:
         return {"state": NO_PERMISSION}
+    except OSError as exc:
+        return {"state": NOT_OPENED.format(reason(exc))}
     if opened is None:
         return {"state": NO_ANSWER}
     dev, index = opened

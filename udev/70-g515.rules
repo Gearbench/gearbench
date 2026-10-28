@@ -17,6 +17,19 @@
 # --reload, replug the keyboard, and paste the report's block into a device
 # report.
 #
+# Interface 02 also carries the modifier keys held (Ctrl, Shift, Alt, Super
+# and FN, each press and release) once a host writes 0x8051 fn 3 `03 ff`, as
+# Gearbench does at each setup to light the FN keys. The wired G515 TKL keeps
+# sending them until a replug or a power cycle (G HUB's traffic with it,
+# captured 2026-10-21). The G515 LIGHTSPEED TKL is taken to keep them through
+# a replug of its cable, on its battery, until it is switched off, as the
+# G915 X LIGHTSPEED did (70-g915-x.rules). Gearbench reads FN alone. Any
+# program of the seat's user can write that and read them, and one that holds
+# the node open reads another account's after a user switch. On a machine
+# several people use, the group grant in 70-gearbench-uinput.rules, in a
+# copy of this file in /etc/udev/rules.d/, limits the node to the group's
+# accounts. A member then reads it from any session, whoever has the seat.
+#
 # Matched on properties, as 70-g915.rules is, for the reason it gives. The
 # G515 LIGHTSPEED TKL over Bluetooth has no line here and is not driven.
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c358", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"
@@ -46,7 +59,8 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_
 # account gets the seat, and so reads what that account types on the G515, a
 # password at the login screen included. On a machine several people use, that
 # file's group grant, in a copy of this file in /etc/udev/rules.d/, limits the
-# node to the group's accounts.
+# node to the group's accounts. A member then reads it from any session,
+# whoever has the seat.
 #
 # Matched by the HID device's name, as 70-g502x.rules matches the mouse: udev
 # gives this node the receiver's properties, so a property match would grant

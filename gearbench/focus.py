@@ -9,7 +9,7 @@ Two sources, the first in force wins:
    them unless it runs Wine's Wayland driver. Its connection is kept while the extension
    runs, so a stopped extension falls back at once.
 
-With neither, game profiles follow the running programs (games.py).
+With neither, game profiles follow the running programs (daemon/games/).
 
 The extension's changes settle as XFocus's do (`xfocus.Settle`): Alt-Tab passes through
 windows, and a handoff to a window that takes focus itself, as Wine's do, may pass
@@ -91,8 +91,8 @@ class Focus:
         self.x.dispatch(mask)
 
     def deadline(self) -> float | None:
-        due = [when for when in (self.x.deadline(), self._settle.at) if when is not None]
-        return min(due) if due else None
+        return min((when for when in (self.x.deadline(), self._settle.at) if when is not None),
+                   default=None)
 
     def tick(self) -> None:
         self.x.tick()

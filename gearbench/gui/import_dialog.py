@@ -18,23 +18,22 @@ box is checked (the owner's decision of 2026-09-28): a name from someone
 else's file also matches the Linux program of that name. One that replaces
 yours keeps your programs, which it would otherwise stop loading for.
 
-`Importer` is the half the pack's dialog (`pack_dialog`) shares: the filter
-and its buttons, the lists, what the check boxes do and the count, the Load
-for row, the review page and the import. Both dialogs open through
-`read_then_show`, one read at a time.
+`Importer` is the half the pack's dialog (`pack_dialog`) shares. Both dialogs
+open through `read_then_show`, one read at a time.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from itertools import accumulate
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from gi.repository import Adw, Gio, GLib, GObject, Gtk
 
 from .. import ghub, ghub_plan, import_plan
-from ..wording import counted, word_list
-from .style import held_while_shown, picked_path, plain_row, weakly
+from ..wording import RESTART_DAEMON, counted, word_list
+from .style import CHOOSE_WHAT, held_while_shown, picked_path, plain_row, weakly
 from .worker import Reply, unreachable
 
 if TYPE_CHECKING:                       # pragma: no cover
@@ -51,8 +50,18 @@ GAMES = "game"
 #: The failure dialog's heading when some writes were done, and when none was.
 FAILED = "Part of the import did not work"
 NOTHING_IMPORTED = "The import did not work"
+#: The review page's spinner, named for a screen reader, while the import's requests go.
+IMPORTING = "Importing…"
 #: The longest a request may take. A macro or profile write is one file.
 REQUEST_TIMEOUT = 10.0
+#: The most lines, and characters, of one label's text that shown_lines keeps: GTK lays out a
+#: label in a time that grows faster than its length, a profile can bind a macro of 64 steps
+#: on each of its keys and buttons, and thousands of an import's writes can fail. The review
+#: page shows every step, a label for each item (labeled).
+SHOWN_LINES = 2_000
+SHOWN_CHARACTERS = 50_000
+#: The last line of a label's text that shown_lines cut.
+NOT_SHOWN = "{} not shown"
 
 
 def search_text(item: GameProfile | Macro) -> str:
@@ -63,7 +72,17 @@ def search_text(item: GameProfile | Macro) -> str:
 
 def selected_count(ticked: int, total: int) -> str:
     """The first page's running count: "3 of 10 selected"."""
-    return f"{ticked} of {total} selected"
+    return f"{ticked:,} of {total:,} selected"
+
+
+def shown_lines(lines: list[str]) -> str:
+    """`lines` as one label's text: the first that fit in SHOWN_LINES and SHOWN_CHARACTERS,
+    each line's newline counted, then one saying how many more there are."""
+    ends = accumulate(len(line) + 1 for line in lines[:SHOWN_LINES])
+    shown = sum(end <= SHOWN_CHARACTERS for end in ends)
+    rest = len(lines) - shown
+    return "\n".join([*lines[:shown], NOT_SHOWN.format(counted(rest, "more line"))]
+                     if rest else lines)
 
 
 class Picker:
@@ -145,7 +164,7 @@ def read_then_show[T](window: Window, work: Callable[[], T],
     the first one's import, and the daemon would refuse its writes. The flag goes when the
     read lands: no click reaches the window's menu or the Game profiles dialog under a
     presented dialog."""
-    if getattr(window, "import_reading", False):
+    if window.import_reading:
         return
     window.import_reading = True
 
@@ -169,21 +188,38 @@ def open_path(window: Window, path: Path) -> None:
     read_then_show(window, lambda: load(path), show)
 
 
+def labeled(box: Gtk.Box, texts: list[str], selectable: bool = False) -> None:
+    """A wrapped label for each of `texts` in `box`, in place of those it held. One label for
+    all would freeze the window: GTK lays out a label's text in a time that grows faster than
+    its length, and the macros of someone else's file can make hundreds of thousands of
+    lines."""
+    while (child := box.get_first_child()) is not None:
+        box.remove(child)
+    for text in texts:
+        box.append(Gtk.Label(label=text, wrap=True, xalign=0, selectable=selectable))
+
+
+#: The answer that keeps the user's own and imports nothing for it, in both dialogs.
+KEEP_MINE = "Keep mine"
+
+
 class Importer(Adw.Dialog):
     """What the G HUB import and the pack share: the first page's filter, Select
     all, Select none, check box handler and count, the review page and the
     import. A subclass puts a Picker in `pickers` for each kind it lists, then
-    builds the first page: `_controls` makes its top, `_list` a kind's list and
-    `_load_for_row` a profile's Load for row, and `next` is its button. Each
-    Import check box goes in `checks`, connected to `_on_check` when its item is
-    a picker's. The subclass answers `make_plan` and `plan_title`."""
+    builds the first page: `_controls` makes its top, `_list` a kind's list,
+    `_load_for_row` a profile's Load for row, `_import_check` each Import check
+    box, and `next` is its button. The subclass answers `make_plan` and
+    `plan_title`."""
 
     #: The clash choices, as the drop-down names them and in its order. The
     #: first is the default (default_choice), and so writes nothing over
     #: anything of the user's.
     CLASHES: ClassVar[dict[str, str]] = {import_plan.KEEP: "Keep both",
                                          import_plan.REPLACE: "Replace",
-                                         import_plan.SKIP: "Skip"}
+                                         import_plan.SKIP: KEEP_MINE}
+    #: The clash group's line under its title.
+    CLASH_HELP = "Choose what to do with each."
 
     def __init__(self, window: Window, existing: import_plan.Existing, title: str) -> None:
         super().__init__(title=title, content_width=600, content_height=680)
@@ -196,8 +232,6 @@ class Importer(Adw.Dialog):
         self.lists: dict[str, Gtk.ListBox] = {}
         #: The Import check boxes, by (kind, name).
         self.checks: dict[tuple[str, str], Gtk.CheckButton] = {}
-        #: Set while the rows sync to the pickers, so the check boxes' handler does not echo it.
-        self._syncing = False
         self.nav = Adw.NavigationView()
         self.set_child(self.nav)
         self.next = Gtk.Button(label="Next", css_classes=["suggested-action", "pill"],
@@ -221,7 +255,7 @@ class Importer(Adw.Dialog):
         self.search = Gtk.SearchEntry(placeholder_text=FILTER_HINT, hexpand=True)
         # The placeholder is no name to a screen reader.
         self.search.update_property([Gtk.AccessibleProperty.LABEL], [FILTER_HINT])
-        # Through weakly, as every handler on a widget inside the dialog.
+        # Through weakly, as every handler that would hold the dialog.
         self.search.connect("search-changed", weakly(self._on_filter))
         select_all = Gtk.Button(label="Select all")
         select_all.connect("clicked", weakly(self._on_select), True)
@@ -257,9 +291,19 @@ class Importer(Adw.Dialog):
         row.add_prefix(check)
         return row
 
+    def _import_check(self, kind: str, name: str, picked: bool = True) -> Gtk.CheckButton:
+        """An item's Import check box, named for it and kept in `checks`. A picker's item
+        (`picked`) is ticked as the picker of `kind` has it, and `_on_check` follows its
+        toggles; the caller connects any other."""
+        check = Gtk.CheckButton(valign=Gtk.Align.CENTER,
+                                active=picked and name in self.pickers[kind].ticked)
+        check.update_property([Gtk.AccessibleProperty.LABEL], [f"Import {name}"])
+        if picked:
+            check.connect("toggled", weakly(self._on_check), kind, name)
+        self.checks[kind, name] = check
+        return check
+
     def _on_check(self, check: Gtk.CheckButton, kind: str, name: str) -> None:
-        if self._syncing:
-            return
         self.pickers[kind].set(name, check.get_active())
         self._update_count()
 
@@ -269,17 +313,13 @@ class Importer(Adw.Dialog):
             self.lists[kind].invalidate_filter()
 
     def _on_select(self, _button: Gtk.Button, on: bool) -> None:
-        self._syncing = True
-        try:
-            for kind, picker in self.pickers.items():
-                if on:
-                    picker.select_all()
-                else:
-                    picker.select_none()
-                for name in picker.names:
-                    self.checks[kind, name].set_active(name in picker.ticked)
-        finally:
-            self._syncing = False
+        for kind, picker in self.pickers.items():
+            if on:
+                picker.select_all()
+            else:
+                picker.select_none()
+            for name in picker.names:
+                self.checks[kind, name].set_active(name in picker.ticked)
         self._update_count()
 
     def extra_ticked(self) -> bool:
@@ -301,13 +341,13 @@ class Importer(Adw.Dialog):
         raise NotImplementedError
 
     def _page(self, tag: str, title: str, subtitle: str, body: Gtk.Widget,
-              button: Gtk.Button) -> Adw.NavigationPage:
+              bottom: Gtk.Widget) -> Adw.NavigationPage:
         header = Adw.HeaderBar(title_widget=Adw.WindowTitle(title=title, subtitle=subtitle))
         view = Adw.ToolbarView(content=Gtk.ScrolledWindow(
             child=Adw.Clamp(child=body), hscrollbar_policy=Gtk.PolicyType.NEVER,
             vexpand=True))
         view.add_top_bar(header)
-        view.add_bottom_bar(button)
+        view.add_bottom_bar(bottom)
         return Adw.NavigationPage(child=view, title=title, tag=tag)
 
     # -- the second page: review and import --------------------------------
@@ -321,13 +361,14 @@ class Importer(Adw.Dialog):
             return
         self.plan = self.make_plan()
         self.summary = Gtk.Label(wrap=True, xalign=0, css_classes=["title-4"])
-        self.written = Gtk.Label(wrap=True, xalign=0, selectable=True)
-        self.said = Gtk.Label(wrap=True, xalign=0, css_classes=["dimmed"])
+        # A label for each item written and each sentence said (labeled).
+        self.written = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.said = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["dimmed"])
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12,
                        margin_bottom=12, margin_start=12, margin_end=12)
         body.append(self.summary)
         self.clash_group = Adw.PreferencesGroup(title="Already in Gearbench",
-                                                description="Choose what to do with each.")
+                                                description=self.CLASH_HELP)
         self.clash_rows: dict[import_plan.Clash, Adw.ComboRow] = {}
         body.append(self.clash_group)
         written = Adw.PreferencesGroup(title="What is written")
@@ -339,8 +380,13 @@ class Importer(Adw.Dialog):
                                         halign=Gtk.Align.CENTER, margin_top=6,
                                         margin_bottom=6)
         self.import_button.connect("clicked", weakly(self._on_import))
+        # Beside Import, which stays centered: the page is grayed while the requests go.
+        self.import_spinner = Adw.Spinner(valign=Gtk.Align.CENTER, margin_end=12,
+                                          visible=False)
+        self.import_spinner.update_property([Gtk.AccessibleProperty.LABEL], [IMPORTING])
         self.nav.push(self._page("review", "Review", self.plan_title(), body,
-                                 self.import_button))
+                                 Gtk.CenterBox(center_widget=self.import_button,
+                                               end_widget=self.import_spinner)))
         self._show_plan()
 
     def _clash_row(self, clash: import_plan.Clash) -> Adw.ComboRow:
@@ -375,10 +421,11 @@ class Importer(Adw.Dialog):
             row.set_visible(clash in shown)
         self.clash_group.set_visible(bool(plan.clashes))
         self.summary.set_label(import_plan.plan_summary(plan))
-        self.written.set_label("\n".join(import_plan.plan_lines(plan)))
-        self.said.set_label("\n".join(plan.said))
+        labeled(self.written, ["\n".join(item) for item in import_plan.plan_items(plan)],
+                 selectable=True)
+        labeled(self.said, plan.said)
         self.said.set_visible(bool(plan.said))
-        self.import_button.set_sensitive(not plan.empty and not plan.unresolved)
+        self.import_button.set_sensitive(not plan.empty)
 
     def _on_import(self, _button: Gtk.Button) -> None:
         """Send the plan, each request after the reply to the one before,
@@ -388,6 +435,7 @@ class Importer(Adw.Dialog):
         # Nothing to go back to or change while the daemon writes.
         self.nav.set_sensitive(False)
         self.set_can_close(False)
+        self.import_spinner.set_visible(True)
         sent: list[tuple[dict, dict]] = []
 
         def send_next() -> None:
@@ -414,9 +462,14 @@ class Importer(Adw.Dialog):
         done, failed = import_plan.reply_lines(sent)
         self.nav.set_sensitive(True)
         self.set_can_close(True)
+        self.import_spinner.set_visible(False)
         self.close()
         if failed:
-            self.win.explain(f"Imported {len(done)} of {len(sent)}.", "\n".join(failed),
+            # Window.explain shows the detail in one label. The cut keeps the line that ends
+            # an older daemon's failures, since it says what to do.
+            restart = failed[-1:] if failed[-1] == RESTART_DAEMON else []
+            detail = "\n".join([shown_lines(failed[:len(failed) - len(restart)]), *restart])
+            self.win.explain(f"Imported {len(done):,} of {len(sent):,}.", detail,
                              heading=FAILED if done else NOTHING_IMPORTED)
         else:
             self.win.toast(import_plan.plan_summary(self.plan, "Imported"))
@@ -464,20 +517,20 @@ class ImportDialog(Importer):
             group.add(self._profile_row(desktop))
             body.append(group)
             # G HUB keeps one per application, but a file can hold more: the list offers
-            # the first, and names the rest, as import-ghub --list shows each.
-            unoffered = [p.name for p in self.found.profiles if p.desktop][1:]
+            # the one Found.desktop gives, and names the rest, as import-ghub --list shows each.
+            unoffered = [p.name for p in self.found.profiles if p.desktop and p is not desktop]
             if unoffered:
                 lead = ("Another desktop default" if len(unoffered) == 1
                         else "Other desktop defaults")
                 body.append(Gtk.Label(
                     label=f"{lead} in the file, not offered: {', '.join(unoffered)}. "
-                          "gearbench-ctl import-ghub --profile imports one by its name.",
+                          "`gearbench-ctl import-ghub --profile` imports one by its name.",
                     wrap=True, xalign=0, css_classes=["dimmed"]))
         if self.found.other_devices:
             body.append(Gtk.Label(
                 label="Also in the file, not imported: " + ghub_plan.other_devices_text(self.found),
                 wrap=True, xalign=0, css_classes=["dimmed"]))
-        return self._page("pick", "Choose profiles", source, body, self.next)
+        return self._page("pick", CHOOSE_WHAT, source, body, self.next)
 
     def _profile_row(self, profile: ghub.GhubProfile) -> Adw.ExpanderRow:
         subtitle = ghub_plan.summary(profile)
@@ -485,14 +538,10 @@ class ImportDialog(Importer):
             subtitle = f'G HUB calls it "{profile.ghub_name}". {subtitle}'
         # Not markup: a profile's name and G HUB's name for it are anyone's text.
         row = plain_row(Adw.ExpanderRow, profile.name, subtitle, name=profile.name)
-        check = Gtk.CheckButton(valign=Gtk.Align.CENTER)
-        check.update_property([Gtk.AccessibleProperty.LABEL], [f"Import {profile.name}"])
+        check = self._import_check(GAMES, profile.name, picked=not profile.desktop)
         if profile.desktop:
             check.connect("toggled", weakly(self._on_desktop))
-        else:
-            check.connect("toggled", weakly(self._on_check), GAMES, profile.name)
         row.add_prefix(check)
-        self.checks[GAMES, profile.name] = check
         # Filled on first opening: a hundred profiles are a thousand rows.
         row.connect("notify::expanded", weakly(self._fill_row), profile)
         return row
@@ -506,7 +555,7 @@ class ImportDialog(Importer):
             row.add_row(self._load_for_row(GAMES, profile, "", weakly(self._on_programs), profile))
         for heading, lines in ghub_plan.details(profile, self.found, self.existing.m_names,
                                                 profile.name in self.pickers[GAMES].with_programs):
-            detail = plain_row(Adw.ActionRow, heading, "\n".join(lines),
+            detail = plain_row(Adw.ActionRow, heading, shown_lines(lines),
                                subtitle_selectable=True)
             if heading == ghub_plan.NOTES:
                 self._notes[profile.name] = detail

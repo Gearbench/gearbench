@@ -7,15 +7,15 @@ from __future__ import annotations
 import configparser
 import os
 import re
-import stat
 
 from .astro import BANDS, FREQ_RANGE, GAIN_RANGE, SHELVES, WIDTH_RANGE, Band, EqPreset, preset_name
+from .settings_files import ConfigError, read_capped, unprefixed
 from .wording import both_ends, turns_replaced
 
 # How Qt 5's QSettings writes a string: quoted when it holds , ; = or an edge
 # space, \" and \\ escaped, non-ASCII as UTF-16 \xNNNN units, a leading @
 # doubled.
-_QT_ESCAPE = re.compile(r'\\(?:x([0-9A-Fa-f]+)|([0-7]+)|(.)|\Z)|"([ \t]*)', re.DOTALL)
+_QT_ESCAPE = re.compile(r'\\(?:x([0-9A-Fa-f]+)|([0-7]+)|(.?))|"([ \t]*)', re.DOTALL)
 _QT_CHARS = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
              '"': '"', "?": "?", "'": "'", "\\": "\\"}
 
@@ -32,9 +32,8 @@ def _qt_string(raw: str) -> str:
         if octal is not None:
             return chr(int(octal, 8) & 0xFFFF)
         if char is not None:
-            return _QT_CHARS.get(char, "")  # Qt drops an unknown escape
-        if spaces is None:  # a backslash that ends the value, which Qt drops
-            return ""
+            # Qt drops an unknown escape, and a backslash that ends the value ("").
+            return _QT_CHARS.get(char, "")
         # A quote, dropped; Qt skips the spaces and tabs after a closing one.
         quoted = not quoted
         return spaces if quoted else ""
@@ -68,22 +67,27 @@ def read_astroeq(text: str) -> EqPreset:
         errors = getattr(exc, "errors", None)
         line = getattr(exc, "lineno", None) or (errors[0][0] if errors else "?")
         what = next((w for kind, w in _INI_PROBLEMS if isinstance(exc, kind)), "is not key=value")
-        raise ValueError(f"Not an .astroeq file: line {line} {what}.") from None
+        raise ValueError(f"not an .astroeq file: line {line} {what}") from None
 
     def value(section: str, key: str) -> str:
         if not parser.has_option(section, key):
-            raise ValueError(f"The file has no {key} in [{section}].")
+            raise ValueError(f"the file has no {key} in [{section}]")
         return parser.get(section, key).strip()
 
     def number[N: (int, float)](key: str, kind: type[N], low: float, high: float) -> N:
         raw = value("Eq_Bands", key)
+        out_of_range = f"{key} is {low} to {high}, not {raw}"
         try:
             got = kind(raw)
         except ValueError:
+            # int() also refuses a run of more digits than sys.get_int_max_str_digits(),
+            # 4,300 by default; said as out of range, which it is unless zero-padded.
+            if re.fullmatch(r"[+-]?\d+", raw):
+                raise ValueError(out_of_range) from None
             raise ValueError(f"{key} is {raw!r}, "
-                             f"not a {'whole ' if kind is int else ''}number.") from None
+                             f"not a {'whole ' if kind is int else ''}number") from None
         if not low <= got <= high:
-            raise ValueError(f"{key} is {raw}; it must be {low} to {high}.")
+            raise ValueError(out_of_range)
         return got
 
     # A shared file's name must not turn the text around it or break it into lines, as the
@@ -108,25 +112,17 @@ ASTROEQ_MAX = 16 << 10
 
 def load_astroeq(path: str | os.PathLike[str]) -> EqPreset:
     """`read_astroeq` on a file. Raises OSError when it cannot be opened, and
-    ValueError for anything but a regular file of at most ASTROEQ_MAX bytes:
-    a FIFO would block the read, and /dev/zero never ends. O_NOCTTY, since a
-    reader that leads its session with no terminal, as a service does, would
-    take a terminal no session holds as its own."""
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
+    ValueError for anything but a regular file (settings_files.read_capped) of at most
+    ASTROEQ_MAX bytes."""
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ValueError("Not an .astroeq file: it is not a regular file.")
-        with open(fd, "rb", closefd=False) as file:
-            data = file.read(ASTROEQ_MAX + 1)
-    finally:
-        os.close(fd)
-    if len(data) > ASTROEQ_MAX:
-        raise ValueError(f"Not an .astroeq file: it is larger than {ASTROEQ_MAX >> 10} KiB.")
+        data = read_capped(path, ASTROEQ_MAX)
+    except ConfigError as exc:
+        raise ValueError(f"not an .astroeq file: it is {unprefixed(str(exc), path)}") from None
     try:
         decoded = data.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise ValueError(f"Not an .astroeq file: it is not UTF-8 text "
-                         f"({exc.reason} at byte {exc.start}).") from None
+        raise ValueError(f"not an .astroeq file: it is not UTF-8 text "
+                         f"({exc.reason} at byte {exc.start})") from None
     try:
         return read_astroeq(decoded)
     except ValueError as exc:

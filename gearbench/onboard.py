@@ -24,12 +24,14 @@ from __future__ import annotations
 
 import binascii
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import RATE_CHOICES, REPORT_RATES, backup_dir, replace_synced
-from .hidpp import Feature, Hidpp
+from .config import RATE_CHOICES, REPORT_RATES
+from .hidpp import REQUEST_RETRIES, REQUEST_TIMEOUT, WRITE_ONCE_TIMEOUT, Feature, Hidpp
+from .settings_files import ConfigError, backup_dir, link_to_nothing, missing_behind, replace_synced
 from .wording import counted, escaped, reason
 
 log = logging.getLogger("gearbench")
@@ -65,6 +67,9 @@ DPI_STAGES = 5
 #: The DPI this code gives a mouse, in a stage slot or by setSensorDpi (Mouse.set_dpi):
 #: two bytes, short of 0x0000 and 0xffff, which mark a stage slot unused (dpi_slot).
 DPI_LOWEST, DPI_HIGHEST = 0x0001, 0xFFFE
+#: The refusal of a DPI outside them, the value put in: "outside", as the Mouse tab's toast
+#: says it; "out of range" is the radio's word.
+DPI_OUTSIDE = f"DPI {{}} is outside {DPI_LOWEST} to {DPI_HIGHEST}"
 OFF_BUTTONS = 0x20
 # 0x60 is the G-Shift bank, which nothing binds (remap scope is the G/M keys and the six
 # extra mouse buttons) and which round-trips untouched. It bounds the base table's 16
@@ -74,8 +79,9 @@ ENTRY_SIZE = 4
 OFF_NAME = 0xA0
 NAME_UNITS = 24
 
-#: Suffix of a backup set aside after a failed restore left the sector as it was
-#: (set_aside, from Mouse._set_aside_unchanged); newest_backup never picks one.
+#: Suffix of a backup set aside after a write, done or failed, a restore included, left the
+#: sector as it was (set_aside, from Mouse._set_aside_unchanged); newest_backup never picks
+#: one.
 UNCHANGED = ".unchanged"
 
 #: Report rate byte: the period in milliseconds, for each of config's REPORT_RATES.
@@ -97,7 +103,7 @@ FUNCTION_NAMES = {
     0x00: "no action", 0x01: "tilt left", 0x02: "tilt right", 0x03: "DPI up",
     0x04: "DPI down", 0x05: "DPI cycle", 0x06: "default DPI", 0x07: "DPI shift",
     0x08: "next profile", 0x09: "previous profile", 0x0A: "profile cycle",
-    0x0B: "G-shift", 0x0C: "battery status", 0x0D: "profile select",
+    0x0B: "G-Shift", 0x0C: "battery status", 0x0D: "profile select",
     0x0E: "mode switch", 0x0F: "host button", 0x10: "scroll down", 0x11: "scroll up",
 }
 
@@ -106,14 +112,15 @@ class OnboardError(RuntimeError):
     pass
 
 
-def read_mode(dev: Hidpp, feature: Feature, *, timeout: float = 1.0, retries: int = 2) -> int:
+def read_mode(dev: Hidpp, feature: Feature, *, timeout: float = REQUEST_TIMEOUT,
+              retries: int = REQUEST_RETRIES) -> int:
     """fn 2 getOnboardMode on the device's 0x8100 `feature`: the mode byte as answered."""
     return dev.request(feature.index, FN_GET_MODE, long=True, timeout=timeout,
                        retries=retries)[0]
 
 
-def write_mode(dev: Hidpp, feature: Feature, mode: int, *, timeout: float = 1.0,
-               retries: int = 2) -> None:
+def write_mode(dev: Hidpp, feature: Feature, mode: int, *, timeout: float = REQUEST_TIMEOUT,
+               retries: int = REQUEST_RETRIES) -> None:
     """fn 1 setOnboardMode, MODE_ONBOARD or MODE_HOST; another mode is refused unsent."""
     if mode not in MODE_NAMES:
         raise OnboardError(f"onboard mode must be 0x01 or 0x02, not {mode:#x}")
@@ -121,8 +128,8 @@ def write_mode(dev: Hidpp, feature: Feature, mode: int, *, timeout: float = 1.0,
                 retries=retries)
 
 
-def running_sector(dev: Hidpp, feature: Feature, *, timeout: float = 1.0,
-                   retries: int = 2) -> int:
+def running_sector(dev: Hidpp, feature: Feature, *, timeout: float = REQUEST_TIMEOUT,
+                   retries: int = REQUEST_RETRIES) -> int:
     """fn 4 getCurrentProfile: the sector the device runs, 1 for profile 1, 0x0101 for its ROM
     copy, 0 in HOST mode, where no profile runs."""
     reply = dev.request(feature.index, FN_CURRENT_PROFILE, long=True, timeout=timeout,
@@ -142,9 +149,9 @@ def sector_crc_ok(image: bytes | bytearray) -> bool:
 
 
 def crc_words(ok: bool) -> str:
-    """The words for a sector's CRC check, "CRC ok" or "CRC BAD", which RECOVERY in
-    gearbench-ctl(1) tells the reader to look for."""
-    return "CRC ok" if ok else "CRC BAD"
+    """The words for a sector's CRC check, "CRC ok" or "CRC fails", the window's words for a
+    profile that fails it, which RECOVERY in gearbench-ctl(1) tells the reader to look for."""
+    return "CRC ok" if ok else "CRC fails"
 
 
 # -- button entries ----------------------------------------------------------
@@ -173,9 +180,7 @@ MOUSE_BUTTON_JOBS = {1: "left click", 2: "right click", 3: "middle click", 4: "b
 
 def entry_job(entry: bytes) -> str:
     """What an entry has the mouse do, in a reader's words, for a row that shows the onboard
-    profile's buttons: back for mouse button 4, a function by its name alone, a keystroke for
-    any key, a media key for any consumer control, a macro for any macro and several mouse
-    buttons for a mask of more than one; describe_entry's words for anything else."""
+    profile's buttons: its job without describe_entry's codes, else describe_entry's words."""
     if entry == NOOP:
         return "nothing"
     button = entry_mouse_button(entry)
@@ -211,7 +216,9 @@ def describe_entry(entry: bytes) -> str:
         return f"consumer control 0x{value:04x}"
     if kind == ENTRY_FUNCTION:
         name = FUNCTION_NAMES.get(entry[1], f"function 0x{entry[1]:02x}")
-        return f"{name} (arg {entry[3]})" if entry[3] else name
+        # 0xff fills byte 3 as 0x00 does: the G502 HERO's function entries end ff ff, the
+        # G502 X PLUS's 00 00.
+        return f"{name} (arg {entry[3]})" if entry[3] not in (0x00, 0xFF) else name
     if kind == ENTRY_MACRO:
         return f"macro page {entry[1]} offset 0x{value:04x}"
     return entry.hex(" ")
@@ -231,6 +238,12 @@ def stage_dpi(stages: list[int], index: int) -> int | None:
     return stages[min(index, len(stages) - 1)] if stages else None
 
 
+def stages_words(stages: list[int], default: int | None, shift: int | None) -> str:
+    """A stage list with its default and shift on one line: "800, 1600, 3200 DPI, default
+    1600, shift 800"."""
+    return f"{', '.join(str(s) for s in stages)} DPI, default {default}, shift {shift}"
+
+
 class ProfileImage:
     """One profile sector, edited in place so every byte this code does not understand is
     carried through. Only `to_bytes` recomputes the CRC."""
@@ -241,15 +254,7 @@ class ProfileImage:
                                f"too short to be a profile")
         self.data = bytearray(data)
 
-    @property
-    def size(self) -> int:
-        return len(self.data)
-
     # -- CRC ---------------------------------------------------------------
-
-    @property
-    def stored_crc(self) -> int:
-        return int.from_bytes(self.data[-2:], "big")
 
     @property
     def crc_ok(self) -> bool:
@@ -281,10 +286,10 @@ class ProfileImage:
     @dpi_stages.setter
     def dpi_stages(self, stages: list[int]) -> None:
         if not 1 <= len(stages) <= DPI_STAGES:
-            raise OnboardError(f"between 1 and {DPI_STAGES} DPI stages, not {len(stages)}")
+            raise OnboardError(f"1 to {DPI_STAGES} DPI stages, not {len(stages)}")
         for value in stages:
             if not dpi_fits(value):
-                raise OnboardError(f"DPI {value} is out of range")
+                raise OnboardError(DPI_OUTSIDE.format(value))
         # Unused slots are 0x0000, as in the G305 factory profile.
         self.data[OFF_DPI:OFF_DPI + 2 * DPI_STAGES] = b"".join(
             value.to_bytes(2, "little") for value in stages).ljust(2 * DPI_STAGES, b"\x00")
@@ -381,13 +386,9 @@ class ProfileImage:
 
 @dataclass(frozen=True)
 class OnboardInfo:
-    """The whole fn 0 getInfo reply, named in wire order.
-
-    Four of the fields (memory_model, profile_format, macro_format, sector_count) are read
-    by nothing; they keep `from_reply` a positional record of the layout. `sector_count` is
-    the spec's name for byte [6], which is not the sector size; it is unverified on this
-    hardware, so do not build on it.
-    """
+    """fn 0 getInfo's first nine bytes, named in wire order; the reply's later bytes are not
+    kept. `sector_count` is the spec's name for byte [6], which is not the sector size; it is
+    unverified on this hardware, so do not build on it."""
 
     memory_model: int
     profile_format: int
@@ -427,18 +428,20 @@ class OnboardProfiles:
 
     # -- mode ----------------------------------------------------------------
 
-    def get_mode(self, *, timeout: float = 1.0, retries: int = 2) -> int:
+    def get_mode(self, *, timeout: float = REQUEST_TIMEOUT, retries: int = REQUEST_RETRIES) -> int:
         return read_mode(self.dev, self._feature, timeout=timeout, retries=retries)
 
-    def set_mode(self, mode: int, *, timeout: float = 1.0, retries: int = 2) -> None:
+    def set_mode(self, mode: int, *, timeout: float = REQUEST_TIMEOUT,
+                 retries: int = REQUEST_RETRIES) -> None:
         write_mode(self.dev, self._feature, mode, timeout=timeout, retries=retries)
 
-    def current_profile(self, *, timeout: float = 1.0, retries: int = 2) -> int:
+    def current_profile(self, *, timeout: float = REQUEST_TIMEOUT,
+                        retries: int = REQUEST_RETRIES) -> int:
         """The sector the mouse runs (running_sector)."""
         return running_sector(self.dev, self._feature, timeout=timeout, retries=retries)
 
-    def set_current_profile(self, sector: int, *, timeout: float = 1.0,
-                            retries: int = 2) -> None:
+    def set_current_profile(self, sector: int, *, timeout: float = REQUEST_TIMEOUT,
+                            retries: int = REQUEST_RETRIES) -> None:
         """Run another profile with fn 3, sent short as G HUB sends it. It writes no flash."""
         self.dev.request(self._feature.index, FN_SET_CURRENT_PROFILE,
                          sector.to_bytes(2, "big"), timeout=timeout, retries=retries)
@@ -489,7 +492,7 @@ class OnboardProfiles:
         image must carry a valid CRC (ProfileImage.to_bytes, reseal_rom)."""
         size = self.info.sector_size
         if len(image) != size:
-            raise OnboardError(f"image is {counted(len(image), 'byte')}, sector is {size}")
+            raise OnboardError(f"image is {counted(len(image), 'byte')}, sector is {size:,}")
         if not sector_crc_ok(image):
             raise OnboardError("refusing to write an image whose CRC does not verify")
         if sector >= ROM_SECTOR_BASE:
@@ -503,12 +506,12 @@ class OnboardProfiles:
         padded = image.ljust(frames * CHUNK, b"\xff")
         for n in range(frames):
             # A resend whose first copy also landed stages a frame too many. The next frame's
-            # counter catches that; nothing would after the last, so it goes once, waited for
-            # as long as an untouched mouse takes to answer (1.63 s in G HUB's captures).
+            # counter catches that; nothing would after the last, so it goes once.
             last = n == frames - 1
             reply = self.dev.request(
                 self._feature.index, FN_WRITE, padded[n * CHUNK:(n + 1) * CHUNK], long=True,
-                timeout=3.0 if last else 1.0, retries=0 if last else 2,
+                timeout=WRITE_ONCE_TIMEOUT if last else REQUEST_TIMEOUT,
+                retries=0 if last else REQUEST_RETRIES,
             )
             counter = int.from_bytes(reply[0:2], "big")
             if counter != n + 1:
@@ -575,25 +578,36 @@ class OnboardProfiles:
     def backup_all(self, device: str, directory: Path | None = None) -> dict[int, bytes]:
         """Back up the directory, which says which profiles are enabled, and every profile
         sector; returns what was read, by sector."""
-        images = {}
         self.backed_up = {}
         for sector in (DIRECTORY_SECTOR, *self.profile_sectors):
             image = self.read_sector(sector)
             path = self.backup(device, sector, image, directory)
-            images[sector] = image
             self.backed_up[sector] = (path, image)
             log.info("backed up sector 0x%04x to %s (%s)", sector, path,
                      crc_words(sector_crc_ok(image)))
-        return images
+        return {sector: image for sector, (_, image) in self.backed_up.items()}
 
     @staticmethod
     def newest_backup(device: str, sector: int, directory: Path | None = None) -> Path | None:
-        """The most recent `.bin` backup of one sector. `.bad-read` files and backups set
-        aside (UNCHANGED) are never candidates, nor is a link whose target is gone."""
+        """The most recent `.bin` backup of one sector, or None where there is none or no
+        folder. `.bad-read` files and backups set aside (UNCHANGED) are never candidates, nor
+        is a link whose target is gone. A folder that cannot be listed, or that is behind a link
+        to nothing, is a ConfigError: it is not one without backups."""
         target_dir = directory or backup_dir()
         prefix = f"{device}-sector-{sector:04X}-"
+        try:
+            # Not Path.glob, which takes a folder it cannot list for an empty one.
+            with os.scandir(target_dir) as entries:
+                paths = [target_dir / entry.name for entry in entries
+                         if entry.name.startswith(prefix) and entry.name.endswith(".bin")]
+        except FileNotFoundError:
+            if (place := link_to_nothing(target_dir)) is None:
+                return None
+            raise ConfigError(missing_behind(target_dir, place)) from None
+        except OSError as exc:
+            raise ConfigError(f"{target_dir} could not be listed ({reason(exc)})") from None
         found = []
-        for path in target_dir.glob(f"{prefix}*.bin"):
+        for path in paths:
             # On equal mtimes, as in a copy that kept whole seconds or no times, the later stamp
             # wins, then the later of its second's backups, which backup() numbers -1, -2 ...
             stamp, _, n = path.name[len(prefix):-len(".bin")].partition("-")

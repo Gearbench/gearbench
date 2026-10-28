@@ -1,0 +1,30 @@
+# Logitech PRO X SUPERLIGHT 2, with the SUPERLIGHT 2 SE on its ids (046d:40a9
+# through its 046d:c54d receiver, 046d:c09b cabled), PRO X SUPERLIGHT 2 DEX
+# (046d:40b8, 046d:c0a0) and PRO X SUPERLIGHT 2c (046d:40b7, 046d:c09f) ->
+# uaccess on each one's own hidraw node through the receiver, and on its HID++
+# interface, 02, on its cable.
+#
+# Not yet checked on this hardware. The kernel's hid-logitech-dj binds the
+# c54d (modinfo hid-logitech-dj on kernel 7.0 lists it), so each mouse gets a
+# hidraw node of its own, as the G502 X PLUS does on its c547, and is matched by
+# its HID device name: a property match would also take in the receiver's
+# interfaces, which carry the input of everything paired to it. The c54d pairs
+# two devices (Solaar's listings: "a maximum of 2"): pair nothing else to this
+# mouse's receiver, since going by the kernel's hid-logitech-dj.c a keyboard
+# paired after the mouse could have its keystrokes arrive on this node.
+#
+# The node also carries the keystrokes the mouse sends for a button its
+# onboard profile binds to a key, as 70-g502x.rules says of the G502 X PLUS's.
+#
+# Cabled, interface 02 is assumed, the PRO X SUPERLIGHT's vendor collection:
+# their firmware is encrypted and no source gives their cable's interfaces.
+# Interface 01 is not granted.
+#
+# No event node is granted: each mouse has five buttons, and in host mode
+# Gearbench reads its back and forward through HID++ on the hidraw nodes below.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0003:046D:40A9.*", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c09b", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0003:046D:40B8.*", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c0a0", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0003:046D:40B7.*", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c09f", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"

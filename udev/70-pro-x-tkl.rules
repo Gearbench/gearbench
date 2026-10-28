@@ -1,0 +1,51 @@
+# Logitech PRO X TKL LIGHTSPEED (046d:c352) on its cable, vendor HID++
+# interface -> uaccess for the seat user; and its node of its own behind its
+# LIGHTSPEED receiver (40B0, below), which carries what is typed on it too.
+# Not yet checked on this hardware: the ids are from Logitech G HUB's device
+# database and Solaar's listing of a cabled unit (issue 3155), read
+# 2026-10-21.
+#
+# Interface 02 on the cable is assumed, as on the G515 TKL and the G915 TKL,
+# whose vendor collection (usage page 0xFF00) is interface 02 alone; no
+# source gives this keyboard's interfaces. gearbench-ctl report gives each
+# node's interface and whether its report descriptor holds HID++, read from
+# sysfs, so it needs no access to the node. Gearbench opens interface 02
+# alone on the cable, so if HID++ is on another, put a copy of this file in
+# /etc/udev/rules.d/ without the c352 line: it overrides this file by name,
+# and a reinstall or upgrade leaves it alone. Then run sudo udevadm control
+# --reload, replug the keyboard, and paste the report's block into a device
+# report. Read access to an interface that carries keystrokes would be a
+# keylogger surface.
+#
+# Matched on properties, as 70-g915.rules is, for the reason it gives. The
+# keyboard over Bluetooth has no line here and is not driven.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c352", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"
+
+# The PRO X TKL LIGHTSPEED through its LIGHTSPEED receiver (046d:c547): the
+# hidraw node of its own, 0003:046D:40B0.<n>, that the kernel's
+# hid-logitech-dj gives a device paired to a c547, as 70-g515.rules says of
+# the G515 LIGHTSPEED TKL's 40B4 node. Not yet checked on this hardware: the
+# 40b0 id and the receiver are from G HUB's device record and Solaar's
+# listing of the keyboard's transport ids, read 2026-10-21.
+#
+# This node carries what is typed on the keyboard as well as its HID++
+# traffic, as the G515 LIGHTSPEED TKL's does (70-g515.rules says why). So
+# with this line installed, any program the user of the active seat session
+# runs can read what is typed on the PRO X TKL, not only Gearbench, which
+# drops those reports unread. Granted, as the G515 LIGHTSPEED TKL's node is
+# (70-g515.rules). It carries no other device's reports while nothing else
+# is paired to the receiver (70-g502x.rules says why).
+#
+# The grant crosses accounts, as 70-gearbench-uinput.rules says of
+# /dev/uinput's: a program that opened the node keeps reading it after another
+# account gets the seat, and so reads what that account types on the PRO X
+# TKL, a password at the login screen included. On a machine several people
+# use, that file's group grant, in a copy of this file in /etc/udev/rules.d/,
+# limits the node to the group's accounts. A member then reads it from any
+# session, whoever has the seat.
+#
+# Matched by the HID device's name, as 70-g502x.rules matches the mouse: udev
+# gives this node the receiver's properties, so a property match would grant
+# the receiver's own interfaces too. KERNELS matches a parent's kernel name,
+# which for the paired device is bus:vendor:product.instance.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0003:046D:40B0.*", TAG+="uaccess"

@@ -6,51 +6,70 @@
   <project_license>GPL-3.0-or-later</project_license>
 
   <name>Gearbench</name>
-  <summary>Settings for Logitech G keyboards and mice, the G432 headset and the Astro A50 Gen 4</summary>
+  <summary>Lighting, G keys, DPI and macros for Logitech G keyboards and mice, and headset settings</summary>
 
   <description>
     <p>
       Gearbench is a control panel for Logitech G keyboards (the G915,
-      G915 TKL, G815, G515 TKL and G515 LIGHTSPEED TKL), mice (the
+      G915 TKL, G815, G515 TKL, G515 LIGHTSPEED TKL, PRO X TKL LIGHTSPEED,
+      G213 Prodigy, G915 X, G915 X LIGHTSPEED, G915 X LIGHTSPEED TKL, G316 X,
+      G316 X 98, G512 X 75 and G512 X 98), mice (the
       G502 X PLUS, G502 X, G502 X LIGHTSPEED, G502 X PLUS MILLENNIUM FALCON,
-      G502 HERO, G502 LIGHTSPEED, G305, PRO X SUPERLIGHT, PRO WIRELESS and
-      G903 LIGHTSPEED HERO) and the G432 headset, and for the Astro A50 Gen 4
-      headset with its base station's switch on PC. Only these models
-      attach, the A50's Xbox edition not among them; the G913 TKL and G813
-      share the G915 TKL's and G815's ids and attach as those. The models
-      not yet checked on the hardware are trials: the G515 LIGHTSPEED TKL,
-      G915 TKL and G815 keyboards and the G502 X, G502 X LIGHTSPEED, G502 X
+      G502 HERO, G502 LIGHTSPEED, G305, PRO X SUPERLIGHT, PRO WIRELESS,
+      PRO X SUPERLIGHT 2, PRO X SUPERLIGHT 2 DEX, PRO X SUPERLIGHT 2c,
+      PRO X2 SUPERSTRIKE, G203 LIGHTSYNC and G903 LIGHTSPEED HERO) and
+      headsets (the G432, G431, G433, G533, G535, G633, G635, G733, G933,
+      G935, PRO X Wireless, PRO X 2 LIGHTSPEED, G522 LIGHTSPEED and G325
+      LIGHTSPEED), and for the Astro A50 X, A50 Gen 5 and A50 Gen 4
+      headsets, the A50 Gen 4 with its base station's switch on PC. Only these
+      models attach, the A50 Gen 4's Xbox edition not among them; the G913
+      TKL and G813 share the G915 TKL's and G815's ids and attach as those, the PRO X
+      SUPERLIGHT 2 SE the PRO X SUPERLIGHT 2's, and the G102 LIGHTSYNC the
+      G203 LIGHTSYNC's. The models
+      not yet tested on the hardware are these: the G515 LIGHTSPEED TKL,
+      G915 TKL, G815, PRO X TKL LIGHTSPEED, G213 Prodigy,
+      G915 X, G915 X LIGHTSPEED TKL, G316 X, G316 X 98,
+      G512 X 75 and G512 X 98 keyboards and the G502 X, G502 X LIGHTSPEED, G502 X
       PLUS MILLENNIUM FALCON, G502 LIGHTSPEED, PRO X SUPERLIGHT, PRO
-      WIRELESS and G903 LIGHTSPEED HERO mice. On a mouse
+      WIRELESS, PRO X SUPERLIGHT 2, PRO X SUPERLIGHT 2 DEX, PRO X SUPERLIGHT 2c,
+      PRO X2 SUPERSTRIKE, G203 LIGHTSYNC and G903 LIGHTSPEED HERO mice, the
+      G432's relatives but the G933, the G431, G433, G533, G535, G633, G635,
+      G733, G935 and PRO X Wireless headsets, the Astro A50 Gen 5 headset, and the
+      PRO X 2 LIGHTSPEED, G522 LIGHTSPEED and G325 LIGHTSPEED headsets. On a mouse
       other than the G502 X PLUS, G305 and G502 HERO, Gearbench writes nothing
       to the onboard profile until that is tested on the hardware. It talks to the
       keyboards, the mice and the G432 over their vendor HID++ 2.0
       interfaces, on a cable or through a LIGHTSPEED receiver, and to the
-      A50's base station over its own vendor HID interface, with no vendor
+      A50 Gen 4's base station over its own vendor HID interface, with no vendor
       software and nothing running as root. For each device it shows only what
       that device can do.
     </p>
     <p>The keyboards:</p>
     <ul>
-      <li>Per-key and zone lighting, with the six effects the firmware has</li>
-      <li>G1 to G5 on the G915 and G815, and F1 to F12 on the G915 TKL, bound to key combinations or macros, on the base layer and, from gearbench-ctl, the MR shift layer</li>
+      <li>Per-key and zone lighting, with the effects each keyboard's firmware has</li>
+      <li>G1 to G5 on the G915 and G815, and F1 to F12 on the G915 TKL and PRO X TKL LIGHTSPEED, bound to key combinations or macros, on the base layer and, from gearbench-ctl, the MR shift layer; G1 to G9 on the G915 X LIGHTSPEED, bound the same way on the base layer alone</li>
       <li>Three M profiles, switched from the window, by the M1 to M3 keys, or, on a keyboard without them, from the tray's menu</li>
       <li>Backlight brightness, snapped to a level the firmware keeps</li>
     </ul>
     <p>The mice, several at once:</p>
     <ul>
-      <li>DPI set live and remembered per model; the onboard DPI stage list and report rate rewritten on the G502 X PLUS and G305, and on the other mice the report rate set live in host mode</li>
+      <li>DPI set live and remembered per model; the onboard DPI stage list and report rate rewritten on the G502 X PLUS, G305 and G502 HERO, and on the other mice the report rate set live in host mode</li>
       <li>On each mouse but the G305, those of G4 to G9 it has, bound to key combinations, macros, DPI shift, DPI up, down or cycle, or the browser buttons, each model's on its own</li>
       <li>Lighting where the mouse has it, either its own or following the keyboard</li>
     </ul>
     <p>The headsets:</p>
     <ul>
-      <li>On the A50, microphone level, sidetone, noise gate and mic EQ</li>
-      <li>The A50's three EQ presets, edited band by band or imported from Astro Command Center's files</li>
-      <li>The A50's stream port mix, its base station's own settings and its battery</li>
-      <li>On the A50, changes apply at once; Save writes them to the base station's flash, and until then Revert to saved undoes all of them but Auto shut-off and which preset is active</li>
-      <li>The A50's Game and Chat as two outputs, and Gearbench Spatial, a 7.1 output for games on the A50 or the G432, rendered for headphones from measured heads</li>
-      <li>On the G432, sidetone, noise suppression for its microphone, and Logitech G432 Equalizer, an output whose presets are edited band by band or copied from the A50's</li>
+      <li>On the A50 Gen 4, microphone level, sidetone, noise gate and mic EQ</li>
+      <li>The A50 Gen 4's three EQ presets, edited band by band or imported from Astro Command Center's files</li>
+      <li>The A50 Gen 4's stream port mix, its base station's own settings and its battery</li>
+      <li>On the A50 Gen 4, changes apply at once; Save writes them to the base station's flash, and until then Revert to saved undoes all of them but Auto shut-off and which preset is active</li>
+      <li>The A50 Gen 4's and the A50 X's Game and Chat as two outputs, and Gearbench Spatial, a 7.1 output for games on the A50 Gen 4 and every other headset listed below, rendered for headphones from measured heads</li>
+      <li>On the G432, sidetone, noise suppression for its microphone, and Logitech G432 Equalizer, an output whose presets are edited band by band or copied from the A50 Gen 4's</li>
+      <li>On the G432's relatives, sidetone, noise suppression for the microphone and an equalizer, in the headset on the G633, G933 and G935 and on the computer on the others; the lights of the G633, G635, G733, G933 and G935; and on the wireless ones the battery and, on some, the time they power off after</li>
+      <li>On the A50 X, the sidetone, volume, Game and Voice balance, noise gate, auto sleep, tones, the base station's brightness and deep sleep, the stream mix and the headset's equalizers, and its battery</li>
+      <li>On the A50 Gen 5, the same less the deep sleep, read; nothing is changed until each change is tested</li>
+      <li>On the PRO X 2 LIGHTSPEED, through its receiver, the battery, sidetone, auto sleep, the microphone's noise reduction and the headset's equalizer, read; nothing is changed until each change is tested</li>
+      <li>On the G522 LIGHTSPEED, through its receiver or on its cable, and the G325 LIGHTSPEED, through its receiver, the battery, sidetone, auto sleep, eco mode and the headset's equalizer, and the G325's microphone noise reduction, read; nothing is changed until each change is tested</li>
     </ul>
     <p>
       Game profiles hold a lighting and binding set that loads itself while a
@@ -58,22 +77,32 @@
       Macros tab and replayed through a uinput virtual keyboard and mouse.
     </p>
     <p>
-      Lighting is volatile and the keyboard's onboard profile is never written.
+      Lighting is volatile, but for the brightness the G515 TKL and the G915 X
+      LIGHTSPEED keep through a power-off, as the G515 LIGHTSPEED TKL is taken
+      to and the G915 X, G915 X LIGHTSPEED TKL, G316 X, G316 X 98, G512 X 75
+      and G512 X 98 may, and the keyboard's onboard profile is never written.
       Each write to the mouse's onboard profile, from the window or
       gearbench-ctl, backs up every profile sector first and reads the written
-      sector back after.
+      sector back after. The A50 X keeps each setting written to it through a
+      power cycle, the G432's adapter keeps its sidetone through an unplug, and
+      the G432's relatives may keep theirs.
     </p>
   </description>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Keyboard: keys painted by click or drag, G keys and M profiles</caption>
+      <image>https://raw.githubusercontent.com/gearbench/gearbench/v1.2.0/docs/images/hero.png</image>
+    </screenshot>
+  </screenshots>
 
   <launchable type="desktop-id">io.github.gearbench.Gearbench.desktop</launchable>
   <provides>
     <binary>gearbench-ctl</binary>
     <!-- Every id the udev rules grant, so a software center can offer this
-         when one of them is plugged in. A cabled device, and the G915's own
-         receiver, show up on the USB bus under their own product id. A mouse
-         paired through its receiver is the receiver on the bus (046d:c547 for
-         the G502 X PLUS, 046d:c53f for the G305), and only the HID modalias
-         carries the mouse's own id. -->
+         when one of them is plugged in: usb: for a cabled device or a
+         receiver, hid: for a device the kernel gives a node of its own
+         behind its receiver, whose id only the HID modalias carries. -->
     <modalias>usb:v046DpC33E*</modalias>
     <modalias>usb:v046DpC541*</modalias>
     <modalias>usb:v046DpC095*</modalias>
@@ -102,6 +131,46 @@
     <modalias>usb:v046DpC091*</modalias>
     <modalias>hid:b0003g*v0000046Dp00004087*</modalias>
     <modalias>hid:b0003g*v0000046Dp000040B4*</modalias>
+    <modalias>usb:v046Dp0A9B*</modalias>
+    <modalias>usb:v046Dp0A6D*</modalias>
+    <modalias>usb:v046Dp0A66*</modalias>
+    <modalias>usb:v046Dp0AC4*</modalias>
+    <modalias>usb:v046Dp0A5C*</modalias>
+    <modalias>usb:v046Dp0A89*</modalias>
+    <modalias>usb:v046Dp0AB5*</modalias>
+    <modalias>usb:v046Dp0AFE*</modalias>
+    <modalias>usb:v046Dp0B1F*</modalias>
+    <modalias>usb:v046Dp0A5B*</modalias>
+    <modalias>usb:v046Dp0A87*</modalias>
+    <modalias>usb:v046Dp0ABA*</modalias>
+    <modalias>usb:v046Dp0B0B*</modalias>
+    <modalias>usb:v046Dp0B1C*</modalias>
+    <modalias>usb:v046Dp0AF7*</modalias>
+    <modalias>usb:v046Dp0B18*</modalias>
+    <modalias>usb:v046Dp0B19*</modalias>
+    <modalias>usb:v046Dp0B21*</modalias>
+    <modalias>usb:v046DpC09B*</modalias>
+    <modalias>hid:b0003g*v0000046Dp000040A9*</modalias>
+    <modalias>usb:v046DpC0A0*</modalias>
+    <modalias>hid:b0003g*v0000046Dp000040B8*</modalias>
+    <modalias>usb:v046DpC09F*</modalias>
+    <modalias>hid:b0003g*v0000046Dp000040B7*</modalias>
+    <modalias>usb:v046DpC0A8*</modalias>
+    <modalias>hid:b0003g*v0000046Dp000040BD*</modalias>
+    <modalias>usb:v046DpC092*</modalias>
+    <modalias>usb:v046DpC09D*</modalias>
+    <modalias>usb:v046DpC352*</modalias>
+    <modalias>hid:b0003g*v0000046Dp000040B0*</modalias>
+    <modalias>usb:v046DpC336*</modalias>
+    <modalias>usb:v046DpC359*</modalias>
+    <modalias>usb:v046DpC356*</modalias>
+    <modalias>usb:v046DpC357*</modalias>
+    <modalias>hid:b0003g*v0000046Dp000040B5*</modalias>
+    <modalias>hid:b0003g*v0000046Dp000040B6*</modalias>
+    <modalias>usb:v046DpC361*</modalias>
+    <modalias>usb:v046DpC36B*</modalias>
+    <modalias>usb:v046DpC35F*</modalias>
+    <modalias>usb:v046DpC360*</modalias>
   </provides>
 
   <categories>
@@ -128,18 +197,15 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
-    <release version="1.1.0" date="2026-10-21">
+    <release version="1.2.0" date="2026-10-28">
       <description>
-        <p>New devices: the G515 TKL keyboard, tested on the hardware;
-        the G502 HERO mouse, its DPI stages written to the mouse; the
-        Logitech G432 headset, with its sidetone, an equalizer, noise
-        suppression and spatial sound; and, as trials not yet checked
-        on the hardware, the G515 LIGHTSPEED TKL, G915 TKL and G815
-        keyboards and seven more mice. The A50 keeps up to 16 presets
-        of your own.</p>
-        <p>The app id and the spatial output are renamed: log out and
-        back in once, and change each game's launch option to
-        PULSE_SINK=gearbench-spatial %command%.</p>
+        <p>New devices tested on the hardware: the G915 X LIGHTSPEED
+        keyboard and the Astro A50 X and G933 headsets. More keyboards,
+        mice and headsets, the rest of the G432's family among them, are
+        built as trials not yet checked on the hardware.</p>
+        <p>Every keyboard plugged in is driven at once, one leading the
+        others' lighting, and each mouse's pointer moves at the DPI
+        Gearbench sets.</p>
       </description>
     </release>
   </releases>

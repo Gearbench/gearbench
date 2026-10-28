@@ -12,11 +12,19 @@ import socket
 import struct
 from pathlib import Path
 
-from ..config import runtime_home
+from ..json_text import NUMBER_TOO_LONG, TOO_DEEP
+from ..runtime_folder import OWN_FOLDER, runtime_home
+from ..wording import SERVICE_JOURNAL, service_command
 
 #: send_command's error for a connection closed with no reply.
 NO_ANSWER = ("the daemon closed the connection without answering, so it stopped or crashed; "
-             "`journalctl --user -u gearbench`, or the terminal it ran in, says why")
+             f"`{SERVICE_JOURNAL}`, or the terminal it ran in, says why")
+
+#: send_command's next step where no daemon listens, by whether it runs as root, as which the
+#: daemon never runs, so neither way to start one works there.
+NO_DAEMON_STEP = {
+    False: f"start it with `{service_command('start')}` or `gearbench-ctl daemon`",
+    True: "run the command as yourself, not as root: the daemon runs as your own account"}
 
 
 def socket_path() -> Path:
@@ -52,10 +60,7 @@ def use_invoking_users_runtime_dir() -> None:
 
     Taken from sudoers(5), pkexec(1) and run0(1); not checked on a run under any of them."""
     invoker = invoking_uid()
-    if invoker is None:
-        return
-    kept = runtime_home()
-    if kept is None or kept == Path(f"/run/user/{os.getuid()}"):
+    if invoker is not None and runtime_home() in (None, Path(f"/run/user/{os.getuid()}")):
         os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{invoker}"
 
 
@@ -79,31 +84,43 @@ def peer_uid(conn: socket.socket) -> int:
     return uid
 
 
+def _way_to_your_daemon(invoker: int | None) -> str:
+    """The next step of send_command's refusal of another account's listener. Root with no
+    invoking user named has no daemon of its own to point at, since the daemon never runs as
+    root."""
+    if invoker is None and os.geteuid() == 0:
+        return "run the command with sudo, run0 or pkexec from the account whose daemon it is"
+    return OWN_FOLDER.format(uid=os.geteuid() if invoker is None else invoker)
+
+
 def send_command(request: dict, timeout: float = 3.0) -> dict:
     """Send one request to the running daemon and return its reply, for the CLI and the
     window. Raises ConnectionError when no daemon is listening, or when it closes the
     connection without answering, PermissionError when another account's process listens
-    there, and json.JSONDecodeError for a reply that is not a UTF-8 JSON object or that
-    json.loads cannot read for its depth or a number's digits."""
+    there (as root under sudo, run0 or pkexec, any account's but the invoking user's, root's
+    own included), and json.JSONDecodeError for a reply that is not a UTF-8 JSON object or
+    that json.loads cannot read for its depth or a number's digits."""
     path = socket_path()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
         conn.settimeout(timeout)
         try:
             conn.connect(str(path))
         except (FileNotFoundError, ConnectionRefusedError):
-            raise ConnectionError(
-                f"no Gearbench daemon listening on {path}. "
-                f"Start it with `systemctl --user start gearbench` or `gearbench-ctl daemon`."
-            ) from None
+            raise ConnectionError(f"{NOT_RUNNING}: nothing listens on {path}; "
+                                  f"{NO_DAEMON_STEP[os.geteuid() == 0]}") from None
         peer = peer_uid(conn)
-        # Root is let through, for a probe under sudo that looks for the user's daemon.
-        if os.geteuid() not in (0, peer):
+        # Root under sudo, run0 or pkexec reaches the invoking user's listener alone, since
+        # it looks for that user's daemon. Root's own is refused there too: the daemon never
+        # runs as root, and that user's programs can put a link to any socket root may open
+        # where root looks. A third account's is refused, since a folder sudo kept may be one
+        # another account can listen in.
+        invoker = invoking_uid()
+        if peer != (os.geteuid() if invoker is None else invoker):
             # A PermissionError, as connect()'s to another account's socket of mode 0600: a
             # ConnectionError would read as no daemon running.
             raise PermissionError(
                 f"another account (uid {peer}) listens on the socket, not your Gearbench daemon, "
-                f"so nothing was sent. Set XDG_RUNTIME_DIR to a folder of your own, as "
-                f"/run/user/{os.geteuid()} is")
+                f"so nothing was sent; {_way_to_your_daemon(invoker)}")
         conn.sendall(json.dumps(request).encode())
         conn.shutdown(socket.SHUT_WR)
         data = b"".join(iter(lambda: conn.recv(65536), b""))
@@ -118,15 +135,20 @@ def send_command(request: dict, timeout: float = 3.0) -> dict:
         # stack's and int()'s, past sys.get_int_max_str_digits (4300 digits by default).
         raise exc if isinstance(exc, json.JSONDecodeError) else UnreadableReply(
             f"the reply is not UTF-8 ({exc.reason})" if isinstance(exc, UnicodeDecodeError)
-            else "the reply is nested too deeply to read" if isinstance(exc, RecursionError)
-            else "the reply holds a number too long to read", "", 0) from None
+            else f"the reply is {TOO_DEEP}" if isinstance(exc, RecursionError)
+            else f"the reply {NUMBER_TOO_LONG}", "", 0) from None
     if not isinstance(reply, dict):
         raise UnreadableReply("the reply is not a JSON object", "", 0)
     return reply
 
 
-#: What a failed round trip means (`failure`). Each front end puts its own words to them.
+#: What a failed round trip means (`failure`). Each front end puts its own words to them,
+#: with these three in common: a daemon it could not reach, a reply it could not read, and
+#: no daemon running (DOWN).
 DOWN, BUSY, UNREAD, UNKNOWN = "down", "busy", "unread", "unknown"
+NOT_REACHED = "the daemon could not be reached"
+REPLY_UNREAD = "the daemon's reply could not be read"
+NOT_RUNNING = "the daemon is not running"
 
 
 def failure(error: BaseException | None) -> str:

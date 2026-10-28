@@ -1,19 +1,17 @@
 """gearbench-spatial.service's process: Gearbench Spatial's chain, kept on the headset it plays
 to, `python3 -m gearbench.spatial_unit run PATH`.
 
-It follows PipeWire with `pw-dump --monitor` and, at each print, takes the target: the
-headset spatial.pick takes among those in PipeWire, by the one picked in spatial.json, and
-the node it plays to, the A50's Game output, or for the G432 Logitech G432 Equalizer's sink
-while that is in PipeWire, else the G432's own output. When the target changes it stops the
+It follows PipeWire with `pw-dump --monitor` and, at each print, takes the target, the
+headset and the node the chain plays to (`target`). When the target changes it stops the
 chain, renders the conf at PATH for the new one and starts it, `pipewire -c PATH`; with no
 headset in PipeWire it runs no chain, so the sink is gone. The headset picked is read from
 spatial.json once, at the start, and a change of it or of the head restarts the unit
 (spatial.set_headset, set_head); each render reads the head and the room then, so a room
 set live since is kept.
 The chain ending on its own, or pw-dump's end, ends the process with 1, and systemd starts
-it again (Restart=on-failure). Why no chain runs for a headset that is there goes to the
-unit's StatusText as well (`status`), which spatial.summary shows. Standard library only,
-never run in the daemon; the programs go through `main`'s `spawn`.
+it again (Restart=on-failure) up to the unit's start limit. Why no chain runs for a headset
+that is there goes to the unit's StatusText as well (`status`), which spatial.summary shows.
+Standard library only, never run in the daemon; the programs go through `main`'s `spawn`.
 """
 
 from __future__ import annotations
@@ -26,7 +24,8 @@ from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import IO, cast
 
-from . import g432_eq, spatial, wording
+from . import pipewire_client, spatial, wording
+from .g432_eq_words import WORDS as EQ_WORDS
 
 NAME = spatial.UNIT.removesuffix(".service")
 #: How long a chain just started may take to fail, in seconds, before it counts as running:
@@ -39,12 +38,12 @@ STOP_WAIT = 5.0
 PLAYS = f"{NAME}: plays to {{}}"
 NO_HEADSET = (f"{NAME}: no headset's output in PipeWire, so no chain runs until "
               f"{spatial.ANY_OUTPUT} is there")
-UNREAD = spatial.UNREAD.format(NAME)
+UNREAD = pipewire_client.UNREAD.format(NAME)
 #: Why no chain runs for a target whose conf was not written, by the target, then the cause:
 #: the unit's StatusText, and after the unit's name its journal line (NOT_RENDERED).
-NOT_WRITTEN = "the chain was not written for {} ({}); it waits for a change"
+NOT_WRITTEN = "the chain was not written for {} ({}); switch it off and on again"
 NOT_RENDERED = f"{NAME}: {NOT_WRITTEN}"
-CHAIN_ENDED = f"{NAME}: the chain ended ({{}}), so the unit starts again"
+CHAIN_ENDED = f"{NAME}: the chain ended ({{}})"
 MONITOR_ENDED = f"{NAME}: pw-dump --monitor ended ({{}})"
 NOT_NOTIFIED = f"{NAME}: its status was not sent to systemd ({{}})"
 #: Where systemd takes a service's notices (sd_notify(3)): set only with NotifyAccess=, which
@@ -53,21 +52,30 @@ NOT_NOTIFIED = f"{NAME}: its status was not sent to systemd ({{}})"
 NOTIFY_SOCKET = "NOTIFY_SOCKET"
 
 
+def made_in(objects: Sequence[object], sink: str, unit: str) -> bool:
+    """Whether pw-dump's `objects` hold an Audio/Sink named `sink` made by a client whose
+    process runs in systemd's `unit` (pipewire_client.unit_of_process), by the pid PipeWire took
+    from the client's socket (pipewire_client.node_pids): any client can name a sink so, a
+    sandboxed app and pipewire-pulse for a pulse client among them, and a sink of no client
+    is no unit's."""
+    return any(props.get("node.name") == sink and props.get("media.class") == "Audio/Sink"
+               and pipewire_client.unit_of_process(pid) == unit
+               for _node, _info, props, pid in pipewire_client.node_pids(objects))
+
+
 def target(objects: Sequence[object], picked: str | None) -> spatial.Target | None:
     """Where the chain plays for pw-dump's `objects` and the headset `picked`: spatial.pick's
-    headset, at its output, or for the G432 at Logitech G432 Equalizer's sink while that is
-    an Audio/Sink in `objects`, since spatial sound goes through the equalizer while it runs
-    (Claude Code's call of 2026-10-18, pending the owner's confirmation); None for no
-    headset."""
+    headset, at its output, or for the G432, or another of its family whose equalizer
+    g432_eq runs, at that equalizer's sink while `objects` hold the one its unit's process
+    made (made_in), since spatial sound goes through the equalizer while it runs (Claude
+    Code's call of 2026-10-18, pending the owner's confirmation); None for no headset."""
     chosen = spatial.pick(spatial.present(objects), picked)
     if chosen is None:
         return None
     headset, output = chosen
-    if headset is spatial.G432 and g432_eq.SINK in {
-            props.get("node.name") for _node, _info, props in spatial.of_type(objects, "Node")
-            if props.get("media.class") == "Audio/Sink"}:
-        return spatial.Target(headset, g432_eq.SINK,
-                              f"the Logitech G432, through {g432_eq.DESCRIPTION}")
+    eq = EQ_WORDS.get(headset.key)
+    if eq is not None and made_in(objects, eq.sink, eq.unit):
+        return spatial.Target(headset, eq.sink, f"the {headset.name}, through {eq.description}")
     return spatial.Target(headset, output, headset.plays_on)
 
 
@@ -137,11 +145,10 @@ class Chain:
             say(NO_HEADSET)
             return None
         try:
-            spatial.write_conf(self.conf, spatial.load_choices(), aimed)
-        except (spatial.SpatialError, OSError) as err:
+            spatial.replace_conf(self.conf, spatial.render(spatial.load_choices(), aimed))
+        except (pipewire_client.StepError, OSError) as err:
             # Kept as aimed: a target that cannot be written is tried again only once
-            # it changes. An OSError's file is the template, a WAV or the conf's temporary;
-            # one that names no file came from writing the conf.
+            # it changes. An OSError that names no file came from writing the conf.
             where = f"{err.filename or self.conf}: " if isinstance(err, OSError) else ""
             cause = f"{where}{wording.reason(err)}"
             say(NOT_RENDERED.format(aimed.words, cause))
@@ -150,9 +157,9 @@ class Chain:
         try:
             # Exec'd as this process's own child, with no shell between: spatial.read_state
             # knows the chain's nodes as those made by a child of the unit's MainPID.
-            self.process = self.spawn([spatial.PIPEWIRE, "-c", str(self.conf)])
+            self.process = self.spawn([pipewire_client.PIPEWIRE, "-c", str(self.conf)])
         except OSError as err:
-            return f"pipewire did not run: {wording.reason(err)}"
+            return str(pipewire_client.not_run("pipewire", err))
         try:
             return wording.ended("pipewire", self.process.wait(START_WAIT))
         except subprocess.TimeoutExpired:
@@ -164,17 +171,17 @@ def follow(lines: Iterable[str], chain: Chain) -> str | None:
     """Keep `chain` on the target of each print of pw-dump --monitor's `lines`: how the
     chain ended once it ends, or None once the lines end."""
     objects: dict[int, dict] = {}
-    for found in spatial.printed(lines):
+    for found in pipewire_client.printed(lines):
         if (ended := chain.ended()) is not None:
             return ended
         if found is None:
-            say(UNREAD.format(spatial.NOT_A_PRINT))
+            say(UNREAD.format(pipewire_client.NOT_A_PRINT))
             continue
-        spatial.merge(objects, found)
+        pipewire_client.merge(objects, found)
         try:
-            aimed = spatial.shaped(lambda known: target(known, chain.picked),
-                                   list(objects.values()))
-        except spatial.SpatialError as err:
+            aimed = pipewire_client.shaped(lambda known: target(known, chain.picked),
+                                           list(objects.values()))
+        except pipewire_client.StepError as err:
             say(UNREAD.format(err))
             continue
         if (ended := chain.aim(aimed)) is not None:
@@ -193,19 +200,18 @@ def main(argv: Sequence[str] | None = None,
         return 2
     chain = Chain(Path(args[1]), spatial.load_choices().headset, spawn)
     try:
-        with spawn(spatial.MONITOR, stdout=subprocess.PIPE, encoding="utf-8",
+        with spawn(pipewire_client.MONITOR, stdout=subprocess.PIPE, encoding="utf-8",
                    errors="replace") as monitor:
             ended = follow(cast("IO[str]", monitor.stdout), chain)
             if chain.process is not None:
                 stop(chain.process)
             if ended is None:
-                monitor.wait()
-                say(MONITOR_ENDED.format(wording.ended("pw-dump", monitor.returncode)))
+                say(MONITOR_ENDED.format(wording.ended("pw-dump", monitor.wait())))
             else:
                 say(CHAIN_ENDED.format(ended))
                 monitor.terminate()
     except OSError as err:
-        say(MONITOR_ENDED.format(f"pw-dump did not run: {wording.reason(err)}"))
+        say(MONITOR_ENDED.format(pipewire_client.not_run("pw-dump", err)))
     return 1
 
 if __name__ == "__main__":

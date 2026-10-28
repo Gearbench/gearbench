@@ -1,6 +1,7 @@
 """The drawn keyboard: a Gtk.Fixed of one button per key of a model's `Board`, scaled to the
 width a DrawingArea under it reports. Each key with a light carries a CSS class named after the
-color it shows.
+color it shows, but under an animation, whose colors the Gtk.Fixed draws under its keys at each
+frame (Animator).
 """
 
 from __future__ import annotations
@@ -8,14 +9,27 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import cast
 
-from gi.repository import Gdk, Gtk
+from gi.repository import Gdk, GLib, GObject, Graphene, Gsk, Gtk
 
 from ..config import format_color, macro_name
-from ..keycodes import ZONE_NAMES
+from ..keycodes import ZONE_NAMES, by_zone
 from ..layout import Board, Key
 from ..uinput import KEY_LABELS, shown_spec
-from .style import KEY_PREFIX, key_class
+from .animation import (
+    RIPPLE_LIMIT,
+    Animation,
+    Ripple,
+    frame,
+    live,
+    places,
+    ripple_on,
+    still_frame,
+    typed_zone,
+)
+from .color import RIGHT_CLICK_KEYS, to_rgba
+from .style import KEY_PREFIX, KEY_RADIUS, key_class, name_button, weakly
 
 #: Bounds of the pixels per key unit, which relayout picks to fit the window.
 UNIT_MIN, UNIT_MAX = 13, 34
@@ -27,6 +41,15 @@ GAP = 2
 OTHER_BUTTON = {Gdk.BUTTON_PRIMARY: Gdk.ModifierType.BUTTON3_MASK,
                 Gdk.BUTTON_SECONDARY: Gdk.ModifierType.BUTTON1_MASK}
 
+#: The class of a lit key while the board shows an animation: no fill of its own over the
+#: colors drawn under it, and a label legible on any of them (style.BASE_SHEET).
+ANIMATED = "g915-animated"
+#: How long an animation waits after a frame before it asks the frame clock for the next, in
+#: ms: 30 frames a second at most, which a likeness needs no more than. Asked for one at each
+#: frame, a tick callback keeps the clock running at the display's rate, and on broadway, which
+#: answers at once, it ran 1300 frames a second, 74% of a core (measured 2026-10-24).
+FRAME_GAP_MS = 1000 // 30
+
 #: The smallest key unit that shows a G key's binding under its name in map mode: at 24 px a
 #: G key is 26 px wide, room for three or four characters at a 7 px font. Below it the
 #: binding is in the tooltip only.
@@ -37,8 +60,8 @@ RESERVED_TIPS = {
     "M1": "switches to M profile 1",
     "M2": "switches to M profile 2",
     "M3": "switches to M profile 3",
-    "MR": "hold it and G1 to G5 send their MR bindings (gearbench-ctl bind --shift)",
-    "Game": "Game Mode: turns off Super and Menu until pressed again",
+    "MR": "hold it and G1 to G5 send their MR bindings (`gearbench-ctl bind --mr`)",
+    "Game": "Game Mode: turns off Super until pressed again",
     "BT": "switches the keyboard to Bluetooth; the keyboard does this itself",
     "Host": "switches which connection the keyboard uses; the keyboard does this itself",
 }
@@ -85,16 +108,15 @@ def neighbor(key: Key, direction: str, keys: tuple[Key, ...]) -> Key | None:
 
     (start, end), (low, high) = spans(key)
     ranked = []
-    for index, other in enumerate(keys):
+    for other in keys:
         (o_start, o_end), (o_low, o_high) = spans(other)
         shared = min(high, o_high) - max(low, o_low)
         gap = o_start - end if ahead else start - o_end
         if shared <= 1e-6 or gap < -1e-6:
             continue
-        # `index` keeps min() from comparing two Keys, which have no order.
-        ranked.append((round(gap, 3), -round(shared, 3),
-                       abs((o_low + o_high) - (low + high)), index, other))
-    return min(ranked)[-1] if ranked else None
+        ranked.append(((round(gap, 3), -round(shared, 3),
+                        abs((o_low + o_high) - (low + high))), other))
+    return min(ranked, key=lambda pair: pair[0])[1] if ranked else None
 
 
 def key_rect(key: Key, unit: float, board: Board) -> tuple[float, float, int, int]:
@@ -119,11 +141,16 @@ def binding_label(label: str, bound: str | None, unit: float) -> str:
     return f"{label}\n{shown_binding(bound)}"
 
 
+#: What a key says it cannot be: bound, as the tooltip's "click to bind it", the daemon and
+#: the CLI's `bind` say it.
+NOT_BINDABLE = "cannot be bound"
+
+
 def bindable_span(board: Board) -> str:
-    """The bindable keys of `board`, first to last, as a toast names them: "G1-G5", "F1-F12"
-    on the G915 TKL."""
-    names = [key.label for key in board.keys if key.bindable]
-    return f"{names[0]}-{names[-1]}"
+    """The bindable keys of `board`, first to last by number, as a toast names them: "G1 to
+    G5", "F1 to F12" on the G915 TKL, "G1 to G9" on the G915 X, whose G6 to G9 stand above
+    G1."""
+    return f"{board.bindable_keys[0].label} to {board.bindable_keys[-1].label}"
 
 
 def key_tooltip(key: Key, bound: str | None = None) -> str:
@@ -132,11 +159,11 @@ def key_tooltip(key: Key, bound: str | None = None) -> str:
     (show_colors).
     """
     if key.reserved:
-        return f"{key.label} · {RESERVED_TIPS[key.label]}; not remappable"
+        return f"{key.label} · {RESERVED_TIPS[key.label]}; {NOT_BINDABLE}"
     bits = [key.label]
     if key.bindable and bound:
         bits.append(shown_binding(bound))
-    bits.append("click to bind it" if key.bindable else "not remappable")
+    bits.append("click to bind it" if key.bindable else NOT_BINDABLE)
     return " · ".join(bits)
 
 
@@ -219,6 +246,16 @@ class _Keys(Gtk.Fixed):
     #: The key Tab enters on: set once the keys are built, then the last
     #: key to have the focus, by the arrows, Tab or a click.
     last: Gtk.Widget
+    #: What an animation draws under the keys: each lit key's box, its bounds and its color
+    #: (KeyBoard.paint). Empty while the board shows none.
+    painted: tuple[tuple[Gsk.RoundedRect, Graphene.Rect, Gdk.RGBA], ...] = ()
+
+    def do_snapshot(self, snapshot: Gtk.Snapshot) -> None:
+        for box, bounds, color in self.painted:
+            snapshot.push_rounded_clip(box)
+            snapshot.append_color(color, bounds)
+            snapshot.pop()
+        Gtk.Fixed.do_snapshot(self, snapshot)
 
     def do_focus(self, direction: Gtk.DirectionType) -> bool:
         if direction not in (Gtk.DirectionType.TAB_FORWARD, Gtk.DirectionType.TAB_BACKWARD):
@@ -234,6 +271,111 @@ class _Keys(Gtk.Fixed):
             self.last = child
 
 
+def out_of_sight(window: Gtk.Window) -> bool:
+    """Whether nothing of `window`, a mapped one, is seen: suspended, which Mutter sends 3 s
+    after a window is hidden and is on Wayland its only word of one minimized (Polls.on_presence),
+    or minimized, which GDK takes from an X11 window manager at once (inferred, not run)."""
+    return window.is_suspended() or bool(
+        cast(Gdk.Toplevel, window.get_surface()).get_state() & Gdk.ToplevelState.MINIMIZED)
+
+
+class Animator:
+    """An animation on `widget`'s frame clock. It runs while the widget is mapped, its window is
+    on screen (out_of_sight) and the desktop runs animations (Gtk.Settings:gtk-enable-animations,
+    off under GNOME's reduced motion): at a frame of the clock (a tick callback) it draws the
+    frame `seconds` into the animation (`draw(animation, seconds)`), then waits FRAME_GAP_MS
+    before it asks the clock for the next, so the clock idles between. With animations off it
+    draws the still frame once (`draw(animation, None)`). It stops as the widget is unmapped,
+    its tab hidden or its window closed, and as its window is minimized or suspended."""
+
+    def __init__(self, widget: Gtk.Widget,
+                 draw: Callable[[Animation, float | None], None]) -> None:
+        self._widget = widget
+        self._draw = draw
+        #: What it shows, or None, and whether it runs.
+        self.animation: Animation | None = None
+        self.running = False
+        #: While it runs, the tick callback waiting for the next frame, or the timeout waiting
+        #: to ask for it.
+        self._tick: int | None = None
+        self._wait: int | None = None
+        #: When the animation shown began, in GLib's monotonic microseconds, the frame clock's.
+        self._began = 0
+        #: Each handler it has on the settings, the window and its surface while the widget is
+        #: mapped, with what it is on.
+        self._watched: list[tuple[GObject.Object, int]] = []
+        widget.connect("map", weakly(self._on_map))
+        widget.connect("unmap", weakly(self._on_unmap))
+
+    def show(self, animation: Animation | None) -> None:
+        """Show `animation`, or none. One of another effect starts over; a change of its color,
+        speed or direction runs on from where it was."""
+        if animation is None or self.animation is None or animation.effect != self.animation.effect:
+            self._began = GLib.get_monotonic_time()
+        self.animation = animation
+        self.update()
+
+    def seconds(self, now: int | None = None) -> float:
+        """How far into the animation it is at `now`, GLib's monotonic microseconds, or now."""
+        return ((GLib.get_monotonic_time() if now is None else now) - self._began) / 1_000_000
+
+    def update(self, *_args: object) -> None:
+        """Run or stop as the animation, the widget, its window and the settings now say, and
+        draw what shows now: the frame, or the still frame with animations off."""
+        motion = bool(self._widget.get_settings().get_property("gtk-enable-animations"))
+        running = (self.animation is not None and motion and self._widget.get_mapped()
+                   and not out_of_sight(self._window()))
+        if running and not self.running:
+            self.running = True
+            self._ask_frame()
+        elif not running and self.running:
+            self.running = False
+            if self._tick is not None:
+                self._widget.remove_tick_callback(self._tick)
+            if self._wait is not None:
+                GLib.source_remove(self._wait)
+            self._tick = self._wait = None
+        if self.animation is not None:
+            self._draw(self.animation, self.seconds() if motion else None)
+
+    def _ask_frame(self) -> bool:
+        """Draw at the clock's next frame (_on_tick)."""
+        self._wait = None
+        self._tick = self._widget.add_tick_callback(weakly(self._on_tick))
+        return GLib.SOURCE_REMOVE
+
+    def _on_tick(self, _widget: Gtk.Widget, clock: Gdk.FrameClock) -> bool:
+        """A frame of the clock: the animation drawn, and the next asked for FRAME_GAP_MS on."""
+        self._tick = None
+        # It runs only with an animation (update), and a stop takes this callback away.
+        self._draw(cast(Animation, self.animation), self.seconds(clock.get_frame_time()))
+        self._wait = GLib.timeout_add(FRAME_GAP_MS, weakly(self._ask_frame))
+        return GLib.SOURCE_REMOVE
+
+    def _on_map(self, _widget: Gtk.Widget) -> None:
+        """Watch what stops the tick while the widget is mapped: the desktop's animations, and
+        its window's suspended and minimized states."""
+        self._watch(self._widget.get_settings(), "notify::gtk-enable-animations")
+        window = self._window()
+        self._watch(window, "notify::suspended")
+        self._watch(cast(Gdk.Surface, window.get_surface()), "notify::state")
+        self.update()
+
+    def _window(self) -> Gtk.Window:
+        """The window of the widget, which is mapped: only a window maps what it holds, and it
+        is realized, with its surface, before it maps."""
+        return cast(Gtk.Window, self._widget.get_root())
+
+    def _watch(self, source: GObject.Object, signal: str) -> None:
+        self._watched.append((source, source.connect(signal, weakly(self.update))))
+
+    def _on_unmap(self, _widget: Gtk.Widget) -> None:
+        for source, handler in self._watched:
+            source.disconnect(handler)
+        self._watched = []
+        self.update()
+
+
 class KeyBoard:
     """The board as a widget, plus what each key currently shows.
 
@@ -243,23 +385,25 @@ class KeyBoard:
 
     A press that moves onto a second key is a drag (the owner's decision of 2026-09-24):
     `on_stroke_start(clear)` says whether it may paint, `on_stroke_key(key, clear)` gets each
-    lit key it reaches once, the first included, and `on_stroke_end(clear)` comes at the
+    lit key it reaches once, the first included, and `on_stroke_end()` comes at the
     release, or at the other button's press, which ends it. `clear` is True for the right
     button. Without them a drag does nothing.
 
     From the keyboard the board is one Tab stop (`_Keys`), and the arrows move the focus
-    (`neighbor`); Space and Enter are a click. Delete, BackSpace, Shift+F10 and Menu are the
-    right click, as Shift+F10 and Menu are on GTK's own color plane. Shift with an arrow is a
-    drag through the same three handlers, released at `end_key_stroke`. `description` is what
-    the board says about its keys to a screen reader. `board` is the model's, whose keys it
-    draws.
+    (`neighbor`); Space and Enter are a click, and RIGHT_CLICK_KEYS the right click. Shift
+    with an arrow is a drag through the same three handlers, released at `end_key_stroke`.
+    `description` is what the board says about its keys to a screen reader, after what an
+    animation says it shows (show_animation). `board` is the model's, whose keys it draws.
+
+    Its handlers on its own widgets hold it weakly (style.weakly), so a board the page
+    replaces with another keyboard's is freed; the page keeps the one it shows.
     """
 
     def __init__(self, on_click: Callable[[Key], None], on_clear: Callable[[Key], None],
                  on_resize: Callable[[], None], *,
                  on_stroke_start: Callable[[bool], bool] = lambda _clear: False,
                  on_stroke_key: Callable[[Key, bool], None] = lambda _key, _clear: None,
-                 on_stroke_end: Callable[[bool], None] = lambda _clear: None,
+                 on_stroke_end: Callable[[], None] = lambda: None,
                  description: str = "", board: Board) -> None:
         self.board = board
         self._navigable = navigable(board)
@@ -283,6 +427,19 @@ class KeyBoard:
         self.fixed.update_property(
             [Gtk.AccessibleProperty.LABEL, Gtk.AccessibleProperty.DESCRIPTION],
             ["Keyboard", description])
+        self._help = description
+        #: What the board says the animation it shows is, before its help, or "".
+        self._said = ""
+        #: The color each lit key showed in the last frame drawn, by zone, and the ripples
+        #: spreading.
+        self.drawn: dict[int, int] = {}
+        self.ripples: list[Ripple] = []
+        #: The keys typed in the window that are still down, by evdev code (typed).
+        self._held: set[int] = set()
+        #: Each lit key's zone, box and bounds at the unit in `_boxes_unit`, for paint.
+        self._boxes: list[tuple[int, Gsk.RoundedRect, Graphene.Rect]] = []
+        self._boxes_unit = 0.0
+        self.animator = Animator(self.fixed, self._draw)
         self.keys: dict[Key, Gtk.Button] = {}
         self._key_of: dict[Gtk.Widget, Key] = {}
         self._build_keys(on_click)
@@ -298,11 +455,8 @@ class KeyBoard:
             # label itself, the ellipsis is undone by the next set_label.
             button = Gtk.Button(label=key.label, css_classes=["g915-key"], can_shrink=True)
             if (name := key_name(key, self.board)) != key.label:
-                # A button made with a label is named by it, through a relation GTK takes
-                # before LABEL: without the reset both Shift keys are "Shift". set_label
-                # keeps the label child it finds, and adds no relation back.
-                button.reset_relation(Gtk.AccessibleRelation.LABELLED_BY)
-                button.update_property([Gtk.AccessibleProperty.LABEL], [name])
+                # Named by the key, where the label alone would call both Shift keys "Shift".
+                name_button(button, name)
             if key.reserved:
                 button.set_sensitive(False)
                 # libadwaita's dim treatment, not an opacity set here: high contrast cannot
@@ -325,9 +479,9 @@ class KeyBoard:
         for number in (Gdk.BUTTON_PRIMARY, Gdk.BUTTON_SECONDARY):
             drag = Gtk.GestureDrag(button=number,
                                    propagation_phase=Gtk.PropagationPhase.CAPTURE)
-            drag.connect("drag-begin", self._on_drag_begin)
-            drag.connect("drag-update", self._on_drag_update)
-            drag.connect("drag-end", self._on_drag_end)
+            drag.connect("drag-begin", weakly(self._on_drag_begin))
+            drag.connect("drag-update", weakly(self._on_drag_update))
+            drag.connect("drag-end", weakly(self._on_drag_end))
             self.fixed.add_controller(drag)
 
     def _build_shortcuts(self) -> None:
@@ -336,33 +490,40 @@ class KeyBoard:
         # Enter, and the arrows would go on to the list box around the board, whose Up and
         # Down leave it.
         shortcuts = Gtk.ShortcutController(name="board-keys")
-        arrows = (("Left", "left"), ("Right", "right"), ("Up", "up"), ("Down", "down"))
-        for trigger, action in (
-            *((f"{name}|KP_{name}", lambda d=d: self.step(d)) for name, d in arrows),
-            *((f"<Shift>{name}", lambda d=d: self.step(d, paint=True)) for name, d in arrows),
-            # Shift+F10 and Menu, the context menu keys: here, as on GTK's
-            # own color plane, whatever a right click does.
-            ("Delete|KP_Delete|BackSpace|<Shift>F10|Menu", self.clear_focused),
-        ):
-            shortcuts.add_shortcut(Gtk.Shortcut.new(
-                Gtk.ShortcutTrigger.parse_string(trigger),
-                Gtk.CallbackAction.new(lambda _w, _a, act=action: act())))
+        for trigger, paint in (("{0}|KP_{0}", False), ("<Shift>{0}", True)):
+            for name in ("Left", "Right", "Up", "Down"):
+                shortcuts.add_shortcut(Gtk.Shortcut.new(
+                    Gtk.ShortcutTrigger.parse_string(trigger.format(name)),
+                    Gtk.CallbackAction.new(weakly(self._on_arrow), name.lower(), paint)))
+        shortcuts.add_shortcut(Gtk.Shortcut.new(
+            Gtk.ShortcutTrigger.parse_string(RIGHT_CLICK_KEYS),
+            Gtk.CallbackAction.new(weakly(self._on_clear_key))))
         self.fixed.add_controller(shortcuts)
         released = Gtk.EventControllerKey()
-        released.connect("key-released", self._on_key_released)
+        released.connect("key-released", weakly(self._on_key_released))
         self.fixed.add_controller(released)
         left = Gtk.EventControllerFocus()
-        left.connect("leave", lambda _c: self.end_key_stroke())
+        left.connect("leave", weakly(self._on_focus_leave))
         self.fixed.add_controller(left)
+
+    def _on_arrow(self, _widget: Gtk.Widget, _args: object, direction: str, paint: bool) -> bool:
+        return self.step(direction, paint=paint)
+
+    def _on_clear_key(self, _widget: Gtk.Widget, _args: object) -> bool:
+        return self.clear_focused()
+
+    def _on_focus_leave(self, _controller: Gtk.EventControllerFocus) -> None:
+        self.end_key_stroke()
 
     def _build_probe(self) -> None:
         """The size probe, and the overlay that puts the keys over it."""
-        # A DrawingArea with no draw func, as a size probe: its "resize" gives the board its
-        # width, and its measure the height the keys take at that width.
         self._probe = _Probe(self.board)
-        self._probe.connect("resize", lambda _a, w, _h: self.relayout(w))
+        self._probe.connect("resize", weakly(self._on_probe_resize))
         self.widget = Gtk.Overlay(child=self._probe)
         self.widget.add_overlay(self.fixed)
+
+    def _on_probe_resize(self, _probe: _Probe, width: int, _height: int) -> None:
+        self.relayout(width)
 
     def place(self) -> None:
         """Lay the keys out at full size before any resize arrives: an Overlay child with no
@@ -382,13 +543,16 @@ class KeyBoard:
             left, top, width, height = key_rect(key, unit, self.board)
             button.set_size_request(width, height)
             self.fixed.move(button, left, top)
+        if self.animator.animation is not None:
+            self.paint()                    # the colors under the keys where they are now
         self._on_resize()
 
     def show_bindings(self, bindings: dict[str, str | None]) -> None:
         """Map mode: the bindable keys lit, everything else dimmed."""
+        self._end_animation()
         for key, button in self.keys.items():
             self._strip(button)
-            bound = bindings.get(key.label)
+            bound = bindings.get(key.binds_as)
             button.set_tooltip_text(key_tooltip(key, bound=bound))
             # The color description show_colors wrote would outrank the tooltip,
             # which GTK uses as the description only when none is set.
@@ -402,7 +566,10 @@ class KeyBoard:
                 button.add_css_class("g915-dim")
 
     def show_colors(self, per_key: dict[str, int], base: int) -> None:
-        """Color mode: each key's own color, or `base` where it has none."""
+        """Color mode: each key's own color, or `base` where it has none, or on a board lit by
+        areas its area's (Board.shown_colors)."""
+        shown = self.board.shown_colors(by_zone(per_key), base)
+        self._end_animation()
         for key, button in self.keys.items():
             self._strip(button)
             # No tooltip in color mode, the owner's decision of 2026-09-25.
@@ -410,16 +577,115 @@ class KeyBoard:
             if key.reserved:
                 continue
             button.set_label(key.label)
-            # dict.get is typed for the key's type alone; a key with no light misses in both.
-            self._show(button,
-                       per_key.get(ZONE_NAMES.get(key.zone), base))  # type: ignore[arg-type]
+            # dict.get is typed for the key's type alone; a key with no light misses.
+            self._show(button, shown.get(key.zone, base))  # type: ignore[arg-type]
 
     def show_key(self, key: Key, color: int) -> None:
-        """One key in `color`, the rest left as they are: a drag repaints
-        the keys it reaches, not the board."""
-        button = self.keys[key]
-        self._strip(button)
-        self._show(button, color)
+        """The keys a paint of `key` colors in `color`, `key` or on a board lit by areas its
+        whole area (Board.painted_with), the rest left as they are: a drag repaints the keys
+        it reaches, not the board. `key` has a light."""
+        reached = self.board.painted_with(key.zone)  # type: ignore[arg-type]
+        for other, button in self.keys.items():
+            if other.zone in reached:
+                self._strip(button)
+                self._show(button, color)
+
+    def show_animation(self, animation: Animation, said: str) -> None:
+        """Animation mode: `animation` drawn under the keys (Animator), each lit key with no
+        fill of its own and no color as its description, since its color moves, and `said`, what
+        the board shows, before its help as its description."""
+        if self.animator.animation is None:
+            for key, button in self.keys.items():
+                self._strip(button)
+                button.set_tooltip_text(None)
+                if key.reserved:
+                    continue
+                button.set_label(key.label)
+                button.add_css_class(ANIMATED)
+                button.reset_property(Gtk.AccessibleProperty.DESCRIPTION)
+        elif self.animator.animation.effect != animation.effect:
+            # Another effect starts over (Animator.show): a ripple timed on the last one's
+            # clock would spread again on the new one's.
+            self.ripples = []
+        self._describe(said)
+        self.animator.show(animation)
+
+    def _end_animation(self) -> None:
+        """No animation from here on: nothing drawn under the keys, and the board's help alone
+        as its description."""
+        self._describe("")
+        if self.animator.animation is None:
+            return
+        self.animator.show(None)
+        self.drawn, self.ripples = {}, []
+        self.fixed.painted = ()
+        self.fixed.queue_draw()
+
+    def _describe(self, said: str) -> None:
+        if said != self._said:
+            self._said = said
+            self.fixed.update_property([Gtk.AccessibleProperty.DESCRIPTION],
+                                       [f"{said} {self._help}" if said else self._help])
+
+    def _draw(self, animation: Animation, seconds: float | None) -> None:
+        """The frame `seconds` into `animation`, or its still frame for None, drawn where it
+        differs from the last."""
+        if seconds is None:
+            colors = still_frame(animation, self.board)
+        else:
+            self.ripples = live(self.ripples, seconds, animation.period)
+            colors = frame(animation, self.board, seconds, self.ripples)
+        if colors != self.drawn:
+            self.drawn = colors
+            self.paint()
+
+    def paint(self) -> None:
+        """The colors of the last frame drawn, under the keys where `relayout` put them."""
+        if self._boxes_unit != self.unit:
+            self._boxes_unit = self.unit
+            self._boxes = []
+            for key in self.board.keys:
+                if key.zone is None:
+                    continue
+                # Each struct kept in a name of its own: init() answers the struct it filled,
+                # wrapped without holding it, so a struct made in the same expression is
+                # freed under it and the clip drawn empty (seen 2026-10-24).
+                bounds, box = Graphene.Rect(), Gsk.RoundedRect()
+                bounds.init(*key_rect(key, self.unit, self.board))
+                box.init_from_rect(bounds, KEY_RADIUS)
+                self._boxes.append((key.zone, box, bounds))
+        self.fixed.painted = tuple(
+            (box, bounds, to_rgba(color))
+            for zone, box, bounds in self._boxes if (color := self.drawn.get(zone)) is not None)
+        self.fixed.queue_draw()
+
+    def ripple(self, zone: int | None) -> None:
+        """A ripple from where the board draws the key at `zone` (animation.places) while the
+        board runs ripple, as the keyboard ripples from a key pressed, the oldest dropped past
+        RIPPLE_LIMIT; nothing with animations off, which draw no ripple."""
+        animation = self.animator.animation
+        place = places(self.board).get(zone) if zone is not None else None
+        if (animation is None or animation.effect != "ripple"
+                or not self.animator.running or place is None):
+            return
+        self.ripples.append(ripple_on(self.board, place.x, place.y, self.animator.seconds()))
+        del self.ripples[:-RIPPLE_LIMIT]
+
+    def typed(self, code: int, down: bool) -> None:
+        """A key typed in the window, by its evdev code, pressed (`down`) or let go: a ripple
+        from it (ripple), once a press, not at each repeat while it is held."""
+        if not down:
+            self._held.discard(code)
+            return
+        if code in self._held:
+            return
+        self._held.add(code)
+        self.ripple(typed_zone(self.board, code))
+
+    def keyboard_left(self) -> None:
+        """The keyboard went to another window, which gets the releases of the keys held here:
+        none is held from here on, so the next press of each ripples (typed)."""
+        self._held.clear()
 
     @staticmethod
     def _show(button: Gtk.Button, color: int) -> None:
@@ -440,8 +706,11 @@ class KeyBoard:
     # -- a press, and a drag ----------------------------------------------
 
     def begin_stroke(self, x: float, y: float, clear: bool) -> None:
-        """A press at (x, y): the left button's, or the right's for `clear`."""
+        """A press at (x, y): the left button's, or the right's for `clear`, which under ripple
+        ripples from the key pressed."""
         self.stroke = Stroke(clear, x, y, self.key_at(x, y))
+        if self.stroke.first is not None:
+            self.ripple(self.stroke.first.zone)
 
     def move_stroke(self, x: float, y: float) -> bool:
         """The pointer moved to (x, y) with the button held. True when this move made the
@@ -455,7 +724,7 @@ class KeyBoard:
             return False
         started = False
         dx, dy = x - stroke.x, y - stroke.y
-        steps = max(1, math.ceil(math.hypot(dx, dy) / max(self.unit / 3, 1.0)))
+        steps = max(1, math.ceil(math.hypot(dx, dy) / (self.unit / 3)))
         for step in range(1, steps + 1):
             key = self.key_at(stroke.x + dx * step / steps, stroke.y + dy * step / steps)
             if key is None:
@@ -468,15 +737,14 @@ class KeyBoard:
                     return False
                 stroke.live = started = True
                 if stroke.first is not None:
-                    self._reach(stroke.first)
-            self._reach(key)
+                    self._reach(stroke, stroke.first)
+            self._reach(stroke, key)
         stroke.x, stroke.y = x, y
         return started
 
-    def _reach(self, key: Key) -> None:
+    def _reach(self, stroke: Stroke, key: Key) -> None:
         """Pass on a key the drag reached, once, and none without a light."""
-        stroke = self.stroke
-        if stroke is None or key in stroke.seen:
+        if key in stroke.seen:
             return
         stroke.seen.add(key)
         if key.zone is not None:
@@ -502,7 +770,7 @@ class KeyBoard:
         """No stroke from here on; a drag's release goes to `on_stroke_end`."""
         stroke, self.stroke = self.stroke, None
         if stroke is not None and stroke.live:
-            self._on_stroke_end(stroke.clear)
+            self._on_stroke_end()
 
     def _on_drag_begin(self, gesture: Gtk.GestureDrag, x: float, y: float) -> None:
         # The other button pressed during a stroke ends it: GTK resets a GestureSingle when
@@ -539,7 +807,7 @@ class KeyBoard:
         # dict.get is typed for the key's type alone; the None of no focus child misses.
         return self._key_of.get(self.fixed.get_focus_child())  # type: ignore[arg-type]
 
-    def step(self, direction: str, paint: bool = False) -> bool:
+    def step(self, direction: str, paint: bool) -> bool:
         """An arrow on a focused key: the focus to the next key that way
         (`neighbor`), and nowhere at the edge. With `paint`, Shift held, it
         is a drag, from the keyboard: its first arrow asks
@@ -555,7 +823,7 @@ class KeyBoard:
             self.stroke = Stroke(False, 0.0, 0.0, key, keys=True)
             if self._on_stroke_start(False):
                 self.stroke.live = True
-                self._reach(key)
+                self._reach(self.stroke, key)
             else:
                 self.stroke.dead = True
         target = neighbor(key, direction, self._navigable)
@@ -564,7 +832,7 @@ class KeyBoard:
         self.keys[target].grab_focus()
         stroke = self.stroke
         if stroke is not None and stroke.keys and stroke.live:
-            self._reach(target)
+            self._reach(stroke, target)
         return True
 
     def end_key_stroke(self) -> None:
@@ -604,5 +872,5 @@ class KeyBoard:
     @staticmethod
     def _strip(button: Gtk.Button) -> None:
         for cls in button.get_css_classes():
-            if cls.startswith(KEY_PREFIX) or cls in ("g915-mappable", "g915-dim"):
+            if cls.startswith(KEY_PREFIX) or cls in ("g915-mappable", "g915-dim", ANIMATED):
                 button.remove_css_class(cls)

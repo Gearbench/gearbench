@@ -13,6 +13,8 @@ driven through 0x8020 fn 1 and 0x8030 fn 0.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 #: HID usages the keyboard block addresses, in wire order. zone = index + 1.
 SORTED_USAGES: list[int] = list(range(4, 102)) + [135, 136, 137, 138, 139] + list(range(224, 232))
 
@@ -72,11 +74,8 @@ USAGE_NAMES: dict[int, str] = {
 }
 
 ZONES: dict[str, int] = {
-    USAGE_NAMES[usage]: index + 1
-    for index, usage in enumerate(SORTED_USAGES)
-    if usage in USAGE_NAMES
-}
-ZONES.update({
+    **{USAGE_NAMES[usage]: index + 1 for index, usage in enumerate(SORTED_USAGES)
+       if usage in USAGE_NAMES},
     "BRIGHTNESS": 153,
     "PLAY/PAUSE": 155,
     "MUTE": 156,
@@ -87,10 +86,29 @@ ZONES.update({
     "G3": 182,
     "G4": 183,
     "G5": 184,
+    # The G915 X's G6 to G9, which the G915 lacks: the G915 X LIGHTSPEED's 0x8081 zone bitmap
+    # has 185 to 188 after G1 to G5's 180 to 184 (Solaar issue 3328's listing, MPK
+    # 26.00.B0012), and G HUB's layout of the G915 X draws nine G keys. Which id is which key
+    # is assumed, in the order of G1 to G5's.
+    "G6": 185,
+    "G7": 186,
+    "G8": 187,
+    "G9": 188,
     "LOGO": 210,
-})
+    # Three ids of the PRO X TKL LIGHTSPEED's top row, which the G915 has no key for, by the
+    # names Solaar's listing of its zones gives them (issue 3155). Its own lights are by G HUB's
+    # light_map.json for it: 150 its brightness button, 152 Play, 154 Next, and Mute and
+    # Previous at 153 and 155, the ids named BRIGHTNESS and PLAY/PAUSE above for the G915's
+    # keys, so a color kept for one of those shows on the other model's key of that id.
+    "KEY 150": 150, "KEY 152": 152, "KEY 154": 154,
+}
 
 LOGO = ZONES["LOGO"]
 
 #: Zone id to key name, the reverse of ZONES, which has one name per id.
 ZONE_NAMES: dict[int, str] = {zone: name for name, zone in ZONES.items()}
+
+
+def by_zone(per_key: Mapping[str, int]) -> dict[int, int]:
+    """A layer's painted keys by zone, each one ZONES names."""
+    return {ZONES[name]: value for name, value in per_key.items() if name in ZONES}

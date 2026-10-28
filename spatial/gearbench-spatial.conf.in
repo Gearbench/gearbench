@@ -11,8 +11,8 @@
 # D1 (the Neumann KU100) or D2 (the KEMAR). LFE joins the center at half
 # level, PipeWire's own downmix level. The seven speakers also feed one room
 # send through a 150 ms synthetic tail; the out mixers' "Gain 2" is the room's
-# level, 0.0 for Competitive and 0.1 for Immersive, which the Headset tab
-# changes while it runs:
+# level, 0.0 for Competitive and 0.1 for Immersive, which Gearbench changes
+# while the chain runs:
 #   pw-cli set-param <node id> Props '{ params = [ "outL:Gain 2" 0.1 "outR:Gain 2" 0.1 ] }'
 
 @CLIENT_CONTEXT@

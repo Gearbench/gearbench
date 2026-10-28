@@ -41,11 +41,11 @@ the mouse is back in ONBOARD mode (capture: ONBOARD at 4.2780, a mask at 5.3109)
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from functools import cache
 
 from .hidpp import Hidpp
-from .mouse import MODEL_OF, ButtonTable
+from .mouse import MODEL_OF, ButtonTable, MouseModel
 
 F_SPY = 0x8110
 
@@ -57,14 +57,12 @@ FN_SET_TABLE = 4
 
 #: What fn 1 is sent, as G HUB and the probe of 2026-09-24 sent it.
 START = bytes(3)
-#: What fn 4 is sent: G HUB's table for the G502 X PLUS, where the left, right and middle
-#: buttons report natively and in the mask, and every other control in the mask only.
+#: What fn 4 is sent, to every model: G HUB's table for the G502 X PLUS, assumed on the others.
 G_HUB_TABLE = bytes([0x01, 0x02, 0x03])
 
 
 def decode_mask(data: bytes) -> int:
-    """The mask in a notification's data (Event.data): bytes 0 and 1,
-    big-endian. `00 08` is G4 on the G502 X PLUS."""
+    """The mask in a notification's data (Event.data)."""
     return int.from_bytes(data[0:2], "big")
 
 
@@ -82,37 +80,33 @@ class SpyModel:
 
     #: What fn 0 answers. Anything else is firmware this entry does not describe.
     count: int
-    #: What fn 4 is sent: G HUB's table.
-    table: bytes
-    #: Button name -> its bit in the mask (mask_bit), for the buttons a binding can take: not
-    #: left, right or the wheel click, native under `table`, nor the tilts, which no binding
-    #: takes.
+    #: Button name -> its bit in the mask (mask_bit), for the buttons a binding can take.
     buttons: dict[str, int]
     #: The wheel tilts' bits -> the way each scrolls: -1 left, +1 right, as
-    #: REL_HWHEEL counts. They report in the mask only under `table`, and
+    #: REL_HWHEEL counts. They report in the mask only under G_HUB_TABLE, and
     #: the daemon scrolls for them (tilt).
     tilts: dict[int, int]
 
 
-@cache
 def spy_model(table: ButtonTable) -> SpyModel:
-    """What the spy of a model with `table` is taken to do: fn 0 counts the table's entries,
-    G HUB's table goes with fn 4, and each button and tilt reports as its onboard index's bit
-    (mask_bit). Measured on the G502 X PLUS alone; one SpyModel per table."""
-    return SpyModel(count=table.count, table=G_HUB_TABLE,
+    """What the spy of a model with `table` is taken to do."""
+    return SpyModel(count=table.count,
                     buttons={slot.name: mask_bit(slot.index) for slot in table.buttons},
                     tilts={mask_bit(index): way for index, way in table.tilts})
 
 
-#: The models HOST mode may drive, by product id: each MouseModel with `host_mode` and a button
-#: table, under every id mouse.MODEL_OF gives it. On the G502 X PLUS's receiver and on its cable
-#: (0xC095) the spy is at index 0x0c and G4 came as its mask (measured 2026-09-26). The G305 has
-#: the spy at index 0x08 (count 6, its DPI button 0x0020 under G HUB's table `01 02 03 04 05
-#: 00`, 2026-09-25) but stays in ONBOARD mode, where that button works with or without
-#: Gearbench: the owner's decision of 2026-09-26.
-SPY_MODELS: dict[int, SpyModel] = {product: spy_model(model.button_table)
-                                   for product, model in MODEL_OF.items()
-                                   if model.host_mode and model.button_table is not None}
+def spy_models(models: Mapping[int, MouseModel]) -> dict[int, SpyModel]:
+    """Each of `models` HOST mode may drive, `host_mode` and a button table, with its spy."""
+    return {product: spy_model(model.button_table) for product, model in models.items()
+            if model.host_mode and model.button_table is not None}
+
+
+#: The models HOST mode may drive, by product id (spy_models). On the G502 X PLUS's receiver
+#: and on its cable (0xC095) the spy is at index 0x0c and G4 came as its mask (measured
+#: 2026-09-26). The G305 has the spy at index 0x08 (count 6, its DPI button 0x0020 under
+#: G HUB's table `01 02 03 04 05 00`, 2026-09-25) but stays in ONBOARD mode, where that
+#: button works with or without Gearbench: the owner's decision of 2026-09-26.
+SPY_MODELS: dict[int, SpyModel] = spy_models(MODEL_OF)
 
 
 class ButtonSpy:
@@ -127,9 +121,7 @@ class ButtonSpy:
 
     def __init__(self, dev: Hidpp, index: int, model: SpyModel) -> None:
         self.dev = dev
-        #: The feature's index, where its notifications arrive too: 0x0c on
-        #: the G502 X PLUS through its receiver (capture) and on its cable
-        #: (measured).
+        #: The feature's index, where its notifications arrive too.
         self.index = index
         #: What this model's spy is taken to do.
         self.model = model
@@ -166,8 +158,7 @@ class ButtonSpy:
 
     def set_table(self, table: bytes, *, timeout: float, retries: int) -> None:
         """fn 4: byte i for control i, zero padded to sixteen, so a control
-        past the end of `table` reports in the mask only, as G4 to G9 do under
-        G HUB's `01 02 03` (measured)."""
+        past the end of `table` reports in the mask only."""
         self._ask(FN_SET_TABLE, table, timeout, retries)
 
     def stop(self, *, timeout: float, retries: int) -> None:
@@ -181,9 +172,8 @@ def edges(old: int, new: int, model: SpyModel) -> list[tuple[str, bool]]:
 
     Releases come first, then presses, each in `model.buttons`' order: a roll
     from one button to another inside one mask lets go of the first before
-    the second acts, as two masks would. A bit that is none of the model's
-    buttons (left, right, the wheel click and tilts, bits 11 to 15) gives
-    nothing, and so does a mask equal to the last.
+    the second acts, as two masks would. A bit that is none of
+    `model.buttons` gives nothing, and so does a mask equal to the last.
     """
     changed = old ^ new
     moved = [(name, bool(new & bit)) for name, bit in model.buttons.items() if changed & bit]

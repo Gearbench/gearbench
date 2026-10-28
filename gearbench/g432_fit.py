@@ -6,7 +6,7 @@ The A50's model is its EQ research's (2026-09-27), from the base station's firmw
 peak is a Regalia-Mitra allpass whose bandwidth in Hz is the width times the frequency, a
 shelf a first-order allpass whose corner is the frequency, at 48 kHz, each with its gain
 applied in the same form for a cut as for a boost. The G432's peaks are PipeWire 1.6.2's
-bq_peaking at g432_eq.BAND_Q and g432_eq.RATE (spa/plugins/audioconvert/biquad.c, read
+bq_peaking at g432_presets.BAND_Q and g432_presets.RATE (spa/plugins/audioconvert/biquad.c, read
 2026-10-18), the filters the chain runs. Standard library only.
 """
 
@@ -17,7 +17,7 @@ import math
 from collections.abc import Sequence
 from functools import cache, partial
 
-from . import astro, g432_eq
+from . import astro, g432_presets
 
 #: The base station's sample rate, which its filters' coefficients are for (the A50 EQ
 #: research's disassembly of its firmware, 2026-09-27).
@@ -77,11 +77,11 @@ def _band_curve(center: int, gain: int) -> tuple[float, ...]:
     """A G432 band's gain in dB at each of FIT_FREQS: bq_peaking, A = 10^(dB/40) and
     alpha = sin(w0) / (2Q), as biquad.c computes it."""
     big = 10 ** (gain / 40)
-    w0 = 2 * math.pi * center / g432_eq.RATE
-    alpha, k = math.sin(w0) / (2 * g432_eq.BAND_Q), math.cos(w0)
+    w0 = 2 * math.pi * center / g432_presets.RATE
+    alpha, k = math.sin(w0) / (2 * g432_presets.BAND_Q), math.cos(w0)
     curve = []
     for freq in FIT_FREQS:
-        z = _z(freq, g432_eq.RATE)
+        z = _z(freq, g432_presets.RATE)
         h = ((1 + alpha * big - 2 * k * z + (1 - alpha * big) * z * z)
              / (1 + alpha / big - 2 * k * z + (1 - alpha / big) * z * z))
         curve.append(20 * math.log10(abs(h)))
@@ -97,7 +97,7 @@ def _nearest(freq: int) -> int:
 def _curve_of(gains: Sequence[int]) -> list[float]:
     """The ten bands' curve at FIT_FREQS for `gains`: a cascade's dB add."""
     return [sum(column) for column in zip(*(
-        _band_curve(freq, gain) for freq, gain in zip(g432_eq.BAND_FREQS, gains, strict=True)),
+        _band_curve(freq, gain) for freq, gain in zip(g432_presets.BAND_FREQS, gains, strict=True)),
         strict=True)]
 
 
@@ -114,10 +114,10 @@ def _miss(rest: Sequence[float], freq: int, gain: int, curve: Sequence[float]) -
 def _each_band(gains: list[int], curve: Sequence[float]) -> bool:
     """One pass: each band in turn takes its best gain with the others as they are.
     Whether any changed."""
-    low, high = g432_eq.DB_RANGE
+    low, high = g432_presets.DB_RANGE
     total = _curve_of(gains)
     changed = False
-    for index, freq in enumerate(g432_eq.BAND_FREQS):
+    for index, freq in enumerate(g432_presets.BAND_FREQS):
         rest = [t - own for t, own in zip(total, _band_curve(freq, gains[index]), strict=True)]
         best = min(range(low, high + 1), key=partial(_miss, rest, freq, curve=curve))
         changed = changed or best != gains[index]
@@ -128,8 +128,8 @@ def _each_band(gains: list[int], curve: Sequence[float]) -> bool:
 
 def _pairs(gains: list[int]) -> list[list[int]]:
     """`gains` with two neighbor bands moved 1 dB each, the same way or apart, which a pass
-    of one band at a time cannot reach: each such move that stays in g432_eq.DB_RANGE."""
-    low, high = g432_eq.DB_RANGE
+    of one band at a time cannot reach: each such move that stays in g432_presets.DB_RANGE."""
+    low, high = g432_presets.DB_RANGE
     moves = []
     for index in range(len(gains) - 1):
         for one, two in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
@@ -141,12 +141,12 @@ def _pairs(gains: list[int]) -> list[list[int]]:
     return moves
 
 
-def fitted(curve: Sequence[float]) -> g432_eq.Gains:
-    """The ten band gains, whole dB in g432_eq.DB_RANGE, that a local least-squares
+def fitted(curve: Sequence[float]) -> g432_presets.Gains:
+    """The ten band gains, whole dB in g432_presets.DB_RANGE, that a local least-squares
     search brings near `curve`, given at FIT_FREQS, with the shelves at 0: gains a little
     nearer can exist."""
-    low, high = g432_eq.DB_RANGE
-    gains = [min(high, max(low, round(curve[_nearest(freq)]))) for freq in g432_eq.BAND_FREQS]
+    low, high = g432_presets.DB_RANGE
+    gains = [min(high, max(low, round(curve[_nearest(freq)]))) for freq in g432_presets.BAND_FREQS]
     for _ in range(MAX_PASSES):
         if _each_band(gains, curve):
             continue
@@ -154,9 +154,9 @@ def fitted(curve: Sequence[float]) -> g432_eq.Gains:
         if _error(best, curve) >= _error(gains, curve):
             break
         gains = best
-    return g432_eq.Gains(bands=tuple(gains))
+    return g432_presets.Gains(bands=tuple(gains))
 
 
-def from_a50(preset: astro.EqPreset) -> g432_eq.Preset:
+def from_a50(preset: astro.EqPreset) -> g432_presets.Preset:
     """The A50 preset as a G432 preset: its name, and its curve fitted onto the ten bands."""
-    return g432_eq.Preset(preset.name, fitted(a50_curve(preset)))
+    return g432_presets.Preset(preset.name, fitted(a50_curve(preset)))

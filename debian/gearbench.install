@@ -1,4 +1,5 @@
 udev/*.rules                                usr/lib/udev/rules.d
+udev/71-gearbench-mouse-dpi.hwdb            usr/lib/udev/hwdb.d
 desktop/io.github.gearbench.Gearbench.desktop     usr/share/applications
 desktop/io.github.gearbench.Gearbench.service     usr/share/dbus-1/services
 desktop/io.github.gearbench.Gearbench.metainfo.xml  usr/share/metainfo
@@ -12,6 +13,9 @@ gnome-shell/gearbench-focus@gearbench.github.io/extension.js    usr/share/gnome-
 alsa-card-profile/gearbench-astro-a50.conf  usr/share/alsa-card-profile/mixer/profile-sets
 wireplumber/60-gearbench-astro-a50.conf     usr/share/wireplumber/wireplumber.conf.d
 wireplumber/60-gearbench-logitech-g432.conf     usr/share/wireplumber/wireplumber.conf.d
+wireplumber/60-gearbench-hidpp-headsets.conf    usr/share/wireplumber/wireplumber.conf.d
+alsa-card-profile/gearbench-astro-a50x.conf  usr/share/alsa-card-profile/mixer/profile-sets
+wireplumber/60-gearbench-astro-a50x.conf    usr/share/wireplumber/wireplumber.conf.d
 spatial/gearbench-spatial.conf.in           usr/share/gearbench/spatial
 spatial/room-150ms.wav                      usr/share/gearbench/spatial
 spatial/README.md                           usr/share/gearbench/spatial

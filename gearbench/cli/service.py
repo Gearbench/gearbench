@@ -12,22 +12,21 @@ import re
 import sys
 from pathlib import Path
 
-from ..config import config_dir
 from ..daemon import Daemon
 from ..desktop import GREETER, session_class
+from ..settings_files import config_dir
 from ..wording import escaped as _escaped
-from .output import Subcommands
+from .output import START, Subcommands
 
 
 def cmd_gui(args: argparse.Namespace) -> int:
-    """Open the GTK window."""
+    """Open the window."""
     try:
         from ..gui import main as gui_main  # noqa: PLC0415 -- optional: the CLI runs without GTK
     except (ImportError, ValueError) as exc:
         print(
-            f"error: cannot load the GTK interface: {exc}\n"
-            f"The window needs python3-gi, gir1.2-gtk-4.0 and gir1.2-adw-1; the CLI "
-            f"works without them.",
+            f"error: cannot load the GTK interface: {exc}; the window needs python3-gi, "
+            f"gir1.2-gtk-4.0 and gir1.2-adw-1, and the CLI works without them",
             file=sys.stderr,
         )
         return 1
@@ -61,10 +60,9 @@ class JournalFormatter(logging.Formatter):
     """A record as journald reads it off stderr.
 
     journald takes a leading `<N>` as each line's priority, so every line carries
-    one, a traceback's too. Lines split at "\n" and NUL, where journald splits
+    one, a traceback's too. Lines split at a newline and a NUL, where journald splits
     (_LINE_BREAK in systemd.journal-fields(7)), and after JOURNAL_LINE_CHARS, before
-    journald would; str.splitlines also splits at \r and others. No timestamp: the
-    journal keeps its own."""
+    journald would; str.splitlines also splits at a carriage return and others."""
 
     def format(self, record: logging.LogRecord) -> str:
         prefix = f"<{sd_priority(record.levelno)}>"
@@ -106,7 +104,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     if os.geteuid() == 0:
         logging.getLogger("gearbench").error(
             "the daemon runs as your own account, never as root: exiting without opening a "
-            "device. Run `gearbench-ctl daemon` or `systemctl --user start gearbench` as "
+            f"device. Run `gearbench-ctl daemon` or `{START}` as "
             "yourself, not with sudo")
         return 1
     if session_class() == GREETER:
@@ -130,12 +128,12 @@ def cmd_daemon(args: argparse.Namespace) -> int:
 def add_daemon(sub: Subcommands) -> None:
     d = sub.add("daemon", help="run the daemon in the foreground", offers_json=False)
     d.add_argument("-v", "--verbose", action="store_true",
-                   help="log G key presses and the mouse's G4 to G9")
+                   help="log at DEBUG level, G key presses and requests among them")
     d.set_defaults(func=cmd_daemon)
 
 
 def add_gui(sub: Subcommands) -> None:
-    g = sub.add("gui", help="open the GTK window", offers_json=False)
+    g = sub.add("gui", help="open the window", offers_json=False)
     g.add_argument("--gapplication-service", action="store_true",
                    help="wait to be asked over D-Bus to open, as the desktop starts it")
     g.set_defaults(func=cmd_gui)

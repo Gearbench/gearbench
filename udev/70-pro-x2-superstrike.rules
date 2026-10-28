@@ -1,0 +1,18 @@
+# Logitech PRO X2 SUPERSTRIKE (046d:40bd through its 046d:c54d receiver,
+# 046d:c0a8 cabled) -> uaccess on its own hidraw node through the receiver,
+# and on its HID++ interface, 02, on its cable.
+#
+# Not yet checked on this hardware. It pairs to the PRO X SUPERLIGHT 2's
+# receiver (Solaar issue 3202's listing), so its rules are that mouse's in
+# 70-pro-x-superlight-2.rules, for the same reasons: its own node, matched by
+# its HID device name, and the c54d pairs two devices, so pair nothing else to
+# this mouse's receiver. Cabled, interface 02 is assumed: no source gives its
+# cable's interfaces. Interface 01 is not granted.
+#
+# The node also carries the keystrokes the mouse sends for a button its
+# onboard profile binds to a key, as 70-g502x.rules says of the G502 X PLUS's.
+#
+# No event node is granted: in host mode Gearbench reads its back and forward
+# through HID++ on the hidraw nodes below.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0003:046D:40BD.*", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c0a8", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"

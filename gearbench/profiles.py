@@ -1,12 +1,15 @@
 """Game profiles: a library of named layouts, one JSON file each.
 
 A game profile holds its lighting for each keyboard model, G-key bindings and, per mouse
-model, the mouse's bindings and its own DPI stages and report rate. It is an overlay on the
+model, the mouse's bindings and its own DPI stages and report rate, and for every mouse the
+color one synced to the keyboard shows. It is an overlay on the
 active M profile, which keeps its own defaults. One file per profile, so a game's layout can
 be copied or shared on its own, and a bad file costs one profile. Version 2 keeps the lighting
 under `lighting`, by keyboard model; version 1 kept one at the top of the file, read as the
 G915's (config.V1_KEYBOARD). Version 3 keeps the mouse bindings by mouse model; versions 1 and
-2 kept one set, read as the G502 X PLUS's (config.V2_MOUSE).
+2 kept one set, read as the G502 X PLUS's (config.V2_MOUSE). `mouse_color`, the color a synced
+mouse shows while the profile is loaded, came after version 3 without a new one: a Gearbench
+that does not know it reads the file without it.
 """
 
 from __future__ import annotations
@@ -19,56 +22,53 @@ from typing import cast
 from .apps import MAX_PROGRAM_BYTES
 from .config import (
     BINDABLE_KEYS,
-    FIRST_VERSION,
     KEYBOARD_MODEL,
-    PER_KEY,
+    MOUSE_MODEL,
     RATE_CHOICES,
     REPORT_RATES,
-    STATIC,
     V1_KEYBOARD,
     VERSION,
-    ConfigError,
-    FileUnreadable,
     Lighting,
     Profile,
-    SkipWarnings,
-    backup_dir,
     by_model,
-    changed_on_disk,
-    config_dir,
     entry_under,
     expect,
-    file_stamp,
     format_color,
-    from_file,
     g_key_layer,
-    keep_old_version,
     keep_under,
-    layer_binding,
     layer_json,
     mouse_json,
+    parse_color,
     read_mouse_bindings,
     refuse_controls,
-    sync_removal,
-    write_json,
 )
 from .library_files import (
+    FolderLibrary,
     by_name,
     check_version,
     file_name,
     list_folder,
-    read_folder,
     read_name,
     refuse_taken,
+    save_renamed,
 )
 from .onboard import DPI_HIGHEST, DPI_LOWEST, DPI_STAGES, dpi_fits
-from .wording import whole, written
-
-# STATIC and PER_KEY are config.py's (an M profile has a mode too), re-exported; so are its
-# REPORT_RATES, the rates a game profile can hold, those onboard profile 1 can store, and
-# apps.py's MAX_PROGRAM_BYTES, the longest program name a profile holds.
-__all__ = ["FOLDER_UNLISTED", "MAX_PROCESSES", "MAX_PROGRAM_BYTES", "PER_KEY", "REPORT_RATES",
-           "STATIC", "GameProfile", "Library", "MouseTuning", "check_programs", "profiles_dir"]
+from .settings_files import (
+    FIRST_VERSION,
+    FIX_AND_RELOAD,
+    ConfigError,
+    FileUnreadable,
+    backup_dir,
+    changed_on_disk,
+    config_dir,
+    file_stamp,
+    from_file,
+    keep_old_version,
+    make_folder,
+    sync_removal,
+    write_json,
+)
+from .wording import GAME_PROFILE_NEEDS_A_NAME, kind_of, whole, written
 
 #: The most programs a game profile may load for: the daemon's scan compares each with every
 #: running program every five seconds, on the thread that carries the G keys and macros.
@@ -76,7 +76,7 @@ MAX_PROCESSES = 64
 
 #: Why a file in the profiles folder was not read while the folder could not be listed, by
 #: the OSError's reason in words (Library.why_unread).
-FOLDER_UNLISTED = "its folder cannot be listed: {}"
+FOLDER_UNLISTED = "its folder could not be listed ({})"
 
 
 def profiles_dir() -> Path:
@@ -84,7 +84,7 @@ def profiles_dir() -> Path:
 
 
 def profile_backup(path: Path) -> Callable[[int], Path]:
-    """Where a game profile's bytes in an older format are kept (config.keep_old_version),
+    """Where a game profile's bytes in an older format are kept (settings_files.keep_old_version),
     under its own file name, in a folder for each format."""
     return lambda version: backup_dir() / f"profiles.v{version}" / path.name
 
@@ -119,15 +119,14 @@ class MouseTuning:
 
     @classmethod
     def from_json(cls, data: object, where: str) -> MouseTuning:
-        expect(data, dict, where, "an object")
-        data = cast(dict, data)     # expect raised for anything else
+        data = expect(data, dict, where, "an object")
         unknown = [k for k in data if k not in TUNING_FIELDS]
         if unknown:
             raise ConfigError(f"{where}: {unknown[0]!r} is not one of "
                               f"{', '.join(TUNING_FIELDS)}")
         rate = data.get("report_rate")
         if rate is not None and not (whole(rate) and rate in REPORT_RATES):
-            raise ConfigError(f"{where}.report_rate: must be one of {RATE_CHOICES} Hz, "
+            raise ConfigError(f"{where}.report_rate is {RATE_CHOICES} Hz, "
                               f"not {written(rate)}")
         stages = data.get("dpi_stages")
         if stages is None:
@@ -137,11 +136,11 @@ class MouseTuning:
             return cls(report_rate=rate)
         expect(stages, list, f"{where}.dpi_stages", "a list of DPI values")
         if not 1 <= len(stages) <= DPI_STAGES:
-            raise ConfigError(f"{where}.dpi_stages: between 1 and {DPI_STAGES} stages, "
+            raise ConfigError(f"{where}.dpi_stages: 1 to {DPI_STAGES} stages, "
                               f"not {len(stages)}")
         for value in stages:
             if not whole(value) or not dpi_fits(value):
-                raise ConfigError(f"{where}.dpi_stages: each must be a whole number from "
+                raise ConfigError(f"{where}.dpi_stages: each is a whole number from "
                                   f"{DPI_LOWEST} to {DPI_HIGHEST}, not {written(value)}")
         listed = ", ".join(map(str, stages))
         if len(set(stages)) != len(stages):
@@ -150,7 +149,7 @@ class MouseTuning:
         for name in ("default", "shift"):
             value = data.get(name)
             if not whole(value) or value not in stages:
-                raise ConfigError(f"{where}.{name}: must be {among} {listed}, "
+                raise ConfigError(f"{where}.{name} is {among} {listed}, "
                                   f"not {written(value)}")
         return cls(dpi_stages=tuple(stages), default=data["default"], shift=data["shift"],
                    report_rate=rate)
@@ -159,33 +158,42 @@ class MouseTuning:
 def read_tuning(raw: object, where: str) -> dict[str, MouseTuning]:
     """Read `mouse_tuning`, keyed by mouse product id in four lowercase hex digits
     (config.mouse_dpi's keys); absent or null is none, and an empty entry is dropped."""
-    if raw is not None:
-        expect(raw, dict, where, "an object of mouse product ids")
-    tunings = by_model(raw, where, MouseTuning.from_json, "a mouse product id like '4099'",
-                       "mouse")
+    tunings = by_model(raw, where, MouseTuning.from_json, MOUSE_MODEL, "mouse")
     return {product: tuning for product, tuning in tunings.items() if not tuning.empty}
 
 
+def read_mouse_color(raw: object, where: str) -> int | None:
+    """A game profile's `mouse_color`, from its file or a request, as config.parse_color reads
+    a color, or None for null or a file without it."""
+    return None if raw is None else parse_color(raw, where)
+
+
+def mouse_color_json(color: int | None) -> str | None:
+    """A game profile's `mouse_color` as its file and the replies write it: format_color's
+    '#rrggbb', or null for none."""
+    return None if color is None else format_color(color)
+
+
 def check_programs(processes: object, where: str) -> list[str]:
-    """`processes` as the programs a game profile loads for. A refusal names `where` they came
-    from: not a list, more than MAX_PROCESSES, or one that is not a name, is longer than a
-    file name or holds a control character."""
-    expect(processes, list, where, "a list of program names")
-    programs = cast(list, processes)       # expect raised for anything else
+    """`processes` as the programs a game profile loads for, each without the white space
+    around it, as its file reads back, or a ConfigError naming `where` they came from. A name
+    is measured without that white space, but a control character at either end is refused,
+    not stripped."""
+    programs = expect(processes, list, where, "a list of program names")
     if len(programs) > MAX_PROCESSES:
         raise ConfigError(f"{where}: {len(programs)} programs is more than the "
                           f"{MAX_PROCESSES} a game profile may load for")
     for i, process in enumerate(programs):
-        # An empty name is contained in every name, so it would load
-        # this profile for whatever happened to be running.
+        # Names match whole (apps.names_match) and the scan drops an empty one
+        # (apps.match_names), so a blank name would never load the profile.
         if not isinstance(process, str) or not process.strip():
-            raise ConfigError(f"{where}[{i}]: must be a program name, not {written(process)}")
+            raise ConfigError(f"{where}[{i}] is a program name, not {written(process)}")
         size = len(process.strip().encode(errors="replace"))
         if size > MAX_PROGRAM_BYTES:
             raise ConfigError(f"{where}[{i}]: a program name of {size} bytes is "
                               f"longer than the {MAX_PROGRAM_BYTES} a file name may be")
         refuse_controls(process, f"{where}[{i}]")
-    return programs
+    return [process.strip() for process in programs]
 
 
 def game_lighting(data: object, where: str) -> Lighting:
@@ -202,6 +210,7 @@ def lighting_json(entry: Lighting) -> dict:
         "speeds": dict(entry.speeds),
         "direction": entry.direction,
         "base": format_color(entry.color),
+        "second_color": format_color(entry.second_color),
         "background": format_color(entry.background),
         "keys": {k: format_color(v) for k, v in sorted(entry.keys.items())},
     }
@@ -210,7 +219,7 @@ def lighting_json(entry: Lighting) -> dict:
 @dataclass
 class GameProfile:
     name: str
-    #: Process names that auto-load this profile. Empty means manual only.
+    #: Process names that auto-load this profile. Empty means it loads by hand.
     processes: list[str] = field(default_factory=list)
     #: Its lighting by keyboard model, as an M profile's (config.Profile.lighting), no `params`.
     lighting: dict[str, Lighting] = field(default_factory=dict)
@@ -223,6 +232,9 @@ class GameProfile:
     #: Its own DPI stages and report rate by mouse product id; a mouse with none runs profile 1's
     #: stages and the rate in force without a game profile (Dpi.rate_for).
     mouse_tuning: dict[str, MouseTuning] = field(default_factory=dict)
+    #: The color a synced mouse shows while it is loaded, one for every mouse, or None for the
+    #: color the keyboard shows around its painted keys (the owner's decision of 2026-10-23).
+    mouse_color: int | None = None
     #: Where it was loaded from, so save() can overwrite in place.
     path: Path | None = field(default=None, compare=False)
     #: file_stamp of `path` at the last read or write. A save refuses when the file changed
@@ -232,11 +244,6 @@ class GameProfile:
     #: Why its file would not load at the last `reload` or scan, which kept this copy as it
     #: was; None once it is written.
     unreadable: str | None = field(default=None, compare=False, repr=False)
-
-    def binding(self, key: str, shifted: bool) -> str | None:
-        """A G key's binding, the MR layer's when `shifted` and it has one, as an M profile's
-        (config.layer_binding)."""
-        return layer_binding(self.bindings, self.shift, key, shifted)
 
     def tuning(self, keys: list[str]) -> MouseTuning | None:
         """Its own stages and rate for the mouse `keys` name, its own product
@@ -264,6 +271,7 @@ class GameProfile:
             "shift": layer_json(self.shift),
             "mouse": mouse_json(self.mouse),
             "mouse_tuning": {k: t.to_json() for k, t in sorted(self.mouse_tuning.items())},
+            "mouse_color": mouse_color_json(self.mouse_color),
         }
 
     @classmethod
@@ -272,7 +280,9 @@ class GameProfile:
         with its defaults for any field it lacks, is V1_KEYBOARD's, and an older format's mouse
         bindings are config.read_mouse_bindings'."""
         if not isinstance(data, dict):
-            raise ConfigError(f"{where}: profile must be a JSON object")
+            # After a colon, which a row or a line titled with the file's name drops
+            # (library_files.unread_reason).
+            raise ConfigError(f"{where}: a game profile is a JSON object, not {kind_of(data)}")
         version = check_version(data, where, VERSION, FIRST_VERSION)
         if version == FIRST_VERSION:
             lighting = {V1_KEYBOARD: game_lighting(data, where)}
@@ -284,16 +294,17 @@ class GameProfile:
         processes = data.get("processes")
         if processes is None:
             processes = []
-        check_programs(processes, f"{where}.processes")
-        name = read_name(data, where, "game profile")
+        processes = check_programs(processes, f"{where}.processes")
+        name = read_name(data, where, GAME_PROFILE_NEEDS_A_NAME)
         return cls(
             name=name,
-            processes=[p.strip() for p in processes],
+            processes=processes,
             lighting=lighting,
             bindings=g_key_layer(data.get("bindings"), f"{where}.bindings"),
-            shift=g_key_layer(data.get("shift"), f"{where}.shift"),
+            shift=g_key_layer(data.get("shift"), f"{where}.shift", shift=True),
             mouse=read_mouse_bindings(data.get("mouse"), f"{where}.mouse", version),
             mouse_tuning=read_tuning(data.get("mouse_tuning"), f"{where}.mouse_tuning"),
+            mouse_color=read_mouse_color(data.get("mouse_color"), f"{where}.mouse_color"),
         )
 
     # -- persistence -----------------------------------------------------
@@ -308,12 +319,13 @@ class GameProfile:
     def check_unchanged(self) -> None:
         """Raise ConfigError if its file would not load when last read (`unreadable`) or has
         changed on disk since. A reload does not take a file that still will not load, so that
-        refusal names `gearbench-ctl save` too."""
+        refusal names `gearbench-ctl save` too, unless the folder could not be listed: the
+        save writes through that folder."""
         if self.unreadable is not None:
-            raise FileUnreadable(
-                f"{self.path} could not be read ({self.unreadable}); nothing is saved "
-                "over it. Fix it and run `gearbench-ctl reload`; `gearbench-ctl save` "
-                "writes the daemon's copy over it.")
+            save = ("" if self.unreadable.startswith(FOLDER_UNLISTED.partition("{}")[0])
+                    else ", or `gearbench-ctl save` writes the daemon's copy over it")
+            raise FileUnreadable(f"{self.path} could not be read ({self.unreadable}); nothing "
+                                 f"is saved over it; {FIX_AND_RELOAD}{save}")
         if self.changed():
             # A path: `changed` is False without one.
             raise changed_on_disk(cast(Path, self.path))
@@ -333,16 +345,17 @@ class GameProfile:
         `gearbench-ctl save` asks.
         """
         target = self.path or (directory or profiles_dir()) / file_name(self.name)
-        GameProfile.from_json(self.to_json(), target.name)
+        payload = self.to_json()
+        GameProfile.from_json(payload, target.name)
         if not over_an_edit:
             self.check_unchanged()
         # Not following a link: one to nothing or a loop is a file the library
         # lists as unreadable.
         if self.path is None and target.exists(follow_symlinks=False):
             refuse_taken(target, GameProfile.load, "game profile")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        keep_old_version(target, profile_backup(target))
-        write_json(target, self.to_json(), ".profile-")
+        make_folder(target)
+        keep_old_version(target, profile_backup(target), VERSION)
+        write_json(target, payload, ".profile-")
         self.path, self.disk_stamp, self.unreadable = target, file_stamp(target), None
         return target
 
@@ -351,7 +364,9 @@ class GameProfile:
 
         A file whose name and contents disagree blocks the next profile saved under the old
         name: its save is refused. A refusal changes nothing. A new name with the same stem is
-        written in place; the old file goes once the new one is written.
+        written in place; the old file goes once the new one is written, or the new one goes
+        again where the old cannot be removed, and an old file that is a link moves to the new
+        name and is written through (save_renamed).
         """
         # A path: only a profile the library read is renamed, and `load` set it.
         old = cast(Path, self.path)
@@ -362,20 +377,24 @@ class GameProfile:
         was = self.name
         self.name = name
         try:
-            GameProfile.from_json(self.to_json(), target.name)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            # Before the write: a rename in place writes over the file it leaves, and one to
-            # another file name deletes it.
-            keep_old_version(old, profile_backup(old))
-            write_json(target, self.to_json(), ".profile-")
+            payload = self.to_json()
+            GameProfile.from_json(payload, target.name)
+            make_folder(target)
+            # Before the write: a rename in place, or through a link it moves, writes over the
+            # file it leaves, and one to another file name deletes it.
+            keep_old_version(old, profile_backup(old), VERSION)
+            save_renamed(old, target, payload, ".profile-")
         except BaseException:
             self.name = was
             raise
         self.path, self.disk_stamp = target, file_stamp(target)
-        if old != target:
-            old.unlink(missing_ok=True)
-            sync_removal(old)
         return target
+
+
+def layers_of(keys: dict, shift: dict, mouse: dict[str, dict[str, str]]) -> list[dict]:
+    """A profile's layers of bindings, an M profile's or a game profile's: its G keys', its MR
+    layer's and each mouse model's."""
+    return [keys, shift, *mouse.values()]
 
 
 def layer_in_force(overlay: GameProfile | None, profile: Profile) -> GameProfile | Profile:
@@ -383,29 +402,14 @@ def layer_in_force(overlay: GameProfile | None, profile: Profile) -> GameProfile
     return overlay if overlay is not None else profile
 
 
-class Library:
+class Library(FolderLibrary[GameProfile]):
     """The set of game profiles on disk."""
 
     def __init__(self, directory: Path | None = None) -> None:
-        self.directory = directory or profiles_dir()
-        self._skipped = SkipWarnings("game profile")
-        #: The files the last `all()` left out, as (file name, why), for the window to show:
-        #: those it could not read and those in `shadowed`. A directory it could not list is one
-        #: entry, under its own name.
-        self.skipped: list[tuple[str, str]] = []
-        #: Why the last `all()` could not list the directory, or None, as Folder has it.
-        self.unlisted_reason: str | None = None
-        #: The files in `skipped` that loaded, left out for another file of
-        #: the same name. Such a file holds no profile a lookup by name misses.
-        self.shadowed: set[str] = set()
+        super().__init__(directory or profiles_dir(), "game profile")
 
     def names(self) -> list[str]:
         return [p.name for p in self.all()]
-
-    def unread(self) -> list[tuple[str, str]]:
-        """The entries of `skipped` the last `all()` could not read: a file
-        that will not load, or the directory. Not those in `shadowed`."""
-        return [(file, why) for file, why in self.skipped if file not in self.shadowed]
 
     def files(self) -> list[Path]:
         """The files `all()` reads, for a caller that stamps them to see a change. Raises
@@ -413,23 +417,19 @@ class Library:
         return list_folder(self.directory)
 
     def all(self) -> list[GameProfile]:
-        folder = read_folder(self.directory, GameProfile.load, self._skipped)
-        self.skipped, self.shadowed = folder.skipped, folder.shadowed
-        self.unlisted_reason = folder.unlisted_reason
-        return folder.kept
+        return self.read(GameProfile.load)
 
     def get(self, name: str) -> GameProfile | None:
         return by_name(self.all(), name)
 
     def why_unread(self, file: str | None) -> str | None:
-        """Why the last `all()` did not read `file`, in words: its entry in `unread()`, else,
-        while the folder could not be listed, FOLDER_UNLISTED's; else None, as for a file it
-        read, one shadowed or one not there. A message that names the file holds the folder's
-        path, so the folder's part gives only the reason."""
-        why = None if file is None else dict(self.unread()).get(file)
-        if why is None and self.unlisted_reason is not None:
-            why = FOLDER_UNLISTED.format(self.unlisted_reason)
-        return why
+        """Why the last `all()` did not read `file`, in words: while the folder could not be
+        listed, FOLDER_UNLISTED's; else its entry in `unread()`, or None, as for a file it read,
+        one shadowed or one not there. A message that names the file holds the folder's path,
+        so the folder's part gives only the reason."""
+        if self.unlisted_reason is not None:
+            return FOLDER_UNLISTED.format(self.unlisted_reason)
+        return None if file is None else dict(self.unread()).get(file)
 
     def delete(self, name: str) -> bool:
         profile = self.get(name)

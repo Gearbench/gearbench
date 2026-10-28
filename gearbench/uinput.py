@@ -11,7 +11,6 @@ newer kernel's names. A code never changes once defined, so the copy can only fa
 from __future__ import annotations
 
 import contextlib
-import errno
 import fcntl
 import os
 import platform
@@ -63,19 +62,18 @@ def ioc(direction: int, kind: int, nr: int, size: int) -> int:
     return (direction << _IOC_DIRSHIFT) | (size << 16) | (kind << 8) | nr
 
 
-# struct input_event: two time fields + u16 type + u16 code + s32 value. The time fields
-# are unsigned, as the kernel reads them (__kernel_ulong_t in linux/input.h): a signed
-# 32-bit field cannot hold a time after 2038-01-19.
+# struct input_event: two time fields, __kernel_ulong_t in linux/input.h, + u16 type + u16
+# code + s32 value.
 EVENT = struct.Struct("@LLHHi")
 # struct uinput_setup: input_id (4 x u16) + char name[80] + u32 ff_effects_max
 _SETUP = struct.Struct("@HHHH80sI")
 
-UI_DEV_CREATE = ioc(IOC_NONE, 0x55, 1, 0)      # _IO('U', 1); 'U' is 0x55
-UI_DEV_DESTROY = ioc(IOC_NONE, 0x55, 2, 0)
-UI_DEV_SETUP = ioc(IOC_WRITE, 0x55, 3, _SETUP.size)
-UI_SET_EVBIT = ioc(IOC_WRITE, 0x55, 100, 4)
-UI_SET_KEYBIT = ioc(IOC_WRITE, 0x55, 101, 4)
-UI_SET_RELBIT = ioc(IOC_WRITE, 0x55, 102, 4)
+UI_DEV_CREATE = ioc(IOC_NONE, ord("U"), 1, 0)
+UI_DEV_DESTROY = ioc(IOC_NONE, ord("U"), 2, 0)
+UI_DEV_SETUP = ioc(IOC_WRITE, ord("U"), 3, _SETUP.size)
+UI_SET_EVBIT = ioc(IOC_WRITE, ord("U"), 100, 4)
+UI_SET_KEYBIT = ioc(IOC_WRITE, ord("U"), 101, 4)
+UI_SET_RELBIT = ioc(IOC_WRITE, ord("U"), 102, 4)
 
 _HEADER = Path("/usr/include/linux/input-event-codes.h")
 #: One `#define KEY_X 123` line, with or without a comment after the value (KEY_CALC's),
@@ -354,8 +352,7 @@ MODIFIERS = {
 }
 
 #: A modifier's code to the first alias above that names it: how `spec_for_keys` spells
-#: each key of a spec of modifiers alone: ctrl, shift, alt, super, rctrl, ralt, rshift and
-#: rsuper.
+#: each key of a spec of modifiers alone.
 MODIFIER_SPELLING: dict[int, str] = {}
 for _alias, _name in MODIFIERS.items():
     MODIFIER_SPELLING.setdefault(KEYCODES[_name], _alias)
@@ -386,7 +383,7 @@ def resolve(name: str) -> int:
         return code
     if _clear_name(name):
         raise UinputError(
-            f"{name!r} is the Clear key, which cannot be bound: clear means unbind"
+            f"{name!r} is the Clear key, which no binding can send: clear means unbind"
         )
     if (button := _pointer_code(name)) is not None:
         # A click step sends SENT_BUTTONS, and a mouse button's actions POINTER_ACTIONS: no
@@ -405,7 +402,11 @@ def resolve(name: str) -> int:
 
 
 def _lookup(name: str) -> int | None:
-    """A key name's code, as `resolve` takes the name, or None."""
+    """A key name's code, as `resolve` takes the name, or None. Only an ASCII name has one:
+    str.upper() makes ASCII of some other letters, S of the long s (U+017F) and FI of the fi
+    ligature (U+FB01), and a binding would show one key and type another."""
+    if not name.isascii():
+        return None
     upper = name.upper()
     for candidate in (upper, f"KEY_{upper}", MODIFIERS.get(name.lower())):
         if candidate in KEY_NAMES:
@@ -414,7 +415,10 @@ def _lookup(name: str) -> int | None:
 
 
 def _pointer_code(name: str) -> int | None:
-    """A pointer or gamepad button's code, by either spelling, or None."""
+    """A pointer or gamepad button's code, by either spelling, or None; ASCII only, as
+    `_lookup` reads a name."""
+    if not name.isascii():
+        return None
     upper = name.upper()
     return KEYCODES.get(upper if upper.startswith("BTN_") else f"BTN_{upper}")
 
@@ -503,7 +507,6 @@ KEYPAD_KEYS = ("numlock", "kpslash", "kpasterisk", "kpminus", "kp7", "kp8", "kp9
 #: The list's groups by their titles, in the order it shows them.
 KEY_GROUPS = {"F13 to F24": FIRST_KEYS, "Media": MEDIA_KEYS, "Modifiers": MODIFIER_KEYS,
               "Main keys": MAIN_KEYS, "Navigation": NAVIGATION_KEYS, "Keypad": KEYPAD_KEYS}
-KEY_LIST = tuple(KEY_GROUPS.values())
 
 #: What each key in the list is, the title of its row: searched with the
 #: name, so "escape" finds esc, "super" leftmeta, "print screen" sysrq and
@@ -587,7 +590,7 @@ class _UinputDevice:
     """
 
     name = "Gearbench virtual device"
-    product = 0x0900
+    product: int
     #: struct input_id's bus type.
     bus = BUS_USB
 
@@ -642,13 +645,12 @@ class _UinputDevice:
     def _write(self, type_: int, code: int, value: int) -> None:
         if self._fd < 0:
             raise UinputError(f"{self.name} is closed")
-        now = time.time()
-        packet = EVENT.pack(int(now), int((now % 1) * 1_000_000), type_, code, value)
+        # The time fields go as 0, which the kernel takes as no time given: it stamps the
+        # event with its own as it takes it.
+        packet = EVENT.pack(0, 0, type_, code, value)
         try:
             os.write(self._fd, packet)
         except OSError as exc:
-            if exc.errno == errno.ENODEV:
-                raise UinputError(f"{self.name} vanished") from exc
             raise UinputError(f"cannot write to {self.name}: {reason(exc)}") from exc
 
     def sync(self) -> None:
@@ -737,9 +739,7 @@ class VirtualKeyboard(_UinputDevice):
 
         A code a holder has down (`key`) is neither pressed nor let go of
         here: a shift held by a G key or a macro's `key_down` would come up
-        at the end of the tap, and the rest would go out unshifted. A key
-        that is held itself stays down, and only the modifiers not held go
-        down and up around it.
+        at the end of the tap, and the rest would go out unshifted.
 
         A tap with a press the kernel would take as a SysRq command raises
         UinputError and writes nothing.
@@ -763,8 +763,8 @@ class VirtualKeyboard(_UinputDevice):
 
 
 class VirtualMouse(_UinputDevice):
-    """A uinput pointer for back and forward, macro clicks and, in the G502 X PLUS's HOST
-    mode, the wheel tilt's sideways scroll.
+    """A uinput pointer for back and forward, macro clicks and, in a mouse's HOST mode, the
+    wheel tilt's sideways scroll.
 
     Declares what libinput needs to call it a mouse, REL_X, REL_Y and BTN_LEFT, with the
     other ordinary buttons and both wheels, though it never moves the pointer.

@@ -1,0 +1,42 @@
+# The Logitech headsets of the G432's family but the G432 (70-g432.rules):
+# each one's HID interface -> uaccess for the seat user.
+#
+# Each is a USB Audio Class device with one HID interface, 03, on the
+# wired ones' USB adapter or cable and on the wireless ones' USB receiver:
+# the receivers of the G933, G935, G733 (each id), G535 and PRO X Wireless
+# list 00 as audio control, 01 and 02 as audio streaming and 03 as HID, the
+# G535's 04 and 05 as a serial port too (an lsusb of each in a public
+# hardware probe), and Solaar opens the G533's HID++ on interface 3; the
+# G431's, G433's, G633's and G635's are assumed the same, for their first
+# connect to check. On the G432 that interface carries the
+# volume wheel's and the mute's reports, consumer control and telephony,
+# beside HID++ on a vendor page. Granting it gives the seat user those
+# reports and HID++ on that one node; on the G432 they carry no
+# keystrokes, and each other model's first connect reads its descriptor.
+# The audio nodes are the sound subsystem, which systemd's
+# 70-uaccess.rules already grants the seat user; this rule adds nothing
+# there.
+#
+# One line per USB product id: the G431 (0a9b), G433 (0a6d), G533 (0a66),
+# G535 (0ac4), G633 (0a5c), G635 (0a89, the G633s's too), G733 (0ab5,
+# 0afe and 0b1f), G933 (0a5b), G935 (0a87, the G933s's too) and PRO X
+# Wireless (0aba). Matched on properties, as 70-g915.rules is, for the
+# reason it gives. Linux 7.0's hid-logitech-hidpp binds the G935's
+# interface and keeps its hidraw node, which this rule grants alike.
+#
+# install.sh puts this in /usr/local/lib/udev/rules.d/; the .deb puts it in
+# /usr/lib/udev/rules.d/. Either way, reload with:
+#   sudo udevadm control --reload
+#   sudo udevadm trigger --subsystem-match=hidraw --action=add
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0a9b", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0a6d", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0a66", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0ac4", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0a5c", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0a89", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0ab5", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0afe", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0b1f", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0a5b", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0a87", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0aba", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"

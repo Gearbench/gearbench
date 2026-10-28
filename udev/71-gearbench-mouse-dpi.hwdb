@@ -1,0 +1,35 @@
+# The DPI Gearbench sets is the pointer's speed. libinput scales a mouse's motion down to
+# 1000 DPI's when the hwdb gives the mouse a default DPI above 1000, as systemd's
+# 70-mouse.hwdb gives the G502 HERO 2400, and it cannot know the DPI Gearbench set. 1000
+# here leaves each mouse's motion as the mouse sends it. This file sorts after
+# 70-mouse.hwdb, so its MOUSE_DPI takes the place of that file's for the same mouse.
+#
+# Each id is a mouse's on its cable, or its own behind its receiver; no receiver's own id.
+mouse:usb:v046dp4099:name:*:*
+mouse:usb:v046dpc095:name:*:*
+mouse:usb:v046dp4074:name:*:*
+mouse:usb:v046dpc08b:name:*:*
+mouse:usb:v046dp409f:name:*:*
+mouse:usb:v046dpc098:name:*:*
+mouse:usb:v046dp4093:name:*:*
+mouse:usb:v046dpc094:name:*:*
+mouse:usb:v046dpc099:name:*:*
+mouse:usb:v046dp40b2:name:*:*
+mouse:usb:v046dpc09e:name:*:*
+mouse:usb:v046dp407f:name:*:*
+mouse:usb:v046dpc08d:name:*:*
+mouse:usb:v046dp4079:name:*:*
+mouse:usb:v046dpc088:name:*:*
+mouse:usb:v046dp4087:name:*:*
+mouse:usb:v046dpc091:name:*:*
+mouse:usb:v046dp40a9:name:*:*
+mouse:usb:v046dpc09b:name:*:*
+mouse:usb:v046dp40b8:name:*:*
+mouse:usb:v046dpc0a0:name:*:*
+mouse:usb:v046dp40b7:name:*:*
+mouse:usb:v046dpc09f:name:*:*
+mouse:usb:v046dp40bd:name:*:*
+mouse:usb:v046dpc0a8:name:*:*
+mouse:usb:v046dpc092:name:*:*
+mouse:usb:v046dpc09d:name:*:*
+ MOUSE_DPI=1000@1000

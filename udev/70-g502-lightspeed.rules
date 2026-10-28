@@ -11,6 +11,9 @@
 # 1"), so no keyboard can share its node; on a POWERPLAY's c53a the other
 # slot is the mat's own chip, which this rule does not grant.
 #
+# The node still carries the keystrokes the mouse sends for a button its
+# onboard profile binds to a key, as 70-g502x.rules says of the G502 X PLUS's.
+#
 # Cabled, no source names the c08d's HID++ interface: 02 is assumed, the
 # interface the PRO WIRELESS's and the G903 LIGHTSPEED HERO's firmware give
 # their vendor collection. Interface 01 is not granted.

@@ -12,16 +12,25 @@ import html
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from itertools import zip_longest
 
 from .apps import PATH_MAX
 from .battery import (
     BATTERY_WARNINGS,
-    FULL,
-    ON_BATTERY,
-    UNKNOWN,
-    amount_words,
     icon_name,
+    level_words,
+    on_power,
+    shown_percent,
+)
+from .wording import (
+    ASLEEP_OR_SWITCHED_OFF,
+    NO_GAME_PROFILE,
+    NOT_READ,
+    READ_AT,
+    capitalized,
+    clock_shown,
+    home_shortened,
+    route,
 )
 
 #: Where sni.py exports the item and its menu: KDE's paths. The item is registered
@@ -33,8 +42,13 @@ ACTIVE, NEEDS_ATTENTION = "Active", "NeedsAttention"
 #: The app's symbolic icon, which install.sh and the package put in the hicolor theme
 #: (desktop/icons/symbolic/).
 ICON = "io.github.gearbench.Gearbench-symbolic"
-PROBLEM_ICON = "dialog-warning-symbolic"
-LOW_BATTERY_ICON = "battery-caution-symbolic"
+#: A device's sign for its state, which a device's Status row draws (gui.style.DOT_STATES)
+#: and a problem line takes by its code: the warning sign for a device asleep, switched off
+#: or out of range, the error sign for any other, a device not available. The panel icon
+#: takes the worst listed line's (problems_icon).
+ASLEEP_PROBLEMS = frozenset({"keyboard_no_answer", "keyboard_not_answering",
+                             "headset_not_answering", "a50x_headset_away"})
+ASLEEP_ICON, NOT_AVAILABLE_ICON = "dialog-warning-symbolic", "dialog-error-symbolic"
 #: Below this on battery the icon asks for attention: the lower of the two low-battery
 #: notices, compared as they compare, by the whole percent shown: 14.6 % shows as 15 % and is
 #: not low.
@@ -47,9 +61,6 @@ CLAUSE_END = re.compile(r"[,;:.] | \(")
 
 #: The key of the item that opens the window; it sends no request.
 OPEN = "open"
-
-#: battery.py's states that say nothing beyond the percentage.
-PLAIN = (None, ON_BATTERY, UNKNOWN)
 
 #: The StatusNotifierItem's properties and their D-Bus types.
 SNI_TYPES = {
@@ -79,44 +90,44 @@ class Battery:
     plugged: bool
     approximate: bool
     answering: bool
-    #: A keyboard on its cable with no reading, which is charging or full.
+    #: A keyboard on its cable, which is charging or full: with no reading, it is shown as
+    #: on its cable.
     cabled: bool
     #: battery.icon_name's for the whole reading, the icon the window's Battery row shows
-    #: too, but for a keyboard on its cable with no reading: the adapter here, a missing
-    #: battery there.
+    #: too.
     icon: str
+    #: When a reading kept for a device that does not answer was taken, in seconds since the
+    #: epoch; None while it answers or for a time not known.
+    read_at: float | None = None
 
     @classmethod
     def of(cls, key: str, name: str, reading: dict | None, *, answering: bool = True,
-           cabled: bool = False) -> Battery:
-        """From a battery.read() reading, or None when there is none."""
+           cabled: bool = False, read_at: float | None = None) -> Battery:
+        """From a battery.read() reading, or None when there is none; `read_at` is when one
+        kept while the device does not answer was taken."""
         reading = reading or {}
         return cls(key, name, percent=reading.get("percent"), state=reading.get("state"),
-                   plugged=bool(reading.get("charging") or reading.get("external_power")),
+                   plugged=on_power(reading),
                    approximate=bool(reading.get("approximate")),
-                   answering=answering, cabled=cabled, icon=icon_name(reading, cabled))
+                   answering=answering, cabled=cabled, icon=icon_name(reading, cabled),
+                   read_at=None if answering else read_at)
 
     @property
     def low(self) -> bool:
-        return (self.percent is not None and round(self.percent) < LOW_BATTERY
+        return (self.percent is not None and shown_percent(self.percent) < LOW_BATTERY
                 and not self.plugged)
 
     def words(self) -> str:
-        """`G915: 80%, charging`, one line of the menu and the tooltip."""
-        amount = (amount_words(self.percent, self.approximate)
-                  if self.percent is not None else None)
-        if self.state == FULL:
-            said = FULL
-        elif amount is not None:
-            said = amount if self.state in PLAIN else f"{amount}, {self.state}"
-        elif self.state not in PLAIN:
-            said = self.state
-        elif self.cabled:
-            said = "on its cable"
-        else:
-            said = "battery not read yet" if self.answering else "not answering"
-            return f"{self.name}: {said}"
-        return f"{self.name}: {said}" + ("" if self.answering else ", not answering")
+        """`G915: 80%, charging`, one line of the menu and the tooltip, the reading in the
+        window's words (battery.level_words), and a device that does not answer in its Status
+        dot's."""
+        said = level_words(self.percent, self.approximate, self.state)
+        if not said and not self.cabled:
+            return f"{self.name}: {NOT_READ if self.answering else ASLEEP_OR_SWITCHED_OFF}"
+        kept = ("" if self.answering
+                else READ_AT.format(clock_shown(self.read_at)) if self.read_at is not None
+                else f", {ASLEEP_OR_SWITCHED_OFF}")
+        return f"{self.name}: {said or route('cable')}{kept}"
 
 
 @dataclass(frozen=True)
@@ -134,6 +145,8 @@ class Snapshot:
 
     batteries: tuple[Battery, ...] = ()
     problems: tuple[str, ...] = ()
+    #: Each problem's code, in `problems`' order (Daemon.problems), for its line's icon.
+    problem_codes: tuple[str, ...] = ()
     #: None with no mouse selected, or one with no DPI stages or not answering.
     stages: Stages | None = None
     profiles: tuple[str, ...] = ()
@@ -147,6 +160,10 @@ class Snapshot:
     dpi_notices: bool = True
     #: None while no mouse with lighting is attached.
     mouse_sync: bool | None = None
+    #: None while no headset with lights is attached.
+    headset_sync: bool | None = None
+    #: The keyboard the mice and the headset follow, in words (keyboard.followed).
+    leader: str = "keyboard"
 
 
 @dataclass(frozen=True)
@@ -216,16 +233,17 @@ def request(**fields: object) -> tuple[tuple[str, object], ...]:
 
 def problem_line(message: str) -> str:
     """A problem's message cut for its menu line, in the daemon's case (problem_items
-    capitalizes it): whole up to PROBLEM_MAX characters. A longer
-    one gets the home directory as ~, then is cut at the last clause end that fits, else at a
-    space, and ends in an ellipsis. A clause end inside a file's name or an aside is not cut
-    at, nor one after a colon: the name says which file, and the others explain what comes
-    before. Names and asides are looked for in the first PROBLEM_MAX + PATH_MAX characters,
-    as far as a path that starts in the line can run. A message says first what is wrong;
-    the tooltip and `gearbench-ctl status` give it whole."""
+    capitalizes it): whole up to PROBLEM_MAX characters. A longer one gets the home directory
+    as ~, then is cut at the last clause end that fits, else at a space, else at
+    PROBLEM_MAX - 1 characters, and ends in an ellipsis. A clause end inside the path of a
+    .json file (one that starts with ~ or /) or an aside is not cut at, nor one after a
+    colon: the path says which file, and the others explain what comes before. Paths and
+    asides are looked for in the first PROBLEM_MAX + PATH_MAX characters, as far as a path
+    that starts in the line can run. A message says first what is wrong; the tooltip and
+    `gearbench-ctl status` give it whole."""
     if len(message) <= PROBLEM_MAX:
         return message
-    message = message.replace(f"{Path.home()}/", "~/")
+    message = home_shortened(message)
     if len(message) <= PROBLEM_MAX:
         return message
     # A .json file's path first: its name may hold a clause end or a lone
@@ -243,13 +261,27 @@ def problem_line(message: str) -> str:
     return message[:cut if cut > 0 else PROBLEM_MAX - 1] + "…"
 
 
-def problem_items(problems: Sequence[str]) -> tuple[Item, ...]:
+def problems_icon(problems: Sequence[str], codes: Sequence[str]) -> str:
+    """The panel's attention icon while `problems` are listed, with their `codes`: the worst
+    line's sign, one sign with one meaning (the user's decision of 2026-10-27, D17): the
+    error sign while any is not a device asleep, a problem given no code included, the
+    warning sign while every one is. With none, the error sign, so the icon changes only
+    when one asleep comes."""
+    asleep = bool(problems) and all(code in ASLEEP_PROBLEMS for _message, code
+                                    in zip_longest(problems, codes, fillvalue=""))
+    return ASLEEP_ICON if asleep else NOT_AVAILABLE_ICON
+
+
+def problem_items(problems: Sequence[str], codes: Sequence[str]) -> tuple[Item, ...]:
     """A line per problem, keyed by place so one that goes or changes is a
     new label under the same id. It starts with a capital, as the menu's other
-    labels do and the window's device tabs show a problem."""
-    lines = (problem_line(message) for message in problems)
-    return tuple(Item(f"problem:{i}", line[:1].upper() + line[1:], PROBLEM_ICON, enabled=False)
-                 for i, line in enumerate(lines))
+    labels do and the window's device tabs show a problem, and its icon is the window's
+    for its code's state (ASLEEP_PROBLEMS); a problem given no code, as a drawing's, takes
+    the error sign."""
+    return tuple(Item(f"problem:{i}", capitalized(problem_line(message)),
+                      ASLEEP_ICON if code in ASLEEP_PROBLEMS else NOT_AVAILABLE_ICON,
+                      enabled=False)
+                 for i, (message, code) in enumerate(zip_longest(problems, codes, fillvalue="")))
 
 
 def dpi_items(stages: Stages) -> tuple[Item, ...]:
@@ -268,18 +300,25 @@ def switch(label: str, on: bool, *, command: str) -> Item:
                 request=request(command=command, value=not on))
 
 
+def listed_profiles(library: Sequence[str], loaded: str | None) -> tuple[str, ...]:
+    """The game profiles a front end lists: the library's, then the loaded one the library
+    lacks, since the daemon keeps a loaded profile whose file is now unreadable or gone."""
+    return (*library, *((loaded,) if loaded and loaded not in library else ()))
+
+
 def profile_menu(snap: Snapshot) -> Item:
-    """The Game profile submenu: None, each profile, Keep loaded."""
-    names = snap.profiles + ((snap.loaded,) if snap.loaded and snap.loaded not in snap.profiles
-                             else ())
-    choices = [Item("unload", "None", toggle="radio", on=snap.loaded is None,
+    """The Game profile submenu: No game profile, each profile, and Keep loaded while one is
+    loaded, as the Keyboard tab shows its switch."""
+    names = listed_profiles(snap.profiles, snap.loaded)
+    choices = [Item("unload", NO_GAME_PROFILE, toggle="radio", on=snap.loaded is None,
                     request=None if snap.loaded is None else request(command="unload"))]
     choices += [Item(f"profile:{name}", name, toggle="radio", on=name == snap.loaded,
                      request=None if name == snap.loaded else request(command="load", value=name))
                 for name in names]
-    keep = switch("Keep loaded", snap.keep_loaded, command="keep_loaded")
-    return Item("profiles", "Game profile",
-                children=(*choices, Item("separator:keep_loaded", separator=True), keep))
+    keep = () if snap.loaded is None else (
+        Item("separator:keep_loaded", separator=True),
+        switch("Keep loaded", snap.keep_loaded, command="keep_loaded"))
+    return Item("profiles", "Game profile", children=(*choices, *keep))
 
 
 def m_profile_menu(snap: Snapshot) -> Item:
@@ -296,21 +335,25 @@ def switch_items(snap: Snapshot) -> tuple[Item, ...]:
     found = [switch("Lights off when locked", snap.lock_lights, command="lock_lights"),
              switch("DPI notices", snap.dpi_notices, command="dpi_notices")]
     if snap.mouse_sync is not None:
-        found.append(switch("Sync mouse with keyboard", snap.mouse_sync, command="mouse_sync"))
+        found.append(switch(f"Mouse follows the {snap.leader}", snap.mouse_sync,
+                            command="mouse_sync"))
+    if snap.headset_sync is not None:
+        found.append(switch(f"Headset follows the {snap.leader}", snap.headset_sync,
+                            command="headset_sync"))
     return tuple(found)
 
 
 def build(snap: Snapshot, title: str) -> Model:
     """The icon, tooltip and menu for one snapshot."""
-    low = any(battery.low for battery in snap.batteries)
+    lows = [battery for battery in snap.batteries if battery.low]
     groups = (
         # The AppIndicators extension shows no tooltip, so the menu is where they can be read.
-        ("problems", problem_items(snap.problems)),
+        ("problems", problem_items(snap.problems, snap.problem_codes)),
         ("batteries", tuple(Item(f"battery:{b.key}", b.words(), b.icon, enabled=False)
                             for b in snap.batteries)),
         (OPEN, (Item(OPEN, f"Open {title}"),)),
         ("dpi", dpi_items(snap.stages) if snap.stages is not None else ()),
-        # Without a game profile, None would be the submenu's only choice.
+        # Without a game profile, No game profile would be the submenu's only choice.
         ("profiles", ((m_profile_menu(snap),) if snap.m_profiles else ())
          + ((profile_menu(snap),) if snap.profiles or snap.loaded else ())),
         ("switches", switch_items(snap)),
@@ -322,9 +365,15 @@ def build(snap: Snapshot, title: str) -> Model:
         items.extend(group)
     return Model(
         title=title,
-        status=NEEDS_ATTENTION if snap.problems or low else ACTIVE,
-        attention_icon=LOW_BATTERY_ICON if low and not snap.problems else PROBLEM_ICON,
-        tooltip=tuple(b.words() for b in snap.batteries) + snap.problems,
+        status=NEEDS_ATTENTION if snap.problems or lows else ACTIVE,
+        # A low battery asks with the lowest one's level icon, as the very-low notice does:
+        # the caution sign is a battery fault's, on the menu's line under it.
+        attention_icon=(min(lows, key=lambda b: b.percent or 0.0).icon
+                        if lows and not snap.problems
+                        else problems_icon(snap.problems, snap.problem_codes)),
+        # The problems first, as on the menu.
+        tooltip=(*(capitalized(problem) for problem in snap.problems),
+                 *(b.words() for b in snap.batteries)),
         menu=Item("", children=tuple(items)),
     )
 
@@ -342,15 +391,15 @@ class Changes:
     status: bool = False
     attention: bool = False
     tooltip: bool = False
-    #: Items came or went: the host reads the layout again. Ubuntu's
+    #: Items came, went or moved: the host reads the layout again. Ubuntu's
     #: AppIndicators extension reads only `type` and `children-display` there,
     #: and all of a new item's properties, but keeps the rest of an item it
     #: has (dbusMenu.js's _doLayoutUpdate, gnome-shell-ubuntu-extensions
     #: 50.26.04.8).
     layout: bool = False
     #: The properties that changed on items in the last model, all of those of
-    #: an item back since an earlier one, and those now at their default,
-    #: whether or not the layout changed too.
+    #: an item back since an earlier one, and in `removed` those now at their
+    #: default, whether or not the layout changed too.
     items: list[tuple[int, dict[str, object]]] = field(default_factory=list)
     removed: list[tuple[int, list[str]]] = field(default_factory=list)
 
@@ -365,7 +414,7 @@ class TrayMenu:
     """
 
     def __init__(self, source: Callable[[], Model], act: Callable[[dict[str, object]], None],
-                 open_app: Callable[[], None], opening: Callable[[], None]) -> None:
+                 open_app: Callable[[], object], opening: Callable[[], None]) -> None:
         self._source = source
         self._act = act
         self._open_app = open_app

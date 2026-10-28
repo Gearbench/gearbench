@@ -15,7 +15,8 @@ python3-gi is a Recommends, and without it the desktop's features are off. Hard 
   cancels its connect.
 - Every connection is private: GLib's shared session bus exits the process when it
   closes, and nothing else in the daemon may find this context as its default.
-- A callback that raises stops `dispatch()`, and the exception comes out of it.
+- A callback that raises stops `dispatch()`, and the exception comes out of it; another that
+  raises in the same dispatch is logged.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, cast, overload
 
-from .config import runtime_home
+from .runtime_folder import runtime_home
 from .wording import escaped
 
 if TYPE_CHECKING:
@@ -54,14 +55,22 @@ SAID_MAX = 500
 
 def bus_addresses(environ: Mapping[str, str] = os.environ) -> tuple[str, str | None]:
     """The system and session bus addresses as GLib finds them, less its X11 autolaunch,
-    which runs dbus-launch and waits for it, and with a relative XDG_RUNTIME_DIR ignored
-    (runtime_home). The session's is None when none is found."""
-    system = environ.get("DBUS_SYSTEM_BUS_ADDRESS") or SYSTEM_BUS
-    session = environ.get("DBUS_SESSION_BUS_ADDRESS") or None
+    which runs dbus-launch and waits for it, with a relative XDG_RUNTIME_DIR ignored
+    (runtime_home) and each byte past ASCII escaped (ascii_address). The session's is None
+    when none is found."""
+    system = ascii_address(environ.get("DBUS_SYSTEM_BUS_ADDRESS") or SYSTEM_BUS)
+    session = ascii_address(environ.get("DBUS_SESSION_BUS_ADDRESS", "")) or None
     runtime = runtime_home(environ)
     if session is None and runtime is not None and (runtime / "bus").exists():
         session = f"unix:path={escape_address(str(runtime / 'bus'))}"
     return system, session
+
+
+def ascii_address(address: str) -> str:
+    """`address` with each byte past ASCII as %XX, which the specification asks of every byte
+    it does not list: os.environ holds a byte that is not UTF-8 as a lone surrogate, which
+    PyGObject raises at rather than pass to GDBus."""
+    return "".join(chr(b) if b < 0x80 else f"%{b:02x}" for b in os.fsencode(address))
 
 
 @overload
@@ -91,6 +100,12 @@ def said(err: GLib.Error) -> str:
     if message.startswith("GDBus.Error:") and ": " in message:
         message = message.split(": ", 1)[1]
     return escaped(message)[:SAID_MAX]
+
+
+def trying_again() -> str:
+    """How the journal line of a failure that Loop.backoff tries again ends: RETRY apart at
+    first, doubling to RETRY_MAX."""
+    return f"trying again, {RETRY:g} s apart doubling to {RETRY_MAX:g} s"
 
 
 def escape_address(value: str) -> str:
@@ -143,8 +158,8 @@ class Bus:
 
 class Loop:
     """The private context and the bus work done on it: connects, calls, signal subscriptions
-    and name watches, each callback guarded so that what it raises comes out of `dispatch()`;
-    and the journal lines said once a topic.
+    and name watches, each callback guarded so that the first it raises comes out of
+    `dispatch()`; and the journal lines said once a topic.
 
     Build it, then `start()`. Until a successful start `fileno()` is -1, `dispatch()` does
     nothing and `deadline()` is None.
@@ -192,7 +207,8 @@ class Loop:
         return self._fd
 
     def dispatch(self) -> None:
-        """Run every reply, signal and timeout the context has waiting."""
+        """Run the replies, signals and timeouts the context has waiting, until a callback
+        raises: that exception comes out here."""
         if not self.available:
             return
         with self.home():
@@ -224,15 +240,18 @@ class Loop:
 
     def guard[R](self, fn: Callable[..., R]) -> Callable[..., R]:
         """`fn` as a GLib callback: an exception is kept for dispatch() to
-        raise, rather than printed by PyGObject and dropped."""
+        raise, rather than printed by PyGObject and dropped. GLib can run another callback
+        before dispatch() raises: what that one raises is logged."""
         def guarded(*args: object) -> R:
             try:
                 return fn(*args)
-            except Exception as exc:  # noqa: BLE001 -- raised again by dispatch()
+            except Exception as exc:
                 if self._raised is None:
                     self._raised = exc
-                # False stands in for what `fn` did not return: it ends a timeout's source
-                # (timeout), and dispatch() raises `exc` whatever the callback was.
+                else:
+                    log.error("another D-Bus callback failed in the same dispatch: %r", exc,
+                              exc_info=exc)
+                # False stands in for what `fn` did not return: it ends Loop.timeout's source.
                 return cast("R", False)
         return guarded
 
@@ -273,6 +292,68 @@ class Loop:
         with self.home():
             self.gio.DBusConnection.new_for_address(address, flags, None, cancellable,
                                                     self.guard(done))
+
+    def connect(self, bus: Bus, ready: Callable[[Gio.DBusConnection], None],
+                failed: Callable[[str], None],
+                closed: Callable[[GLib.Error | None], None]) -> None:
+        """Open `bus`'s connection at its address (`open`). `ready(conn)` runs once it is up,
+        with `bus.conn` set, its backoff back at RETRY and a `closed` handler that calls
+        `closed(error)`; `failed(why)` runs for a connect that failed or hung up right after
+        Hello. Neither runs for a connect halt() canceled."""
+        bus.retry = None
+        cancellable = bus.cancellable = self.gio.Cancellable()
+
+        def done(_source: object, result: Gio.AsyncResult) -> None:
+            conn: Gio.DBusConnection
+            try:
+                conn = self.gio.DBusConnection.new_for_address_finish(result)
+            except self.glib.Error as err:
+                # A bus that hangs up during Hello fails here with CLOSED: a failed connect,
+                # since no "closed" handler exists yet to try it again.
+                why: str | None = said(err)
+            else:
+                # GDBus emits "closed" from an idle it may queue ahead of this callback, before
+                # a handler can exist (GLib 2.88). Closed here, the bus hung up right after
+                # Hello: a failed connect, tried further apart. A later close comes through the
+                # handler below, since its idle cannot run before this returns.
+                why = "it hung up after Hello" if conn.is_closed() else None
+            if bus.cancellable is not cancellable:
+                # halt() canceled it while it connected, and a canceled connect's finish raises
+                # IOErrorEnum.CANCELLED, even one that connected first (GTask's
+                # check-cancellable), so there is no connection here.
+                return
+            if why is not None:
+                failed(why)
+                return
+            bus.conn, bus.backoff = conn, RETRY
+            bus.closed_handler = conn.connect("closed", self.guard(
+                lambda _closing, _vanished, error: closed(error)))
+            ready(conn)
+        # The caller gives the bus its address before its first connect.
+        self.open(cast("str", bus.address), cancellable, done)
+
+    def drop(self, bus: Bus) -> Gio.DBusConnection | None:
+        """Forget `bus`'s connection and what hung off it: its `closed` handler, its signal
+        subscriptions, its name watches and the owners they found. The connection, still
+        open, or None without one."""
+        conn, bus.conn = bus.conn, None
+        if conn is not None:
+            conn.disconnect(bus.closed_handler)
+            for subscription in bus.subscriptions:
+                conn.signal_unsubscribe(subscription)
+        bus.subscriptions.clear()
+        for watcher in bus.watchers:
+            self.gio.bus_unwatch_name(watcher)
+        bus.watchers.clear()
+        bus.owners.clear()
+        return conn
+
+    def close(self, conn: Gio.DBusConnection) -> None:
+        """Close `conn` without waiting: close_sync flushes and waits for GDBus's worker.
+        Under home(), since GDBus ends the close from an idle on the thread's default context,
+        which outside dispatch() is the process's own, one the daemon never runs."""
+        with self.home():
+            conn.close(None, None)
 
     def backoff(self, holder: Retried, fn: Callable[[], None]) -> None:
         """Run `fn` after `holder.backoff`, in place of a run still waiting, and double that,

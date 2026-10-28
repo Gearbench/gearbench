@@ -20,14 +20,15 @@ from .dbusloop import (
     ACCESS_DENIED,
     CALL_TIMEOUT,
     RETRY,
-    RETRY_MAX,
     Bus,
     Loop,
     bus_addresses,
     said,
+    trying_again,
     utf8,
 )
 from .sni import SHELL, TrayExport
+from .wording import SERVICE
 
 if TYPE_CHECKING:
     from gi.repository import Gio, GLib
@@ -54,16 +55,27 @@ IDLE_MONITOR_PATH = "/org/gnome/Mutter/IdleMonitor/Core"
 FOCUS = "io.github.gearbench.Gearbench.Focus"
 FOCUS_PATH = "/io/github/gearbench/Gearbench/Focus"
 EXTENSION_UUID = "gearbench-focus@gearbench.github.io"
-#: GNOME Shell's extension interface, the one `gnome-extensions enable` calls.
+#: Its metadata.json's name, which GNOME's Extensions app lists it by.
+EXTENSION_NAME = "Gearbench focus"
+#: GNOME Shell's extension interface, the one `gnome-extensions enable` calls, at its path
+#: on the Shell's own name, sni.SHELL. The name org.gnome.Shell.Extensions is a service D-Bus
+#: starts for a call, which passes it on to there and exits 2 s after its last caller
+#: (GNOME Shell 50.1, js/dbusServices/extensions/extensionsService.js and dbusService.js).
 SHELL_EXTENSIONS = "org.gnome.Shell.Extensions"
-SHELL_EXTENSIONS_PATH = "/org/gnome/Shell/Extensions"
+SHELL_EXTENSIONS_PATH = "/org/gnome/Shell"
 APPLICATION = "org.freedesktop.Application"
 #: The window's object path: the app id, dots to slashes, per the Desktop Entry spec.
 APP_PATH = "/io/github/gearbench/Gearbench"
 
-#: The desktop entry's Name, shown by the notices, the tray, the window and logind's
-#: inhibitor list.
+#: The desktop entry's Name.
 APP_NAME = "Gearbench"
+#: What Gearbench is, in the one sentence the About dialog, the desktop entry's Comment, the
+#: metainfo's summary, pyproject.toml's description, `gearbench-ctl --help` and the man
+#: page's NAME and DESCRIPTION give: the
+#: device families, not each model (the owner's decision of 2026-10-22), within AppStream's
+#: 90 characters for a summary (the owner's decision of 2026-10-25).
+APP_SUMMARY = ("Lighting, G keys, DPI and macros for Logitech G keyboards and mice, and headset "
+               "settings")
 #: The desktop entry's id, also gui.window.APP_ID. GNOME finds the app through it, which gives
 #: Gearbench's notices a switch in Settings > Notifications.
 DESKTOP_ENTRY = "io.github.gearbench.Gearbench"
@@ -75,12 +87,18 @@ INHIBIT_WHY = "Turning the keyboard lights off before the machine sleeps"
 #: Said when logind's Inhibit reply names no fd that came with it: none came, or its index
 #: is outside those that did.
 INHIBIT_NO_FD = "logind's Inhibit reply lacked its fd, so a suspend may not wait for the lights"
+#: Said at debug when GetIdletime fails, unless halt() canceled it or its bus closed under
+#: it: the session reads again a wait later.
+IDLE_TIME_UNANSWERED = "Mutter's IdleMonitor did not answer GetIdletime: %s"
 
 #: What is off while logind's Active is not followed: Session.why_inactive takes unknown for
 #: active.
 NOT_HELD_BACK = "key bindings and macros are not held back from another account or a text console"
 #: What is off while the graphical session's LockedHint or Active cannot be read.
 UNREAD_SESSION = {"LockedHint": "the lights do not follow the screen lock", "Active": NOT_HELD_BACK}
+#: What the session bus brings, all off without it or python3-gi.
+ON_THE_SESSION_BUS = ("the screen blank, the idle monitor, the focus from Gearbench's GNOME "
+                      "Shell extension, the notices and the tray icon")
 
 
 def session_class() -> str | None:
@@ -136,8 +154,8 @@ class Desktop:
 
     Build it, then `start()`. Until a successful start nothing reaches a bus: `fileno()` is
     -1, `status()` is all False, and a wanted inhibitor, watch or tray icon is only recorded.
-    The tray icon is sni.TrayExport's, which `show_tray`, `hide_tray`, `refresh_tray` and
-    `tray_state` hand to. The callbacks below run from `dispatch()`:
+    `available`, `fileno()`, `dispatch()` and `deadline()` are dbusloop.Loop's, and the tray
+    icon is sni.TrayExport's. The callbacks below run from `dispatch()`:
 
     - `locked(bool)`, `active(bool)`: LockedHint and Active of user/self's Display session;
       Active is False while another session has the seat. The daemon's own logind session
@@ -202,38 +220,31 @@ class Desktop:
         missing = self._loop.start()
         if missing is not None:
             log.warning("no python3-gi (%s), so the lights do not follow the screen lock or "
-                        "a suspend, %s, and there are no notices or tray icon", missing,
-                        NOT_HELD_BACK)
+                        "a suspend, %s, and %s are off", missing, NOT_HELD_BACK,
+                        ON_THE_SESSION_BUS)
             return False
         defaults = bus_addresses()
         self._system.address = self._system.address or defaults[0]
         self._session.address = self._session.address or defaults[1]
-        for bus in (self._system, self._session):
-            if bus.address is None:
-                log.warning("no session bus address (DBUS_SESSION_BUS_ADDRESS is not set and "
-                            "there is no $XDG_RUNTIME_DIR/bus), so the screen blank, the idle "
-                            "monitor, the focus from Gearbench's GNOME Shell extension, the "
-                            "notices and the tray icon are off")
-                continue
-            self._connect(bus)
+        self._connect(self._system)
+        if self._session.address is None:
+            log.warning("no session bus address (DBUS_SESSION_BUS_ADDRESS is not set and "
+                        "there is no $XDG_RUNTIME_DIR/bus), so %s are off", ON_THE_SESSION_BUS)
+        else:
+            self._connect(self._session)
         return True
 
     @property
     def available(self) -> bool:
-        """True once gi was imported and the context made."""
         return self._loop.available
 
     def fileno(self) -> int:
-        """The context's wakeup fd: readable when a reply or signal waits."""
         return self._loop.fileno()
 
     def dispatch(self) -> None:
-        """Run every reply, signal and timeout the context has waiting."""
         self._loop.dispatch()
 
     def deadline(self) -> float | None:
-        """When the context's next timeout falls due, on time.monotonic()'s
-        clock, which is GLib's too; None when nothing is timed."""
         return self._loop.deadline()
 
     def status(self) -> dict[str, bool]:
@@ -258,54 +269,32 @@ class Desktop:
             return
         for bus in (self._system, self._session):
             bus.halt()
-            conn = bus.conn
-            self._drop(bus)
+            conn = self._drop(bus)
             if conn is not None:
-                # Asynchronous: close_sync flushes and waits for the worker.
-                conn.close(None, None)
+                self._loop.close(conn)
 
     # ------------------------------------------------------ the connections
 
     def _connect(self, bus: Bus) -> None:
-        bus.retry = None
-        bus.cancellable = self._loop.gio.Cancellable()
         # start() leaves a bus without an address unconnected.
-        self._loop.open(cast("str", bus.address), bus.cancellable,
-                        lambda _src, result: self._connected(bus, result))
+        self._loop.connect(bus, lambda _conn: self._connected(bus),
+                           lambda why: self._failed(bus, why),
+                           lambda error: self._closed(bus, error))
 
-    def _connected(self, bus: Bus, result: Gio.AsyncResult) -> None:
-        try:
-            conn = self._loop.gio.DBusConnection.new_for_address_finish(result)
-        except self._loop.glib.Error as err:
-            # close()'s cancel is the only benign failure here. A bus that
-            # hangs up during Hello fails with CLOSED, and no "closed"
-            # handler exists yet to try it again.
-            gio = self._loop.gio
-            if err.matches(gio.io_error_quark(), gio.IOErrorEnum.CANCELLED):
-                return
-            why: str | None = said(err)
-        else:
-            # GDBus emits "closed" from an idle it may queue ahead of this
-            # callback, before a handler can exist (GLib 2.88). Closed here,
-            # the bus hung up right after Hello: a failed connect, tried
-            # further apart. A later close comes through the handler below,
-            # since its idle cannot run before this returns.
-            why = "it hung up after Hello" if conn.is_closed() else None
-        if why is not None:
-            self._loop.say(f"connect {bus.name}", f"cannot connect to the {bus.name} bus at "
-                           f"{bus.address}: {why}; trying again, {RETRY:g} s apart "
-                           f"doubling to {RETRY_MAX:g} s")
-            self._retry(bus)
-            return
-        bus.conn, bus.backoff = conn, RETRY
+    def _failed(self, bus: Bus, why: str) -> None:
+        """A connect that failed, or a bus that hung up right after Hello, which no "closed"
+        handler tries again: said once a topic, and tried again further apart."""
+        self._loop.say(f"connect {bus.name}", f"cannot connect to the {bus.name} bus at "
+                       f"{bus.address}: {why}; {trying_again()}")
+        self._retry(bus)
+
+    def _connected(self, bus: Bus) -> None:
         self._loop.quiet(f"connect {bus.name}")
         if bus.failed:
             log.info("connected to the %s bus again", bus.name)
             bus.failed = False
         else:
             log.debug("connected to the %s bus at %s", bus.name, bus.address)
-        bus.closed_handler = conn.connect("closed", self._loop.guard(
-            lambda _closing, _vanished, error: self._closed(bus, error)))
         if bus is self._system:
             self._setup_system(bus)
         else:
@@ -323,18 +312,10 @@ class Desktop:
         bus.failed = True
         self._loop.backoff(bus, lambda: self._connect(bus))
 
-    def _drop(self, bus: Bus) -> None:
-        """Forget a connection and everything that died with it."""
-        conn, bus.conn = bus.conn, None
-        if conn is not None:
-            conn.disconnect(bus.closed_handler)
-            for subscription in bus.subscriptions:
-                conn.signal_unsubscribe(subscription)
-        bus.subscriptions.clear()
-        for watcher in bus.watchers:
-            self._loop.gio.bus_unwatch_name(watcher)
-        bus.watchers.clear()
-        bus.owners.clear()
+    def _drop(self, bus: Bus) -> Gio.DBusConnection | None:
+        """Forget a connection and everything that died with it (Loop.drop); the connection,
+        still open, or None without one."""
+        conn = self._loop.drop(bus)
         if bus is self._system:
             self._session_path = self._session_sub = None
             self._inhibiting = False
@@ -345,6 +326,7 @@ class Desktop:
             self._watches.clear()
             self._adding.clear()
             self._tray_export.dropped()
+        return conn
 
     # ----------------------------------------------------- logind, the system bus
 
@@ -358,17 +340,21 @@ class Desktop:
         self._inhibit()
 
     def _read_display(self, owner: str) -> None:
-        """user/self's Display, asked again RETRY after a failure while this
-        logind and this connection last: the lock and Active are followed
-        only from that session's path."""
+        """user/self's Display, taken, and asked again RETRY after a failure, while this
+        logind and this connection last: the lock and Active are followed only from that
+        session's path."""
         conn = self._system.conn
 
+        # A logind that went away or was replaced is asked by its successor's
+        # _login1_appeared; one that gave up its name with its connection open still answers.
         def current() -> bool:
             return self._system.conn is conn and self._system.owners.get(LOGIN1) == owner
 
+        def got(reply: tuple) -> None:
+            if current():
+                self._got_display(reply)
+
         def failed(err: GLib.Error) -> None:
-            # A logind that went away or was replaced is asked by its
-            # successor's _login1_appeared.
             if self._loop.benign(err) or not current():
                 return
             self._loop.say("display", f"cannot read the graphical session from logind "
@@ -377,8 +363,7 @@ class Desktop:
                                       f"{RETRY:g} s")
             self._loop.timeout(RETRY, lambda: self._read_display(owner) if current() else None)
         self._loop.call(self._system, LOGIN1, USER_SELF, PROPERTIES, "Get",
-                        self._loop.glib.Variant("(ss)", (USER, "Display")), "(v)",
-                        self._got_display, failed)
+                        self._loop.glib.Variant("(ss)", (USER, "Display")), "(v)", got, failed)
 
     def _login1_gone(self) -> None:
         self._forget_session()
@@ -416,30 +401,35 @@ class Desktop:
         return (("LockedHint", self._set_locked), ("Active", self._set_active))
 
     def _read_session(self, name: str, then: Callable[[bool], None]) -> None:
-        """`name` of the followed session. One logind left unanswered is asked again RETRY
-        later while that subscription lasts: until a reading or a change comes, the lock or
-        Active stays unknown. Any other failure leaves it so, as a logind without it does, and
-        is said unless its connection closed or its logind went."""
+        """`name` of the followed session, taken while that subscription lasts. One logind left
+        unanswered is asked again RETRY later while it lasts: until a reading or a change
+        comes, the lock or Active stays unknown. Any other failure leaves it so, as a logind
+        without it does, and is said unless its connection closed or its logind went."""
         # GDBus numbers subscriptions from one counter for every connection, so an old
         # connection's never equals a new one's.
         sub = self._session_sub
 
         def got(reply: tuple) -> None:
+            # From a logind that gave up its name with its connection open: its successor's
+            # reading is the one that counts.
+            if self._session_sub != sub:
+                return
             self._loop.quiet(f"session {name}")
             then(bool(reply[0]))
 
         def failed(err: GLib.Error) -> None:
-            gio = self._loop.gio
-            if err.matches(gio.io_error_quark(), gio.IOErrorEnum.TIMED_OUT):
-                if self._session_sub == sub:
-                    self._loop.say(f"session {name}", f"logind did not answer a read of the "
-                                   f"graphical session's {name} within {CALL_TIMEOUT:g} s; "
-                                   f"asking again in {RETRY:g} s")
-                    self._loop.timeout(RETRY, lambda: self._read_session(name, then)
-                                       if self._session_sub == sub else None)
             # A logind that went away or was replaced is read again from its successor's
             # _login1_appeared: its NoReply comes after _login1_gone forgot the session.
-            elif not self._loop.benign(err) and self._session_sub == sub:
+            if self._session_sub != sub or self._loop.benign(err):
+                return
+            gio = self._loop.gio
+            if err.matches(gio.io_error_quark(), gio.IOErrorEnum.TIMED_OUT):
+                self._loop.say(f"session {name}", f"logind did not answer a read of the "
+                               f"graphical session's {name} within {CALL_TIMEOUT:g} s; "
+                               f"asking again in {RETRY:g} s")
+                self._loop.timeout(RETRY, lambda: self._read_session(name, then)
+                                   if self._session_sub == sub else None)
+            else:
                 self._loop.say(f"session {name}", f"cannot read the graphical session's {name} "
                                f"from logind ({said(err)}), so {UNREAD_SESSION[name]} until "
                                "logind says it changed")
@@ -490,22 +480,21 @@ class Desktop:
         owner = bus.owners.get(LOGIN1)
 
         def finish(source: Gio.DBusConnection, result: Gio.AsyncResult) -> None:
-            current = source is self._system.conn
+            # A call to a logind that went away or was replaced, or on a connection since
+            # closed, is not current: _login1_gone or _drop reset the flag, and the next
+            # logind may hold a call _login1_appeared made. Relies on the bus sending
+            # NameOwnerChanged before the NoReply for the call it dropped (dbus-daemon 1.16.2).
+            current = source is self._system.conn and self._system.owners.get(LOGIN1) == owner
             if current:
-                # A connection since closed had the flag reset by _drop.
                 self._inhibiting = False
             try:
                 value, fds = source.call_with_unix_fd_list_finish(result)
             except self._loop.glib.Error as err:
-                # A logind that went away or was replaced is asked again by
-                # _login1_appeared. Relies on the bus sending NameOwnerChanged
-                # before the NoReply for the call it dropped (dbus-daemon 1.16.2).
-                if (not current or self._system.owners.get(LOGIN1) != owner
-                        or self._loop.benign(err)):
+                if not current or self._loop.benign(err):
                     return
                 gio = self._loop.gio
                 if err.matches(gio.io_error_quark(), gio.IOErrorEnum.TIMED_OUT):
-                    # No answer is no refusal: a refusal waits for the next take_inhibitor.
+                    # No answer is no refusal: unlike one, it is asked again from here.
                     # _inhibit's guards make the retry nothing once released or held.
                     self._loop.say("inhibit", f"logind did not answer the request for a sleep "
                                               f"delay inhibitor within {CALL_TIMEOUT:g} s, so a "
@@ -527,8 +516,8 @@ class Desktop:
             if keep is None:
                 self._loop.say("inhibit", INHIBIT_NO_FD)
             elif not self._want_inhibitor or self._inhibitor_fd is not None:
-                # Released while the call was on its way, or a call to a
-                # logind that went away was answered after all.
+                # Released while the call was on its way, or a logind that gave up its name
+                # and took it back answered its first call first.
                 os.close(keep)
             else:
                 self._loop.quiet("inhibit")
@@ -561,7 +550,7 @@ class Desktop:
                              lambda _args: self._subscribe_focus(bus))
         self._loop.watch(bus, SHELL, appeared=lambda _owner: self._shell_appeared(bus),
                          vanished=lambda: self._set_focus(None))
-        self._tray_export.connected(bus)
+        self._tray_export.connected()
 
     def _shell_appeared(self, bus: Bus) -> None:
         self._subscribe_focus(bus)
@@ -582,10 +571,10 @@ class Desktop:
                 return
             if self._loop.gio.DBusError.get_remote_error(err) == ACCESS_DENIED:
                 self._loop.say("focus refused", "Gearbench's GNOME Shell extension refused "
-                               "this daemon: it answers the gearbench.service unit alone, so a "
+                               f"this daemon: it answers the {SERVICE}.service unit alone, so a "
                                "daemon run by hand follows focus on Xwayland", logging.INFO)
             else:
-                log.debug("Gearbench's GNOME Shell extension did not answer Subscribe: %s",
+                log.debug("Subscribe to Gearbench's GNOME Shell extension failed: %s",
                           said(err))
         self._loop.call(bus, SHELL, FOCUS_PATH, FOCUS, "Subscribe", None, "(u)", got, refused)
 
@@ -606,7 +595,7 @@ class Desktop:
     def notify(self, summary: str, body: str, icon: str, replaces_id: int = 0,
                done: Callable[[int | None], None] | None = None,
                transient: bool = False) -> bool:
-        """Post a notice; `done` gets its id, or None if the server refused. False, and `done`
+        """Post a notice; `done` gets its id, or None when the call failed. False, and `done`
         is not called, without a session bus.
 
         `replaces_id` is a previous notice's id: while the server still holds it, this one
@@ -681,7 +670,7 @@ class Desktop:
 
         def refused(err: GLib.Error) -> None:
             if not self._loop.benign(err):
-                log.debug("Mutter's IdleMonitor did not answer GetIdletime: %s", said(err))
+                log.debug(IDLE_TIME_UNANSWERED, said(err))
             done(None)
         return self._loop.call(self._session, owner, IDLE_MONITOR_PATH, IDLE_MONITOR,
                                "GetIdletime", None, "(t)", lambda reply: done(reply[0]),
@@ -715,8 +704,9 @@ class Desktop:
                 return          # that owner is gone, or the group's watch was removed since
             self._adding.discard(group)
             if not self._loop.benign(err):
-                self._loop.say("watch", f"Mutter's IdleMonitor did not add a watch: "
-                                        f"{said(err)}; asking again in {RETRY:g} s")
+                self._loop.say("watch", f"Mutter's IdleMonitor did not add a watch, so input "
+                                        f"may not bring the lights back: {said(err)}; asking "
+                                        f"again in {RETRY:g} s")
                 # The daemon may not ask for this group's watch again: a synced
                 # mouse's is asked for once, as the desktop goes idle.
                 self._loop.timeout(RETRY, lambda: self.add_user_active_watch(group)
@@ -743,23 +733,15 @@ class Desktop:
     # ----------------------------------------------------------- the tray icon
 
     def show_tray(self, menu: tray_model.TrayMenu) -> None:
-        """Show `menu` as a StatusNotifierItem: now, or once the session bus and a tray to
-        show it in are there."""
         self._tray_export.show(menu)
 
     def hide_tray(self) -> None:
-        """Take the icon down: its connection closed, which the tray drops the item at, and
-        its watch gone."""
         self._tray_export.hide()
 
     def refresh_tray(self) -> None:
-        """Compare the menu's model with what the tray shows and signal what
-        changed; nothing while no tray is there to show it."""
         self._tray_export.refresh()
 
     def tray_state(self) -> tuple[bool, str | None]:
-        """Whether the icon shows and, when it does not, why; (False, None)
-        while it is not wanted."""
         return self._tray_export.state()
 
     def open_app(self) -> bool:

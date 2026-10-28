@@ -1,0 +1,17 @@
+# Logitech G203 LIGHTSYNC, and the G102 LIGHTSYNC on its ids (046d:c092 and
+# 046d:c09d, cabled alone) -> uaccess on its HID++ interface, 01.
+#
+# Not yet checked on this hardware. Its HID++ collection shares interface 01
+# with the mouse's keyboard collection (Solaar's descriptors give the c092
+# interface=1; the c09d is taken to be the same), as on the G502 HERO, so this
+# node also carries the keystrokes its onboard profile binds to its buttons,
+# and any program the user of the active seat runs can read those. Granted, as
+# the G502 HERO's and the G502 X's interface 01 are (70-g502hero.rules and
+# 70-g502x-wired.rules), and under hid-generic: the kernel's
+# hid-logitech-hidpp does not list either id.
+# Interface 00, the pointer, is not granted.
+#
+# No event node is granted: in host mode Gearbench reads its side buttons and
+# its DPI button through HID++ on the hidraw node below.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c092", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c09d", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"

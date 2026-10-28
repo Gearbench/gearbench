@@ -2,7 +2,7 @@
 Type=Application
 Name=Gearbench
 GenericName=Keyboard, mouse and headset settings
-Comment=Remap keys and buttons, control lighting and DPI, and run macros on Logitech G keyboards and mice; set the microphone and equalizer of the Logitech G432 and Astro A50 Gen 4 headsets
+Comment=Lighting, G keys, DPI and macros for Logitech G keyboards and mice, and headset settings
 Exec=gearbench-ctl gui
 Icon=io.github.gearbench.Gearbench
 Terminal=false

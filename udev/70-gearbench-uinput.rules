@@ -34,6 +34,10 @@
 # of the tag, with only the owner's account in the group, in a copy of this
 # file in /etc/udev/rules.d/. That copy overrides this file by name, and a
 # reinstall or upgrade, which rewrites this file, leaves it alone.
+# Unlike the tag, the group grant does not follow the seat: a member's
+# program opens the node from any session, an SSH login or a lingering
+# service included, and can type into whichever account has the seat. That
+# is why only the owner's account goes in the group.
 # steam-devices' 60-steam-input.rules tags the node too, and its tag alone
 # brings the ACL back, so with that package installed a copy of its file in
 # /etc/udev/rules.d/ with the uinput line left out is needed as well; that

@@ -1,0 +1,25 @@
+# Logitech G213 Prodigy (046d:c336), cabled, its HID++ interface 01 ->
+# uaccess for the seat user. Not yet checked on this hardware: the id is
+# from Solaar's listing of the keyboard and G HUB's device database, and the
+# interface from OpenRGB's detector for it (interface 1, usage page 0xFF43)
+# and a published list of its two hidraw nodes (Solaar issue 2665), read
+# 2026-10-21. The keyboard has no receiver, so its USB identity is its own
+# and the property match below is scoped by interface, as the G915's is.
+#
+# This node is taken to carry what is typed on the G213 beside HID++, as
+# the G815's interface 01 does: a keyboard with two interfaces puts HID++
+# beside its own reports. gearbench-ctl report shows which reports the
+# node's descriptor holds, read from sysfs. So a program the seat's user
+# runs can read what is typed on the keyboard while this rule is installed;
+# Gearbench drops those reports unread. Granted through uaccess, as the
+# G815's interface 01 is (70-g815.rules). Interface 00, the boot keyboard,
+# gets nothing.
+#
+# The grant crosses accounts, as 70-gearbench-uinput.rules says of
+# /dev/uinput's: a program that opened the node keeps reading it after another
+# account gets the seat, and so reads what that account types on the G213, a
+# password at the login screen included. On a machine several people use, that
+# file's group grant, in a copy of this file in /etc/udev/rules.d/, limits the
+# node to the group's accounts. A member then reads it from any session,
+# whoever has the seat.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c336", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"

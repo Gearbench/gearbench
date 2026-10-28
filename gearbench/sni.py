@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
 from . import tray as tray_model
-from .dbusloop import ACCESS_DENIED, RETRY, RETRY_MAX, Bus, Loop, said, utf8
+from .dbusloop import ACCESS_DENIED, RETRY, Bus, Loop, said, trying_again, utf8
 
 if TYPE_CHECKING:
     from gi.repository import Gio, GLib
@@ -25,8 +25,6 @@ WATCHER_PATH = "/StatusNotifierWatcher"
 ITEM = "org.kde.StatusNotifierItem"
 MENU = "com.canonical.dbusmenu"
 
-#: Seconds between comparing the tray's model with what it shows; a command compares at once.
-TRAY_REFRESH = 2.0
 NO_WATCHER = ("nothing owns org.kde.StatusNotifierWatcher, so there is no tray; on GNOME, "
               "Ubuntu's AppIndicators extension provides one")
 NOT_SHELL = ("a program other than GNOME Shell owns org.kde.StatusNotifierWatcher, and under "
@@ -34,6 +32,9 @@ NOT_SHELL = ("a program other than GNOME Shell owns org.kde.StatusNotifierWatche
              "StatusNotifierWatcher` names that program")
 #: How a watcher's refusal of the icon starts, in the journal and `tray_state`.
 NOT_TAKEN = "the tray did not take the icon"
+#: `tray_state`'s word while the icon is on its way to the tray, no reason it does not show:
+#: the window waits for the next status before it says why.
+REGISTERING = "registering with the tray"
 
 # No Activate or ContextMenu: the menu is all the icon does, and a host that finds Activate
 # waits out a double click before it opens the menu (Ubuntu AppIndicators, appIndicator.js).
@@ -111,8 +112,7 @@ class _Tray:
     registered: bool = False
     #: Why the tray did not take it, or that there is no tray, for `state`.
     why: str | None = None
-    #: The refresh and the registration retry, GLib timeout sources.
-    refresh: GLib.Source | None = None
+    #: The registration retry, a GLib timeout source.
     retry: GLib.Source | None = None
     backoff: float = field(default_factory=lambda: RETRY)
     #: The host's XDG activation token from before a click; it lets the window take focus.
@@ -121,10 +121,10 @@ class _Tray:
 
 class TrayExport:
     """The tray icon while it is wanted (`show` to `hide`), exported on the session bus. The
-    tray.TrayMenu's `act` and `opening` run from the loop's `dispatch()`; its `source` runs
-    there too, and from `show` and `refresh`, which the daemon calls outside it. `connected`,
-    `dropped` and `shell_appeared` are how its holder tells it that the daemon's own session
-    connection is set up or gone, or that the Shell appeared."""
+    tray.TrayMenu's callbacks run from the loop's `dispatch()`, and its `source` also from
+    `show` and `refresh`, which the daemon calls outside it. `connected`, `dropped` and
+    `shell_appeared` are how its holder tells it that the daemon's own session connection is
+    set up or gone, or that the Shell appeared."""
 
     def __init__(self, loop: Loop, session: Bus) -> None:
         self._loop = loop
@@ -142,7 +142,7 @@ class TrayExport:
         # prints a critical line of its own for a watch made on one, and the next connection's
         # setup exports the tray (`connected`).
         if self._session.conn is not None and not self._session.conn.is_closed():
-            self._export_tray(self._session, self._tray)
+            self._export_tray(self._tray)
 
     def hide(self) -> None:
         """Take the icon down: its connection closed, which the tray drops the item at, and
@@ -179,13 +179,13 @@ class TrayExport:
             return True, None
         if tray.link_error is not None:
             return False, f"could not connect the icon to the session bus: {tray.link_error}"
-        return False, tray.why or "registering with the tray"
+        return False, tray.why or REGISTERING
 
-    def connected(self, bus: Bus) -> None:
+    def connected(self) -> None:
         """The daemon's own session connection is set up: export the icon on it, if one is
         wanted."""
         if self._tray is not None:
-            self._export_tray(bus, self._tray)
+            self._export_tray(self._tray)
 
     def dropped(self) -> None:
         """The daemon's own session connection is gone: the watcher's watch went with it, and
@@ -198,7 +198,8 @@ class TrayExport:
             tray.watch = 0
 
     def shell_appeared(self) -> None:
-        """A watcher passed over for not being the Shell's may be the Shell's now."""
+        """A watcher passed over for not being the Shell's may be the Shell's now, and one
+        asked before the Shell came may not be."""
         if self._tray is not None:
             self._register(self._tray)
 
@@ -210,10 +211,11 @@ class TrayExport:
         token, self._tray.token = self._tray.token, None
         return token
 
-    def _export_tray(self, bus: Bus, tray: _Tray) -> None:
-        """Connect the item's own connection, and follow the StatusNotifierWatcher on `bus`,
-        the daemon's: the item is registered with each new owner once both are there."""
-        tray.link.address = bus.address
+    def _export_tray(self, tray: _Tray) -> None:
+        """Connect the item's own connection, and follow the StatusNotifierWatcher on the
+        daemon's own session connection: the item is registered with each new owner once both
+        are there."""
+        tray.link.address = self._session.address
         self._link_tray(tray)
 
         def appeared(_conn: object, _name: str, owner: str) -> None:
@@ -231,10 +233,10 @@ class TrayExport:
             # On a connected bus: `show` exports on an open connection, and without one leaves
             # it to `connected`, which the connection's setup calls.
             tray.watch = self._loop.gio.bus_watch_name_on_connection(
-                cast("Gio.DBusConnection", bus.conn), WATCHER,
+                cast("Gio.DBusConnection", self._session.conn), WATCHER,
                 self._loop.gio.BusNameWatcherFlags.NONE, self._loop.guard(appeared),
                 self._loop.guard(vanished))
-        bus.watchers.append(tray.watch)
+        self._session.watchers.append(tray.watch)
 
     def _watcher_appeared(self, tray: _Tray, owner: str) -> None:
         """A tray, or a new one: whatever the last one held went with it."""
@@ -246,53 +248,13 @@ class TrayExport:
         self.refresh()
         self._register(tray)
 
-        def tick() -> None:
-            self.refresh()
-            tray.refresh = self._loop.timeout(TRAY_REFRESH, tick)
-        tray.refresh = self._loop.timeout(TRAY_REFRESH, tick)
-
     def _link_tray(self, tray: _Tray) -> None:
         """Connect the item's own connection to the session bus, then export the item and its
         menu on it and register them. A failure, or a close while the daemon's own session
         connection stays, is tried again on the reconnect's backoff."""
-        link = tray.link
-        link.retry = None
-        cancellable = link.cancellable = self._loop.gio.Cancellable()
-
-        def linked(_source: object, result: Gio.AsyncResult) -> None:
-            conn: Gio.DBusConnection | None = None
-            try:
-                conn = self._loop.gio.DBusConnection.new_for_address_finish(result)
-            except self._loop.glib.Error as err:
-                why: str | None = said(err)
-            else:
-                why = "it hung up after Hello" if conn.is_closed() else None
-            if link.cancellable is not cancellable:
-                # Hidden, or the session connection gone, while it connected: halt() canceled
-                # the connect, and a canceled connect's finish raises IOErrorEnum.CANCELLED,
-                # even one that connected first (GTask's check-cancellable), so there is no
-                # connection here.
-                return
-            if why is not None:
-                tray.link_error = why
-                # A topic of its own, which a shown icon does not reset.
-                self._loop.say("tray connection", f"no tray icon: could not connect it to the "
-                               f"session bus: {why}; trying again, {RETRY:g} s apart doubling "
-                               f"to {RETRY_MAX:g} s")
-                self._relink(tray)
-                return
-            # Nothing for `why`: the connect gave a connection, and it is open.
-            conn = cast("Gio.DBusConnection", conn)
-            link.conn, link.backoff, tray.link_error = conn, RETRY, None
+        def linked(conn: Gio.DBusConnection) -> None:
+            tray.link_error = None
             self._loop.quiet("tray connection")
-
-            def closed(_closing: object, _vanished: bool, _error: GLib.Error | None) -> None:
-                # A bus that went closes the daemon's own connection too, and its drop
-                # (`dropped`) stops this retry.
-                log.debug("the tray icon's connection to the session bus closed")
-                self._unlink_tray(tray)
-                self._relink(tray)
-            link.closed_handler = conn.connect("closed", self._loop.guard(closed))
             item, menu = (self._loop.gio.DBusNodeInfo.new_for_xml(xml).interfaces[0]
                           for xml in (ITEM_XML, MENU_XML))
             with self._loop.home():
@@ -304,8 +266,24 @@ class TrayExport:
                         tray_model.MENU_PATH, menu, self._loop.guard(self._menu_call),
                         self._loop.guard(self._menu_property), None)]
             self._register(tray)
-        # _export_tray gives the link its connected bus's address before the first connect.
-        self._loop.open(cast("str", link.address), cancellable, linked)
+
+        def failed(why: str) -> None:
+            tray.link_error = why
+            # A topic of its own, which a shown icon does not reset.
+            self._loop.say("tray connection", f"no tray icon: could not connect it to the "
+                           f"session bus: {why}; {trying_again()}")
+            self._relink(tray)
+
+        def closed(_error: GLib.Error | None) -> None:
+            # A bus that went closes the daemon's own connection too, and its drop
+            # (`dropped`) stops this retry.
+            log.debug("the tray icon's connection to the session bus closed")
+            self._unlink_tray(tray)
+            self._relink(tray)
+        # Hidden, or the session connection gone, while it connects: halt() cancels it, and
+        # Loop.connect calls none of the three. _export_tray gives the link its connected
+        # bus's address before the first connect.
+        self._loop.connect(tray.link, linked, failed, closed)
 
     def _relink(self, tray: _Tray) -> None:
         self._loop.backoff(tray.link, lambda: self._link_tray(tray))
@@ -313,46 +291,43 @@ class TrayExport:
     def _unlink_tray(self, tray: _Tray) -> None:
         """Close the item's connection, or stop it connecting: the tray drops the item."""
         tray.link.halt()
-        conn, tray.link.conn = tray.link.conn, None
+        conn = self._loop.drop(tray.link)
         if conn is not None:
-            conn.disconnect(tray.link.closed_handler)
             for registration in tray.registrations:
                 conn.unregister_object(registration)
-            # Asynchronous: close_sync flushes and waits for the worker. GDBus ends the close
-            # from an idle on the thread's default context, which outside dispatch() is the
-            # process's own, one the daemon never runs.
-            with self._loop.home():
-                conn.close(None, None)
+            self._loop.close(conn)
         tray.registrations.clear()
         tray.registering = tray.registered = False
 
     def _tray_idle(self, tray: _Tray) -> None:
         """No tray to show it in: nothing timed, nothing registered."""
-        for source in (tray.refresh, tray.retry):
-            if source is not None:
-                source.destroy()
-        tray.refresh = tray.retry = tray.watcher = None
+        if tray.retry is not None:
+            tray.retry.destroy()
+        tray.retry = tray.watcher = None
         tray.registering = tray.registered = False
 
     def _register(self, tray: _Tray) -> None:
         """RegisterStatusNotifierItem by the item's path, from its own connection, whose unique
         name the watcher takes for the item's; once that connection and a tray are there. Under
         GNOME only the Shell's watcher is asked, the rule `_may_be_tray` keeps, as `_from_tray`
-        does: one another program holds gets no registration. A refusal or a timeout is tried again
-        on the reconnect's backoff: the AppIndicators extension answers only once the shell has
-        started."""
+        does: one another program holds gets no registration, and one it took or was asked for
+        before the Shell's name appeared no longer counts (`shell_appeared`). A refusal or a
+        timeout is tried again on the reconnect's backoff: the AppIndicators extension answers
+        only once the shell has started."""
         owner, conn = tray.watcher, tray.link.conn
-        if self._tray is not tray or conn is None or owner is None or tray.registering \
-                or tray.registered:
+        if conn is None or owner is None:
             return
         if not self._may_be_tray(owner):
+            tray.registering = tray.registered = False
             tray.why = NOT_SHELL
             self._loop.say("tray", f"no tray icon: {NOT_SHELL}")
+            return
+        if tray.registering or tray.registered:
             return
         tray.registering = True
 
         def current() -> bool:
-            return self._tray is tray and tray.watcher == owner and tray.link.conn is conn
+            return tray.watcher == owner and tray.link.conn is conn and self._may_be_tray(owner)
 
         def done(_reply: tuple) -> None:
             if current():
@@ -370,8 +345,7 @@ class TrayExport:
             if not current() or self._loop.benign(err):
                 return
             tray.registering, tray.why = False, f"{NOT_TAKEN}: {said(err)}"
-            self._loop.say("tray", f"{tray.why}; trying again, {RETRY:g} s apart doubling to "
-                                   f"{RETRY_MAX:g} s")
+            self._loop.say("tray", f"{tray.why}; {trying_again()}")
             self._loop.backoff(tray, again)
         self._loop.call(tray.link, owner, WATCHER_PATH, WATCHER, "RegisterStatusNotifierItem",
                         self._loop.glib.Variant("(s)", (tray_model.ITEM_PATH,)), None, done,
@@ -429,7 +403,7 @@ class TrayExport:
         return (tray if tray is not None and sender == tray.watcher
                 and self._may_be_tray(sender) else None)
 
-    def _may_be_tray(self, name: str | None) -> bool:
+    def _may_be_tray(self, name: str) -> bool:
         """Whether `name` may be the tray: under GNOME only the Shell may, so it must
         own org.gnome.Shell too; without a Shell, any watcher may."""
         return self._session.owners.get(SHELL) in (None, name)

@@ -13,33 +13,33 @@ key there is refused at save.
 from __future__ import annotations
 
 import logging
+import math
 import string
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-from .config import (
-    ConfigError,
-    SkipWarnings,
-    changed_on_disk,
-    config_dir,
-    expect,
-    file_stamp,
-    from_file,
-    macro_name,
-    refuse_name,
-    sync_removal,
-    write_json,
-)
+from .config import expect, macro_name, refuse_name
 from .library_files import (
+    FolderLibrary,
     by_name,
     check_version,
     file_name,
-    read_folder,
+    may_hold_it,
     read_name,
     refuse_taken,
+    save_renamed,
     slug,
+)
+from .settings_files import (
+    ConfigError,
+    changed_on_disk,
+    config_dir,
+    file_stamp,
+    from_file,
+    make_folder,
+    sync_removal,
 )
 from .uinput import (
     BTN_EXTRA,
@@ -57,7 +57,17 @@ from .uinput import (
     parse_binding,
     shown_spec,
 )
-from .wording import counted, kind_of, reason, whole, word_list, written
+from .wording import (
+    MACRO_NEEDS_A_NAME,
+    counted,
+    escaped,
+    kind_of,
+    quoted,
+    reason,
+    whole,
+    word_list,
+    written,
+)
 
 log = logging.getLogger("gearbench")
 
@@ -67,8 +77,23 @@ VERSION = 1
 #: `toggle` repeats until the same key is pressed again, ignoring the release.
 ONCE, WHILE_HELD, TOGGLE = "once", "while_held", "toggle"
 REPEAT_MODES = (ONCE, WHILE_HELD, TOGGLE)
+#: Each repeat mode's name as the window's Repeat row shows it: the file's value is no word
+#: (while_held).
+REPEAT_NAMES = {ONCE: "Once", WHILE_HELD: "While held", TOGGLE: "Toggle"}
+#: Each repeat mode inside a sentence, as the banner and `status` name it: "while held".
+REPEAT_WORDS = {mode: name.lower() for mode, name in REPEAT_NAMES.items()}
+#: A played macro counting down, and any macro running: the window's banner, `macros` and
+#: `macro-run` say each state in the one sentence, the banner with its mode after it.
+MACRO_STARTS = "Macro {name} starts in {seconds:g} s. Click into the window it is for."
+MACRO_RUNNING = "Macro {name} is running"
 
-#: One line per repeat mode (repeat_summary).
+
+def countdown_seconds(left: float) -> int:
+    """The seconds a countdown shows with `left` to go, in every view: whole and rounded
+    up, so its last tenth reads 1 s, never 0."""
+    return math.ceil(left)
+
+#: One line saying what each repeat mode does, for a list of macros.
 REPEAT_SUMMARIES = {
     ONCE: "runs once",
     WHILE_HELD: "repeats while held",
@@ -80,12 +105,13 @@ KEY, TEXT, DELAY, CLICK = "key", "text", "delay", "click"
 #: in `while_held`, not the hyphens of a binding action.
 KEY_DOWN, KEY_UP = "key_down", "key_up"
 CLICK_DOWN, CLICK_UP = "click_down", "click_up"
-STEP_TYPES = (KEY, KEY_DOWN, KEY_UP, TEXT, DELAY, CLICK, CLICK_DOWN, CLICK_UP)
 
 #: The step types whose `value` is a key spec, and those whose `button` names
 #: a button.
 KEY_STEPS = (KEY, KEY_DOWN, KEY_UP)
 CLICK_STEPS = (CLICK, CLICK_DOWN, CLICK_UP)
+
+STEP_TYPES = (*KEY_STEPS, TEXT, DELAY, *CLICK_STEPS)
 
 #: A click step's button name to the evdev code the virtual mouse sends.
 CLICK_BUTTONS: dict[str, int] = {
@@ -93,11 +119,12 @@ CLICK_BUTTONS: dict[str, int] = {
     "side": BTN_SIDE, "extra": BTN_EXTRA,
 }
 
-#: A click step's button as the user reads it: "extra" alone does not say
-#: which physical button it is.
+#: A click step's button as the user reads it, the Mouse tab's words for the same buttons
+#: (Back and Forward send BTN_SIDE and BTN_EXTRA): "extra" alone does not say which physical
+#: button it is. The file keeps side and extra.
 CLICK_LABELS: dict[str, str] = {
     "left": "Left", "right": "Right", "middle": "Middle",
-    "side": "Side (back)", "extra": "Extra (forward)",
+    "side": "Back", "extra": "Forward",
 }
 
 # -- the caps --------------------------------------------------------------
@@ -119,7 +146,7 @@ MIN_CYCLE_MS = 50
 #: new-macro default, the owner's decision of 2026-09-23.
 STANDARD_DELAY_MS = 50
 
-#: Playing a macro by hand (the window's Play, `gearbench-ctl macro-run`), the
+#: Running a macro by hand (the window's Run, `gearbench-ctl macro-run`), the
 #: owner's decision of 2026-09-24. PLAY_DELAY: the countdown both front ends
 #: ask for, in seconds, to click into the target window. MAX_PLAY_DELAY: the
 #: most the daemon takes. PLAY_KEY: the key a played macro runs under, which no
@@ -195,12 +222,12 @@ def validate_step(raw: object, index: int, where: str) -> dict:
     """One step, checked and normalized, or a ConfigError naming its position and field."""
     at = f"{where}.steps[{index}]"
     if not isinstance(raw, dict):
-        raise ConfigError(f"{at}: a step must be a JSON object, not {kind_of(raw)}")
+        raise ConfigError(f"{at} is a JSON object, not {kind_of(raw)}")
     # Not str(): str() of a deeply nested list recurses too far.
     kind = raw.get("type", "")
     if kind not in STEP_TYPES:
         raise ConfigError(
-            f"{at}.type: must be {word_list(STEP_TYPES)}, {_not(raw, 'type')}")
+            f"{at}.type is {word_list(STEP_TYPES)}, {_not(raw, 'type')}")
 
     if kind in KEY_STEPS or kind == TEXT:
         # Not str(): a null value would type "None".
@@ -215,8 +242,8 @@ def validate_step(raw: object, index: int, where: str) -> dict:
             raise ConfigError(f"{at}.value: a {kind} step needs a key spec like 'ctrl+f5'")
         if macro_name(spec) is not None:
             raise ConfigError(
-                f"{at}.value: a macro cannot run another macro. Copy the steps in "
-                f"instead."
+                f"{at}.value: a macro cannot run another macro; copy the steps in "
+                f"instead"
             )
         try:
             parse_binding(spec)
@@ -245,7 +272,7 @@ def validate_step(raw: object, index: int, where: str) -> dict:
     # A str check, not str().lower(): str() of a deeply nested list recurses too far.
     if not isinstance(button, str) or button.lower() not in CLICK_BUTTONS:
         raise ConfigError(
-            f"{at}.button: must be {word_list(list(CLICK_BUTTONS))}, {_not(raw, 'button')}"
+            f"{at}.button is {word_list(list(CLICK_BUTTONS))}, {_not(raw, 'button')}"
         )
     return {"type": kind, "button": button.lower()}
 
@@ -267,7 +294,7 @@ def validate_steps(raw: object, where: str) -> list[dict]:
     if raw is None:
         raw = []
     if not isinstance(raw, list):
-        raise ConfigError(f"{where}.steps: must be a list of steps")
+        raise ConfigError(f"{where}.steps is a list of steps, not {kind_of(raw)}")
     if not raw:
         raise ConfigError(f"{where}.steps: a macro needs at least one step")
     if len(raw) > MAX_STEPS:
@@ -299,13 +326,15 @@ class Macro:
     @classmethod
     def from_json(cls, data: object, where: str) -> Macro:
         if not isinstance(data, dict):
-            raise ConfigError(f"{where}: a macro must be a JSON object")
+            # After a colon, which a row or a line titled with the file's name drops
+            # (library_files.unread_reason).
+            raise ConfigError(f"{where}: a macro is a JSON object, not {kind_of(data)}")
         check_version(data, where, VERSION)
-        name = read_name(data, where, "macro")
+        name = read_name(data, where, MACRO_NEEDS_A_NAME)
         repeat = data.get("repeat", ONCE)
         if repeat not in REPEAT_MODES:
             raise ConfigError(
-                f"{where}.repeat: must be {word_list(REPEAT_MODES)}, not {written(repeat)}"
+                f"{where}.repeat is {word_list(REPEAT_MODES)}, not {written(repeat)}"
             )
         return cls(name=name, repeat=repeat, steps=validate_steps(data.get("steps"), where))
 
@@ -317,67 +346,48 @@ class Macro:
         macro.path = path
         return macro
 
-    def target(self, directory: Path | None) -> Path:
-        """The file its name calls for."""
-        wanted = directory or (self.path.parent if self.path else macros_dir())
-        return wanted / file_name(self.name)
-
     def save(self, directory: Path | None = None, replace: Path | None = None) -> Path:
         """Validate, so a front end cannot write what the loader would refuse,
         then write atomically to the file the name calls for.
 
         A renamed macro moves there and its old file goes, so no file's name and
-        contents disagree. Neither a move nor a new macro writes over an existing
-        file (another macro's, or one the library could not read), as in
-        `GameProfile.save`, unless it is `replace`, the file of the macro the
-        user agreed to lose.
+        contents disagree; an old file that is a link moves there and is written
+        through. An old file that cannot be removed refuses the move, and the new
+        file goes again unless it was `replace`'s (save_renamed). Neither a move
+        nor a new macro writes over an existing file (another macro's, or one the
+        library could not read), as in `GameProfile.save`, unless it is `replace`,
+        the file of the macro the user agreed to lose.
         """
         # Before the steps, or a blank name is reported under its hashed slug.
         if not self.name.strip():
-            raise ConfigError("name: a macro needs a name")
+            raise ConfigError(f"name: {MACRO_NEEDS_A_NAME}")
         self.steps = validate_steps(self.steps, slug(self.name))
         if self.repeat not in REPEAT_MODES:
-            raise ConfigError(f"repeat: must be {word_list(REPEAT_MODES)}, "
+            raise ConfigError(f"repeat is {word_list(REPEAT_MODES)}, "
                               f"not {written(self.repeat)}")
         refuse_name(self.name, "name")
-        target = self.target(directory)
+        target = (directory or macros_dir()) / file_name(self.name)
         # Not following a link: one to nothing or a loop is a file the library
         # lists as unreadable.
         if (self.path != target and target.exists(follow_symlinks=False)
                 and target != replace):
             refuse_taken(target, Macro.load, "macro")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        write_json(target, self.to_json(), ".macro-")
-        if self.path is not None and self.path != target:
-            self.path.unlink(missing_ok=True)
-            sync_removal(self.path)
+        make_folder(target)
+        save_renamed(self.path, target, self.to_json(), ".macro-", written_over=target == replace)
         self.path = target
         return target
 
 
-class MacroLibrary:
-    """The set of macros on disk, read as `profiles.Library` reads the game profiles,
-    by `library_files.read_folder`: a folder it cannot list is one skipped entry, and of two
-    files of one name it reads the one a save writes, or else the first by file name."""
+class MacroLibrary(FolderLibrary[Macro]):
+    """The set of macros on disk, read as `profiles.Library` reads the game profiles
+    (`library_files.read_folder`)."""
 
     def __init__(self, directory: Path | None = None) -> None:
-        self.directory = directory or macros_dir()
-        self._skipped = SkipWarnings("macro")
-        #: (file name, why) for each file the last `all()` left out, for the window
-        #: to show: those it could not read and those another file of the same name
-        #: is read in place of. A directory it could not list is one entry, under
-        #: its own name.
-        self.skipped: list[tuple[str, str]] = []
-        #: Why the last `all()` could not list the directory, or None, as library_files.Folder
-        #: has it.
-        self.unlisted_reason: str | None = None
+        super().__init__(directory or macros_dir(), "macro")
         #: file_stamp of each file at its first read or last write here; `save`
         #: and `delete` refuse a file changed since. Every use reads the files,
         #: so a later read keeps the stamp: only `reread` takes a hand edit as read.
         self.stamps: dict[Path, tuple[int, int, int, int] | None] = {}
-
-    def names(self) -> list[str]:
-        return [m.name for m in self.all()]
 
     def all(self) -> list[Macro]:
         def load(path: Path) -> Macro:
@@ -387,12 +397,21 @@ class MacroLibrary:
             self.stamps.setdefault(path, stamp)
             return macro
 
-        folder = read_folder(self.directory, load, self._skipped)
-        self.skipped, self.unlisted_reason = folder.skipped, folder.unlisted_reason
-        return folder.kept
+        return self.read(load)
 
     def get(self, name: str) -> Macro | None:
         return by_name(self.all(), name)
+
+    def not_found(self, name: str) -> str:
+        """The refusal of `name`, which the last `all()` did not find, with why where the
+        folder could not be listed or a file would not load, which may hold it. A shadowed
+        file is not one: its name is that of the file read in its place."""
+        said = f"no macro named {quoted(name)}"
+        if self.unlisted_reason is not None:
+            # The one entry, under the folder's name, its path and reason in words.
+            return f"{said}: {self.skipped[0][1]}"
+        unread = [escaped(file) for file, _why in self.unread()]
+        return f"{said}; {may_hold_it(unread)}" if unread else said
 
     def delete(self, name: str) -> bool:
         """Remove a macro's file; raise FileChanged if it changed since read or written here."""
@@ -410,13 +429,34 @@ class MacroLibrary:
     def save(self, macro: Macro, replace: Macro | None = None) -> Path:
         """Write `macro` (Macro.save), then remove the file of `replace`, the
         macro the user agreed to lose. Nothing is written when a file it would
-        write over or remove changed on disk since read or written here."""
+        write over or remove changed on disk since read or written here. The
+        file of `replace` that cannot be removed is a warning, and the save
+        stands; the old file of a rename that cannot be removed refuses the
+        save (Macro.save), and what that save wrote all the same is stamped as
+        written here."""
         was, gone = macro.path, replace.path if replace is not None else None
-        self.check_unchanged(was, macro.target(self.directory), gone)
-        path = macro.save(self.directory, replace=gone)
+        # Not the file the name calls for: where it is neither of these, Macro.save refuses
+        # it (refuse_taken) in words that name the macro it holds, which a reload would not change.
+        self.check_unchanged(was, gone)
+        try:
+            path = macro.save(self.directory, replace=gone)
+        except OSError:
+            # A refused rename can have written `gone`, the replaced macro's file, or the file
+            # `was` links to (save_renamed): this save's contents, not a hand edit.
+            for old in (was, gone):
+                if old is not None:
+                    self.stamps[old] = file_stamp(old)
+            raise
         if gone is not None and gone != path:
-            gone.unlink(missing_ok=True)
-            sync_removal(gone)
+            try:
+                gone.unlink(missing_ok=True)
+            except OSError as exc:
+                # As for a failed sync_removal: the save is on disk, and the file left holds
+                # the name `path` now holds, so the library reads `path` in its place.
+                log.warning("%s is replaced by %s, but could not be removed (%s); remove it "
+                            "by hand", escaped(gone), escaped(path), reason(exc))
+            else:
+                sync_removal(gone)
         for old in (was, gone):
             if old is not None and old != path:
                 self.stamps.pop(old, None)
@@ -489,11 +529,6 @@ class MacroRunner:
         #: only for a macro played with a delay.
         self._starts_at = 0.0
 
-    @property
-    def holding(self) -> tuple[tuple[str, int], ...]:
-        """What the macro has pressed and not released, oldest first."""
-        return tuple(self._held)
-
     def start(self, macro: Macro, key: str, now: float) -> None:
         """Begin a macro under the key that was pressed; whatever ran stops first.
 
@@ -504,7 +539,7 @@ class MacroRunner:
         self._begin(macro, key, held=True, at=now)
 
     def play(self, macro: Macro, now: float, delay: float = 0.0) -> None:
-        """Begin a macro no key started (Play, `macro-run`), `delay` seconds from `now`.
+        """Begin a macro no key started (Run, `macro-run`), `delay` seconds from `now`.
 
         With no key down, a `while_held` macro runs one pass and a `toggle` one
         runs until `cancel()`. A second play restarts it: Stop is what stops it.
@@ -603,9 +638,7 @@ class MacroRunner:
         """Whether another cycle follows the one that just ended."""
         # A macro: `tick` asks this of the one it runs.
         repeat = cast(Macro, self.macro).repeat
-        if repeat == TOGGLE:
-            return True         # only a second press or a cancel stops it
-        return repeat == WHILE_HELD and self.held
+        return repeat == TOGGLE or (repeat == WHILE_HELD and self.held)
 
     # -- emitting --------------------------------------------------------
 
@@ -665,11 +698,12 @@ class MacroRunner:
 
     def _let_go(self, device: str, code: int, target: VirtualKeyboard | VirtualMouse) -> None:
         """Release one code, unless the macro does not hold it: a code another holder
-        keeps down is left. Named around `release`."""
+        keeps down is left. The hold goes before the write, as the virtual device stops
+        counting a holder before it writes the release: a failed one holds nothing."""
         if (device, code) not in self._held:
             return
-        self._write(device, code, False, target)
         self._held.remove((device, code))
+        self._write(device, code, False, target)
 
     @staticmethod
     def _write(device: str, code: int, pressed: bool,
@@ -745,8 +779,7 @@ class MacroRecorder:
 
     An action that does not fit under the cap is refused and sets `full`; room
     for the release of everything held is kept back, so `finish()` can always
-    balance the recording. A modifier still waiting at Stop is left out when it
-    does not fit, or when `_requeue` put it back (`finish`).
+    balance the recording.
     """
 
     #: Which device a hold belongs to. Only ever compared, never emitted.
@@ -940,9 +973,11 @@ class MacroRecorder:
         waiting, self._waiting = self._waiting, []
         let_go, self._let_go = self._let_go, []
         self._requeued.clear()
-        events = sorted([(when, False, spec, code) for when, spec, code in waiting]
-                        + [(when, True, kind, 0) for when, kind in let_go],
-                        key=lambda event: event[:2])
+        # At one time a release goes first: a press of its kind came after it, since a
+        # release starts to wait only when no key of its kind is down.
+        events = sorted([(when, True, kind, 0) for when, kind in let_go]
+                        + [(when, False, spec, code) for when, spec, code in waiting],
+                        key=lambda event: event[0])
         for when, up, name, code in events:
             if not up:
                 if not self._press(when, (self.KEY_DEVICE, code), {"value": name}):
@@ -1150,10 +1185,10 @@ def unbalanced(steps: list[dict], repeat: str) -> list[str]:
     # Each release that let go of nothing, with its keys no earlier release named.
     orphans: list[tuple[int, str, list[tuple[str, object]]]] = []
     for index, step in enumerate(steps):
-        kind = step.get("type")
+        kind = step["type"]
         keys: list[tuple[tuple[str, object], str]]
         if kind in (KEY_DOWN, KEY_UP):
-            spec = str(step.get("value", ""))
+            spec = step["value"]
             try:
                 before, last = parse_binding(spec)
             except UinputError:
@@ -1189,15 +1224,33 @@ def unbalanced(steps: list[dict], repeat: str) -> list[str]:
                for index in sorted(left)])
 
 
-def repeat_summary(repeat: str) -> str:
-    """One line saying what a repeat mode does, for a list of macros."""
-    return REPEAT_SUMMARIES[repeat]
+#: The warning under the steps of a repeating macro that ends without a delay.
+ENDS_WITHOUT_DELAY = ("Ends without a delay, so the next pass can start at once: a game may "
+                      "not register the input.")
+
+
+def ends_without_delay(steps: list[dict], repeat: str) -> list[str]:
+    """The warning for a repeating macro whose trailing Delays, if any, add up to 0 ms.
+
+    Its next pass can start as its last step goes, so a release there is followed at once
+    by the next press, which a game may not see. The wording is the owner's but for
+    "can": the runner starts a pass no sooner than MIN_CYCLE_MS after the last one
+    started. Nothing is added at playback (the owner's decision of 2026-09-23).
+    """
+    tail = 0
+    for step in reversed(steps):
+        if step["type"] != DELAY:
+            break
+        tail += step["ms"]
+    if repeat in (WHILE_HELD, TOGGLE) and steps and tail == 0:
+        return [ENDS_WITHOUT_DELAY]
+    return []
 
 
 def macro_summary(count: int, repeat: str) -> str:
     """A macro of `count` steps in a few words, for a list of macros: "3 steps, repeats
     while held"."""
-    return f"{counted(count, 'step')}, {repeat_summary(repeat)}"
+    return f"{counted(count, 'step')}, {REPEAT_SUMMARIES[repeat]}"
 
 
 def describe_macros(macros: Iterable[Macro]) -> list[dict]:

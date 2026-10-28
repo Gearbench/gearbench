@@ -94,10 +94,11 @@ def group_denied(path: Path | str) -> str | None:
     except KeyError:
         # The group lists its members by name, and usermod takes one: neither works on a uid.
         return (f"uid {os.getuid()} has no name this service can look up: run "
-                f"sudo usermod -aG {GROUP} $USER, then {then}")
+                f"`sudo usermod -aG {GROUP} $USER`, then {then}")
     if user in members:
         return f"{user} joined the {GROUP} group after this service's user manager started: {then}"
-    return f"{user} is not in the {GROUP} group: run sudo usermod -aG {GROUP} {user}, then {then}"
+    return (f"{user} is not in the {GROUP} group: run `sudo usermod -aG {GROUP} {user}`, "
+            f"then {then}")
 
 
 def parse_events(buffer: bytes) -> Iterator[tuple[int, int, int]]:
@@ -106,6 +107,28 @@ def parse_events(buffer: bytes) -> Iterator[tuple[int, int, int]]:
     for offset in range(0, len(buffer) - size + 1, size):
         _sec, _usec, type_, code, value = EVENT.unpack_from(buffer, offset)
         yield type_, code, value
+
+
+def states_at_drops(kept: list[tuple[int, int, int] | None],
+                    now: set[int]) -> dict[int, set[int]]:
+    """The keys down at each drop (a None) in `kept`, by its index: `now`, the kernel's
+    state, with each press and release read after the drop undone, the last first (an
+    autorepeat changes nothing). The kernel queues a press or release only when the key
+    changes (input_get_disposition), so a change the events do not account for was lost in
+    a drop, or made after the drain's last read and thrown away by the key-state read
+    (EventReader._resync). Nothing tells which drop lost it, or whether one did, so it shows
+    at the first drop after the key's last press or release before the change (for one made
+    after the drain, its last in the batch)."""
+    down = set(now)
+    states: dict[int, set[int]] = {}
+    for index, entry in reversed(list(enumerate(kept))):
+        if entry is None:
+            states[index] = set(down)
+        elif entry[0] == EV_KEY and entry[2] == 1:
+            down.discard(entry[1])
+        elif entry[0] == EV_KEY and entry[2] == 0:
+            down.add(entry[1])
+    return states
 
 
 class EventReader:
@@ -160,39 +183,56 @@ class EventReader:
     def _resync(self, events: list[tuple[int, int, int]]) -> list[tuple[int, int, int]]:
         """The events, with an overflow turned back into a consistent state: SYN_DROPPED to
         the next SYN_REPORT is a partial packet, thrown away as the evdev documentation says,
-        and presses and releases are added for the keys that differ from the kernel's state."""
+        and in its place go presses and releases for the keys that differ there from what was
+        reported (`states_at_drops`). Reading the key state also throws away the key events
+        still queued (evdev_handle_get_val), so a change made after the drain's last read is
+        only in that state. Nothing tells it from one a drop lost, so it goes in the place of
+        the first drop no press or release of its key follows, and at the end only where one
+        follows the last drop."""
+        kept: list[tuple[int, int, int] | None] = []  # None in each drop's place
+        skipping = False
+        for event in events:
+            if event[:2] == (EV_SYN, SYN_DROPPED):
+                kept.append(None)
+                skipping = True
+            elif skipping:
+                skipping = event[:2] != (EV_SYN, SYN_REPORT)
+            else:
+                kept.append(event)
+        now = self._kernel_keys() if None in kept else None
+        states = {} if now is None else states_at_drops(kept, now)
         out: list[tuple[int, int, int]] = []
-        dropped = skipping = False
-        for type_, code, value in events:
-            if type_ == EV_SYN and code == SYN_DROPPED:
-                dropped = skipping = True
+        for index, entry in enumerate(kept):
+            if entry is None:
+                if index in states:
+                    out.extend(self._key_changes(states[index]))
                 continue
-            if skipping:
-                if type_ == EV_SYN and code == SYN_REPORT:
-                    skipping = False
-                continue
-            out.append((type_, code, value))
+            out.append(entry)
+            type_, code, value = entry
             if type_ == EV_KEY and value == 1:
                 self._down.add(code)
             elif type_ == EV_KEY and value == 0:
                 self._down.discard(code)
-        if dropped:
-            out.extend(self._key_changes())
+        if now is not None:
+            out.extend(self._key_changes(now))
         return out
 
-    def _key_changes(self) -> list[tuple[int, int, int]]:
-        """Presses and releases that bring what was reported to the kernel's state."""
+    def _kernel_keys(self) -> set[int] | None:
+        """The keys the kernel has down, or None where the node would not say."""
         try:
             bits = fcntl.ioctl(self._fd, EVIOCGKEY, bytes(KEY_BITMAP))
         except OSError:
             # Raising would lose the batch, a release read before the drop included. The
             # next read that fails says whether the node went.
-            return []
+            return None
         # The kernel writes the state as longs in the machine's byte order (bits_to_user).
         size = MASK_BYTES * 8
         words = [int.from_bytes(bits[i:i + MASK_BYTES], sys.byteorder)
                  for i in range(0, KEY_BITMAP, MASK_BYTES)]
-        now = {code for code in range(KEY_BITMAP * 8) if words[code // size] >> (code % size) & 1}
+        return {code for code in range(KEY_BITMAP * 8) if words[code // size] >> (code % size) & 1}
+
+    def _key_changes(self, now: set[int]) -> list[tuple[int, int, int]]:
+        """Presses and releases that bring what was reported to `now`."""
         changes = ([(EV_KEY, code, 0) for code in sorted(self._down - now)]
                    + [(EV_KEY, code, 1) for code in sorted(now - self._down)])
         self._down = now

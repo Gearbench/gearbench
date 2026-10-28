@@ -13,6 +13,11 @@
 # mouse, its keystrokes would arrive on this node, the one this file grants.
 # Read from the driver, not checked on hardware.
 #
+# The node also carries the keystrokes the mouse sends for a button its
+# onboard profile binds to a key, as 70-g502x.rules says of the G502 X PLUS's.
+# Gearbench has no host mode for the G305, so its onboard profile keeps
+# running while the daemon runs too.
+#
 # Read off the hardware on 2026-09-22: the receiver presents interfaces 00,
 # 01 and 02, and the G305 appears as a separate node with no interface of its
 # own. KERNELS matches a parent's kernel name, which for the paired device is

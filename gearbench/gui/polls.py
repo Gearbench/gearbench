@@ -62,9 +62,9 @@ class Polls:
 
         A poll started again reads at once, and so does the window becoming active again, the
         mouse or the A50 asked if its tab shows, even with an unasked read still out; the
-        A50 not while a save runs (HeadsetPage.poll). The Spatial sound group and the G432's
-        page wait for the read they have out. The first show or activation reads nothing
-        more.
+        A50 not while a save runs (HeadsetPage.poll). The Spatial sound group and each
+        headset page attached wait for the read they have out. The first show or activation
+        reads nothing more.
         """
         shown = self.win.get_mapped() and not self.win.is_suspended()
         active = shown and self.win.is_active()
@@ -76,9 +76,7 @@ class Polls:
         headset = self._run_poll("headset", shown and not self._away, 5, self._headset_tick)
         if status or back:
             self._tick()
-        # Back on its tab the device is asked (the headset not while a save runs) even while
-        # the poll's unasked read is still out, which tick skips as pending; mid-drag tick
-        # skips it as it always does.
+        # tick skips while the poll's unasked read is out, so not through it unless mid-drag.
         if (back and "mouse" in self._timers and self.on_mouse_tab()
                 and not self.win.dragging):
             self.win.mouse.refresh()
@@ -86,9 +84,7 @@ class Polls:
             self._mouse_tick()
         if (back and "headset" in self._timers and self.on_headset_tab()
                 and not self.win.dragging):
-            self.win.headset.poll()
-            self.win.spatial.tick()
-            self._g432_tick()
+            self._read_headset_tab()
         elif headset or (back and "headset" in self._timers):
             self._headset_tick()
 
@@ -111,9 +107,7 @@ class Polls:
         return self.win.stack.get_visible_child_name() == "mouse"
 
     def asks_mouse(self) -> bool:
-        """Whether a read the window makes on its own, not for a click or a write, asks the
-        mouse: only on its tab of the active window. Elsewhere the daemon answers from what it
-        holds (on_presence)."""
+        """Whether a read the window makes on its own, not for a click or write, asks the mouse."""
         return self.on_mouse_tab() and self.win.is_active()
 
     def on_headset_tab(self) -> bool:
@@ -121,22 +115,29 @@ class Polls:
 
     def on_tab(self, _stack: Adw.ViewStack, _pspec: GObject.ParamSpec) -> None:
         """Read the mouse or the headset as its tab comes up: off it, the
-        poll asks the daemon only for what it already holds. The Headset tab
-        asks as HeadsetPage.poll says; the Spatial sound group, and the G432's page while one is
-        attached (_g432_tick), read unless a read of theirs is out."""
+        poll asks the daemon only for what it already holds."""
         if self.on_mouse_tab():
             self.win.mouse.refresh()
         elif self.on_headset_tab():
-            self.win.headset.poll()
-            self.win.spatial.refresh()
-            self._g432_tick()
+            self._read_headset_tab()
 
     def on_page(self, _stack: Gtk.Stack, _pspec: GObject.ParamSpec) -> None:
         """On the Headset tab, read the Spatial sound group as the page that comes up shows
-        it, and the G432's page while one is attached, as on_tab does."""
+        it, and each headset page while its headset is attached, as on_tab does."""
         if self.on_headset_tab():
-            self.win.spatial.refresh()
-            self._g432_tick()
+            self._read_pages()
+
+    def _read_headset_tab(self) -> None:
+        """The Headset tab's reads as it comes into view: the A50's page as
+        HeadsetPage.poll says, then _read_pages."""
+        self.win.headset.poll()
+        self._read_pages()
+
+    def _read_pages(self) -> None:
+        """The Spatial sound group, and each headset page while its headset is attached
+        (HeadsetStack.poll), each unless a read of theirs is out."""
+        self.win.spatial.refresh()
+        self.win.headset_tab.poll(True)
 
     def _status_poll(self) -> bool:
         """The 3 s status poll, which leaves status to the macro banner's one-second watch
@@ -157,20 +158,8 @@ class Polls:
         # Only on its tab: every read runs systemctl and pw-dump.
         if self.on_headset_tab():
             self.win.spatial.tick()
-        self._g432_tick()
+        self.win.headset_tab.poll(self.on_headset_tab())
         return True
-
-    def _g432_tick(self) -> None:
-        """The G432's page while status says one is attached: on the tab with the page
-        showing, G432Page.tick, some of whose reads run systemctl and pw-dump; elsewhere only
-        the daemon's answer from what it holds, which sends the headset nothing."""
-        tab = self.win.headset_tab
-        if not tab.g432_attached:
-            return
-        if self.on_headset_tab() and tab.showing_g432:
-            self.win.g432.tick()
-        else:
-            self.win.g432.refresh()
 
     def take_away(self, status: dict) -> None:
         """Take `session_locked` and `screen_blanked`: the device polls stop while either

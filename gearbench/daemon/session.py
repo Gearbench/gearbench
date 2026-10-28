@@ -1,11 +1,10 @@
-"""The desktop session: the screen lock, the blank, suspend, input while
-locked, a synced mouse's idleness, and the desktop notices."""
+"""The desktop session: the screen lock, the blank, suspend, input while locked, the
+desktop's idleness a synced mouse or headset follows, and the desktop notices."""
 
 from __future__ import annotations
 
 import contextlib
 import logging
-import os
 import selectors
 import time
 from collections.abc import Callable
@@ -13,14 +12,8 @@ from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from ..desktop import Desktop
-from ..keyboard import name as keyboard_name
 from ..lighting import DARK, DIM, LEVEL_WORDS, LIT
-from .shared import (
-    KEYBOARD_BATTERY_INTERVAL,
-    BatteryNotices,
-    on_or_off,
-    switch_refusal,
-)
+from .shared import switch_value
 
 if TYPE_CHECKING:
     from . import Daemon
@@ -28,13 +21,16 @@ if TYPE_CHECKING:
 log = logging.getLogger("gearbench")
 
 DPI_NOTICE_ICON = "input-mouse-symbolic"
-#: The DPI notice's title, a mouse's name and the DPI it is on now. DpiNotice posts it with no
-#: body.
+#: The DPI notice's title, a mouse's name and the DPI it is on now.
 DPI_NOTICE_TITLE = "{}: {} DPI"
+ASSIGNMENTS_NOTICE_ICON = "input-keyboard-symbolic"
+#: The custom assignments notice's title, a keyboard's name and "on" or "off".
+ASSIGNMENTS_NOTICE_TITLE = "{}: custom assignments {}"
 #: Seconds after the last step that the daemon takes its DPI notice down: GNOME holds a
 #: banner under a fullscreen window and would show a stale one later; under Do Not Disturb it
 #: shows none but keeps the notice in its list. Its banner lasts about 4 s, so a step is not
-#: cut short.
+#: cut short. The custom assignments notice takes this time and DPI_NOTICE_REPLACE too
+#: (TransientNotice).
 DPI_NOTICE_CLOSE = 5.0
 #: Seconds after a post that the next step may still replace the notice in place. GNOME
 #: Shell 50.1 (messageTray.js) eases a banner out 4 s after its 0.2 s ease in, or 2 s after
@@ -55,81 +51,24 @@ LOCKED_DARK_MS = 60_000
 LOCK_SETTLE = 1.0
 
 #: The two groups of waits on the desktop's idle time, each armed and dropped on its own, with
-#: its own user-active watch in Mutter: the lock's (input while locked, its dim and dark) and a
-#: synced mouse's (its dim and dark, and the input after them).
+#: its own user-active watch in Mutter: the lock's (input while locked, its dim and dark) and
+#: color sync's, for a synced mouse or headset (the desktop's dim and dark, and the input after
+#: them).
 LOCK_WATCHES = "lock"
 MOUSE_WATCHES = "mouse"
 
 
-class KeyboardBattery(BatteryNotices):
-    """The keyboard's low-battery notices, and the poll that reads its battery for them."""
+class TransientNotice:
+    """A transient notice that the next post soon after replaces (DPI_NOTICE_REPLACE).
+    `wanted` is the switch, asked at each post, and ICON the subclass's icon."""
 
-    BATTERY_PREFIX = ""
-    BATTERY_DEVICE = "keyboard"
-    BATTERY_POWERED = "the keyboard is on external power"
-    BATTERY_BODY = "Plug in its cable to charge it."
-
-    def __init__(self, daemon: Daemon) -> None:
-        self.d = daemon
-        #: When the battery is read next.
-        self._battery_poll_at = 0.0
-        #: The name of the keyboard model the readings are of: another model's start over.
-        self._battery_of: str | None = None
-
-    def deadlines(self) -> list[float]:
-        """When poll_battery is next due, once the first has run."""
-        return [self._battery_poll_at] if self.battery_polled() and self._battery_poll_at else []
-
-    @staticmethod
-    def assumed_battery() -> float | None:
-        """GEARBENCH_ASSUME_BATTERY as a percentage on battery, or None: how the
-        notices are tested on the hardware."""
-        raw = os.environ.get("GEARBENCH_ASSUME_BATTERY", "").strip()
-        try:
-            value = float(raw)
-        except ValueError:
-            return None
-        return value if 0 <= value <= 100 else None
-
-    def battery_polled(self) -> bool:
-        """Whether the loop reads the battery for the notices."""
-        return self.d.keyboard.dev is not None or self.assumed_battery() is not None
-
-    def poll_battery(self) -> None:
-        """Every KEYBOARD_BATTERY_INTERVAL, the battery for the notices: the keyboard's
-        reading, or the assumed one in its place. Another keyboard model than the last read's
-        arms both notices again and takes the last one's down."""
-        now = time.monotonic()
-        if now < self._battery_poll_at or not self.battery_polled():
-            return
-        self._battery_poll_at = now + KEYBOARD_BATTERY_INTERVAL
-        # By name: the cable's and the receiver's ids of one model share it.
-        driven = keyboard_name(self.d.keyboard.keyboard_product)
-        if driven != self._battery_of:
-            self._battery_of = driven
-            self.battery_rearmed(f"the keyboard read before the {driven} is no longer driven")
-        assumed = self.assumed_battery()
-        reading = ({"percent": assumed, "external_power": False} if assumed is not None
-                   else self.d.keyboard.battery_for_notices())
-        if reading is not None:
-            self.warn_battery(reading)
-
-    def battery_names(self) -> tuple[str, str]:
-        name = keyboard_name(self.d.keyboard.keyboard_product)
-        # The notice's title opens with the name: "keyboard" before one is attached.
-        return name[:1].upper() + name[1:], f"the {name}'s"
-
-
-class DpiNotice:
-    """The notice a DPI button's step posts: the one showing, whether a post is on its way to
-    the server, a step made meanwhile, when the notice is taken down, and until when a step
-    may replace it (DPI_NOTICE_REPLACE). `wanted` is the switch, asked at each step."""
+    ICON: str
 
     def __init__(self, desktop: Desktop, wanted: Callable[[], bool]) -> None:
         self.desktop, self.wanted = desktop, wanted
         self._shown: int | None = None
         self._sending = False
-        self._next: str | None = None
+        self._next: tuple[str, str] | None = None
         self._close_at: float | None = None
         self._replace_until = 0.0
 
@@ -139,26 +78,22 @@ class DpiNotice:
         return [self._close_at] if self._close_at is not None and not self._sending else []
 
     def tend(self, now: float) -> None:
-        """Take the notice down DPI_NOTICE_CLOSE after the last step."""
+        """Take the notice down DPI_NOTICE_CLOSE after the last post."""
         if self._close_at is not None and self._close_at <= now and not self._sending:
             # A post on its way sets the time again when its id comes back. The id is there:
-            # post's `done` sets the time with it, and both are cleared together.
+            # _post's `done` sets the time with it, and both are cleared together.
             self.desktop.close_notification(cast("int", self._shown))
             self._shown = self._close_at = None
 
-    def post(self, mouse: str, dpi: int) -> None:
-        """The notice that `mouse` is on `dpi` now, worded by DPI_NOTICE_TITLE and posted as
-        _post posts one."""
-        self._post(DPI_NOTICE_TITLE.format(mouse, dpi))
-
-    def _post(self, summary: str) -> None:
-        """`summary` in place of the last notice within DPI_NOTICE_REPLACE of its post; later,
-        the last is closed and a new one posted. A step made while a post is on its way waits
-        for its id, and of several only the last is said. With the switch off, nothing."""
+    def _post(self, summary: str, body: str = "") -> None:
+        """`summary` and `body` in place of the last notice within DPI_NOTICE_REPLACE of its
+        post; later, the last is closed and a new one posted. A post made while another is on
+        its way waits for its id, and of several only the last is said. With the switch off,
+        nothing."""
         if not self.wanted():
             return
         if self._sending:
-            self._next = summary
+            self._next = summary, body
             return
         now = time.monotonic()
         if self._shown is not None and now >= self._replace_until:
@@ -175,11 +110,33 @@ class DpiNotice:
                 self._close_at = time.monotonic() + DPI_NOTICE_CLOSE
             waiting, self._next = self._next, None
             if waiting is not None:
-                self._post(waiting)
+                self._post(*waiting)
 
         self._sending = self.desktop.notify(
-            summary, "", DPI_NOTICE_ICON, replaces_id=self._shown or 0, done=done,
-            transient=True)
+            summary, body, self.ICON, replaces_id=self._shown or 0, done=done, transient=True)
+
+
+class DpiNotice(TransientNotice):
+    """The notice a DPI button's step posts, while the dpi_notices switch is on."""
+
+    ICON = DPI_NOTICE_ICON
+
+    def post(self, mouse: str, dpi: int) -> None:
+        """The notice that `mouse` is on `dpi` now, with no body."""
+        self._post(DPI_NOTICE_TITLE.format(mouse, dpi))
+
+
+class AssignmentsNotice(TransientNotice):
+    """The notice a keyboard's custom assignments turned on or off by its shortcut post
+    (KeyControl.take_event), with no switch of its own: the owner's decision of 2026-10-24,
+    "lets have a gnome notification whenever customer assignments are turned off/on". GNOME's
+    switch for Gearbench silences it with the rest."""
+
+    ICON = ASSIGNMENTS_NOTICE_ICON
+
+    def post(self, keyboard: str, on: bool, line: str) -> None:
+        """The notice that `keyboard`'s custom assignments are `on` or off now, `line` under it."""
+        self._post(ASSIGNMENTS_NOTICE_TITLE.format(keyboard, "on" if on else "off"), line)
 
 
 class Session:
@@ -205,20 +162,20 @@ class Session:
         self._idle_reads: dict[tuple[str, int], tuple[int, float | None]] = {}
         self._idle_serial = 0
         #: The whole desktop's idle level, keyboard and mouse alike: dim after idle_dim_after
-        #: without input, dark idle_off_after later, lit at the next input; a synced mouse goes
-        #: by it (Keyboard.mouse_level). And the (idle_dim_after, idle_off_after) it
-        #: follows, None while sync is off or never dim is on.
+        #: without input, dark idle_off_after later, lit at the next input; a synced mouse or
+        #: headset goes by it (Keyboard.mouse_level). And the (idle_dim_after, idle_off_after)
+        #: it follows, None while sync is off or never dim is on.
         self.idle_level = LIT
         self._idle_times: tuple[int, int] | None = None
-        #: The keyboard's low-battery notices and their poll.
-        self.keyboard_battery = KeyboardBattery(daemon)
         #: Started in run(), so a Daemon built and not run connects to nothing.
         self.desktop = Desktop(locked=self.on_locked, blanked=self.on_blanked,
                                sleeping=self.on_sleeping, user_active=self.on_watched_input,
                                focus=lambda pid: self.d.games.focus.shell_focus(pid),
                                active=self.on_active)
-        #: The notice at a DPI button's step, on the desktop above.
+        #: The notice at a DPI button's step, and the one at a keyboard's custom assignments
+        #: turned on or off, each on the desktop above.
         self.dpi_notice = DpiNotice(self.desktop, lambda: self.d.config.dpi_notices)
+        self.assignments_notice = AssignmentsNotice(self.desktop, lambda: True)
         self._desktop_started = False
 
     def commands(self) -> dict[str, Callable[[dict], dict]]:
@@ -278,7 +235,7 @@ class Session:
                 self.idle_reached(ms)
         self.read_idle_times(now)
         self.dpi_notice.tend(now)
-        self.keyboard_battery.poll_battery()
+        self.assignments_notice.tend(now)
 
     def deadlines(self) -> list[float]:
         """When tend_desktop is next due. A read or a notice on its way is left out: its reply
@@ -289,7 +246,7 @@ class Session:
         if desktop_due is not None:
             due.append(desktop_due)
         due.extend(self.dpi_notice.deadlines())
-        due.extend(self.keyboard_battery.deadlines())
+        due.extend(self.assignments_notice.deadlines())
         return due
 
     # -- the lock and the blank ----------------------------------------------
@@ -333,9 +290,10 @@ class Session:
         back until the session is active (OnboardHold.hold_for_session)."""
         was, self.session_active = self.session_active, active
         if not active:
-            log.info("the session went inactive; nothing is typed until it is active again")
+            log.info("the session went inactive; Gearbench types nothing until it is active again")
             self.stop_away("the session went inactive")
-            self.d.keyboard.hold.hold_for_session()
+            for keyboard in self.d.keyboards.driven():
+                keyboard.hold.hold_for_session()
         elif was is False:
             log.info("the session is active again")
 
@@ -372,7 +330,7 @@ class Session:
             return
         self._idle_owed.clear()
         self.unwatch(LOCK_WATCHES)
-        self.d.keyboard.set_lights(DARK, why, paint=paint)
+        self.d.keyboards.set_lights(DARK, why, paint=paint)
         self._went_down_at = time.monotonic()
         self.desktop.add_user_active_watch(LOCK_WATCHES)
 
@@ -382,7 +340,7 @@ class Session:
             return
         self._idle_owed.clear()
         self.unwatch(LOCK_WATCHES)
-        self.d.keyboard.set_lights(LIT, why)
+        self.d.keyboards.set_lights(LIT, why)
 
     # -- the desktop's idle time ----------------------------------------------
     # Read with GetIdletime, not watched with AddIdleWatch: Mutter holds an idle
@@ -436,7 +394,7 @@ class Session:
     # -- input while locked --------------------------------------------------
 
     def on_watched_input(self, group: str) -> None:
-        """A user-active watch fired: the lock's (on_user_active) or a synced mouse's."""
+        """A user-active watch fired: the lock's (on_user_active) or color sync's."""
         if group == MOUSE_WATCHES:
             self.on_input_after_idle()
         else:
@@ -456,7 +414,7 @@ class Session:
             self.desktop.add_user_active_watch(LOCK_WATCHES)
             return
         self._idle_owed.clear()
-        self.d.keyboard.set_lights(LIT, f"input while the screen is {self.away_word()}")
+        self.d.keyboards.set_lights(LIT, f"input while the screen is {self.away_word()}")
         self.watch_idle()
 
     def on_idle(self, ms: int) -> None:
@@ -470,44 +428,48 @@ class Session:
         if not (self.d.config.lights_off_when_locked and self.away):
             return
         level = DARK if ms >= LOCKED_DARK_MS else DIM
-        if level == DIM and self.d.keyboard.lock_lights != LIT:
+        if level == DIM and self.d.keyboards.lock_lights != LIT:
             return
-        self.d.keyboard.set_lights(
+        self.d.keyboards.set_lights(
             level, f"{ms // 1000} s without input while the screen is {self.away_word()}")
         self.desktop.add_user_active_watch(LOCK_WATCHES)
 
     def note_key_input(self, paint: bool = True) -> bool:
         """A G, M or MR key pressed while locked, which Mutter never sees: lit,
         with dim and dark due again from the press. `paint` False leaves the
-        repaint to the caller. True when the lights came back."""
+        repaint to the caller. True when the leader's lights came back
+        (Keyboards.set_lights)."""
         if not (self.d.config.lights_off_when_locked and self.away) or self._asleep:
             return False
         now = time.monotonic()
         self._idle_owed = {ms: now + ms / 1000 for ms in (LOCKED_DIM_MS, LOCKED_DARK_MS)}
         self.desktop.add_user_active_watch(LOCK_WATCHES)
-        if self.d.keyboard.lock_lights == LIT:
+        if self.d.keyboards.lock_lights == LIT:
             return False
-        return self.d.keyboard.set_lights(
+        return self.d.keyboards.set_lights(
             LIT, f"a key pressed while the screen is {self.away_word()}", paint=paint)
 
-    # -- a synced mouse and the whole desktop's idleness ----------------------
+    # -- color sync and the whole desktop's idleness ---------------------------
 
     @property
     def idle_for_both(self) -> bool:
         """Nothing on the desktop, keyboard or mouse, touched for idle_dim_after."""
         return self.idle_level != LIT
 
-    def watch_idle_for_both(self, paint: bool = True) -> None:
-        """Follow the desktop's idle level while color sync is on and never dim off: dim at
-        idle_dim_after of idle time, dark idle_off_after later. A new idle_dim_after, never dim
-        or sync switch starts it over lit, the mouse painted unless `paint` is False. Times
-        already followed change nothing; a new idle_off_after alone moves only the dark, and
-        takes the desktop's level, dark already, back to dim while the new dark is still ahead
-        (the owner's decision of 2026-10-07). A synced mouse shows that dim only while the
-        keyboard's own idle level is not known (Keyboard.mouse_level)."""
+    def watch_idle_for_both(self, paint: bool) -> None:
+        """Follow the desktop's idle level while a mouse's or a headset's color sync is on and
+        never dim off: dim at idle_dim_after of idle time, dark idle_off_after later. A new
+        idle_dim_after or never dim, or sync turned on for the first of the two or off for the
+        last, starts it over lit, and from dim or dark paints the mouse and the headset unless
+        `paint` is False. Times already followed change nothing; a new idle_off_after alone
+        moves only the dark, and takes the desktop's level, dark already, back to dim while the
+        new dark is still ahead (the owner's decision of 2026-10-07). A synced mouse or headset
+        shows that dim only while the keyboard's own idle level is not known
+        (Keyboard.mouse_level)."""
         config = self.d.config
+        synced = config.mouse_sync_color or config.headset_sync_color
         times = ((config.idle_dim_after, config.idle_off_after)
-                 if config.mouse_sync_color and not config.never_dim else None)
+                 if synced and not config.never_dim else None)
         before, self._idle_times = self._idle_times, times
         if times == before:
             return
@@ -522,14 +484,14 @@ class Session:
         if times is not None:
             self.read_idle_at(MOUSE_WATCHES, times[0] * 1000, time.monotonic() + times[0])
         if was != LIT and paint:
-            self.d.mice.color.sync_mouse_color(self.d.keyboard.shown_color())
+            self.d.sync_to_leader()
 
     def on_idle_for_both(self, ms: int) -> None:
         """The desktop's idle time, `ms`, reached a wait, or was read short of a longer dark
         while dark (idle_read): dim at idle_dim_after, dark idle_off_after later, until the next
-        input (on_input_after_idle). A synced mouse shows the keyboard's own idle level, this one
-        while the keyboard's own is not known, or the lock's when that is as dark or darker
-        (Keyboard.mouse_level)."""
+        input (on_input_after_idle). A synced mouse or headset shows the keyboard's own idle
+        level, this one while the keyboard's own is not known, or the lock's when that is as dark
+        or darker (Keyboard.mouse_level)."""
         # The times are there: watch_idle_for_both drops this group's reads when it stops
         # following them.
         dark = sum(cast("tuple[int, int]", self._idle_times)) * 1000
@@ -547,7 +509,7 @@ class Session:
         if self.d.mice.color.mouse_with_lights() and (before == LIT or not own):
             # A lock's level down without a lock or a blank is the suspend's dark
             # (going_to_sleep), held until the resume.
-            lock = self.d.keyboard.lock_lights
+            lock = self.d.keyboards.lock_lights
             shown = self.d.keyboard.mouse_level()
             if lock != LIT and shown == lock:
                 follows = ("a synced mouse follows the lock until the unlock"
@@ -557,16 +519,16 @@ class Session:
                            "a synced mouse stays dark until the machine wakes up")
             else:
                 follows = ("a synced mouse follows the keyboard's idle level" if own else
-                           "the keyboard's own idle level is not known (away, without lighting, "
+                           "the keyboard's own idle level is not known (away, no idle notices, "
                            "or no report from it since it stopped answering), so a synced mouse "
                            "follows the keyboard's idle times") + f", now {LEVEL_WORDS[shown]}"
             log.info("the desktop has been idle %d s; %s", ms // 1000, follows)
-        self.d.mice.color.sync_mouse_color(self.d.keyboard.shown_color())
+        self.d.sync_to_leader()
 
     def on_input_after_idle(self) -> None:
-        """Input after the desktop went idle: lit, a synced mouse with it, and idle_dim_after
-        counted from now. The keyboard is lit by its own wake notice, which only a key
-        brings."""
+        """Input after the desktop went idle: lit, a synced mouse or headset with it, and
+        idle_dim_after counted from now. The keyboard is lit by its own wake notice, which only
+        a key brings."""
         if self.idle_level == LIT:
             return
         self.idle_level = LIT
@@ -578,7 +540,7 @@ class Session:
         if self.d.mice.color.mouse_with_lights():
             log.info("input after the desktop went idle; a synced mouse no longer dims or "
                      "darkens for the desktop's idleness")
-        self.d.mice.color.sync_mouse_color(self.d.keyboard.shown_color())
+        self.d.sync_to_leader()
 
     # -- suspend -------------------------------------------------------------
 
@@ -600,7 +562,7 @@ class Session:
             log.info("the machine is going to sleep")
             return
         self._idle_owed.clear()
-        said = self.d.keyboard.dark_for_sleep()
+        said = self.d.keyboards.dark_for_sleep()
         self.desktop.release_inhibitor()
         log.info("the machine is going to sleep: %s; letting the suspend go", said)
 
@@ -614,22 +576,21 @@ class Session:
         if on:
             self.desktop.take_inhibitor()
         self._idle_owed.clear()
-        self.d.keyboard.keyboard_awake(lock=DARK if on and self.away else LIT)
-        if self.d.keyboard.lock_lights == DARK:
+        self.d.keyboards.awake_after_sleep(DARK if on and self.away else LIT)
+        if self.d.keyboards.lock_lights == DARK:
             self.unwatch(LOCK_WATCHES)
             self.desktop.add_user_active_watch(LOCK_WATCHES)
         self.d.mice.recheck_mice()
-        self.d.headset.recheck()
-        self.d.g432.recheck()
-        self.d.keyboard.handlers.recheck_after_resume()
+        for headset in self.d.headsets:
+            headset.recheck()
+        for keyboard in self.d.keyboards.driven():
+            keyboard.link.recheck_after_resume()
 
     # -- commands ------------------------------------------------------------
 
     def _cmd_dpi_notices(self, request: dict) -> dict:
         """The notice at a DPI button's step, on or off; off takes nothing down at once."""
-        value = on_or_off(request.get("value"))
-        if value is None:
-            return {"ok": False, "error": switch_refusal("dpi_notices", request.get("value"))}
+        value = switch_value(request.get("value"), "dpi_notices")
         self.d.save_setting(dpi_notices=value)
         return {"ok": True, "dpi_notices": value}
 
@@ -637,9 +598,7 @@ class Session:
         """Lights off when locked, on or off; a resume still sets the devices
         up. The value the switch has already changes nothing, as at a reload:
         on again would darken a board lit by input while locked."""
-        value = on_or_off(request.get("value"))
-        if value is None:
-            return {"ok": False, "error": switch_refusal("lock_lights", request.get("value"))}
+        value = switch_value(request.get("value"), "lock_lights")
         was = self.d.config.lights_off_when_locked
         self.d.save_setting(lights_off_when_locked=value)
         if value != was:
@@ -647,9 +606,8 @@ class Session:
         return {"ok": True, "lights_off_when_locked": value, "lights": self.d.keyboard.lights}
 
     def lock_lights_changed(self, on: bool, paint: bool = True) -> None:
-        """Act on the switch changed to `on` or off, by the command or a reload. Off:
-        the lights back, the watches and the inhibitor gone. `paint` False
-        leaves the paint to the caller."""
+        """Act on the switch changed to `on` or off. Off: the lights back, the lock's watch
+        and waits and the inhibitor gone. `paint` False leaves the paint to the caller."""
         if on:
             self.desktop.take_inhibitor()
             if self.away:
@@ -659,4 +617,4 @@ class Session:
             self._idle_owed.clear()
             self.unwatch(LOCK_WATCHES)
             self.desktop.release_inhibitor()
-            self.d.keyboard.set_lights(LIT, "lights off when locked turned off", paint=paint)
+            self.d.keyboards.set_lights(LIT, "lights off when locked turned off", paint=paint)

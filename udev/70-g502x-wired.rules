@@ -10,14 +10,14 @@
 # onboard profile binds to a key: a program that can read this node reads
 # those keystrokes. It carries no other device's. It is granted for this
 # trial, the owner's decision of 2026-10-18, through uaccess, as the other
-# rules do. Interface 00, the pointer, is not granted, and no event node is:
-# in host mode Gearbench reads the buttons it binds through HID++ on
-# interface 01, and outside host mode none.
+# hidraw grants are. Interface 00, the pointer, is not granted, and no event
+# node is: in host mode Gearbench reads the buttons it binds through HID++
+# on interface 01, and outside host mode none.
 #
 # The grant crosses accounts, as 70-gearbench-uinput.rules says of
 # /dev/uinput's: a program that opened the node keeps reading it after another
 # account gets the seat, and so reads what that account types with a button
 # bound to a key. On a machine several people use, that file's group grant, in
 # a copy of this file in /etc/udev/rules.d/, limits the node to the group's
-# accounts.
+# accounts. A member then reads it from any session, whoever has the seat.
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c099", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"

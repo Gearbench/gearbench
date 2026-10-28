@@ -20,5 +20,6 @@
 # account gets the seat, and so reads what that account types on the G815, a
 # password at the login screen included. On a machine several people use, that
 # file's group grant, in a copy of this file in /etc/udev/rules.d/, limits the
-# node to the group's accounts.
+# node to the group's accounts. A member then reads it from any session,
+# whoever has the seat.
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c33f", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"

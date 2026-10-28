@@ -13,7 +13,7 @@
 # nothing there.
 #
 # Matched on properties, as 70-g915.rules is, for the reason it gives. The
-# G431 (0a9b) stays out until it is read off the hardware.
+# rest of the G432's family, the G431 among them, is in 70-hidpp-headsets.rules.
 #
 # install.sh puts this in /usr/local/lib/udev/rules.d/; the .deb puts it in
 # /usr/lib/udev/rules.d/. Either way, reload with:

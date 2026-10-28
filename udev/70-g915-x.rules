@@ -1,0 +1,73 @@
+# Logitech G915 X keyboards on their cable, vendor HID++ interface ->
+# uaccess for the seat user: the wired G915 X (046d:c359), the G915 X
+# LIGHTSPEED (046d:c356) and the G915 X LIGHTSPEED TKL (046d:c357); and the
+# two LIGHTSPEED models' nodes of their own behind their LIGHTSPEED receiver
+# (40B5 and 40B6, below), which carry what is typed on them too. The ids are
+# from Logitech G HUB's device database and Solaar's listings of the first two
+# (issues 3113 and 3137), read 2026-10-21. The G915 X LIGHTSPEED's were
+# checked on one on 2026-10-23; the other two are not yet checked on this
+# hardware.
+#
+# Interface 02, the vendor collection alone, as on the wired G515 TKL, whose
+# feature table the G915 X's matches index for index: so on the G915 X
+# LIGHTSPEED, read 2026-10-23, and taken to be so on the other two. A
+# keyboard's other interfaces carry its keystrokes, and read access there
+# would be a keylogger surface. gearbench-ctl report gives each node's
+# interface and whether its report descriptor holds HID++, read from sysfs,
+# so it needs no access to the node. Gearbench opens interface 02 alone, so
+# if HID++ is on another, put a copy of this file in /etc/udev/rules.d/
+# without that model's line: it overrides this file by name, and a reinstall
+# or upgrade leaves it alone. Then run sudo udevadm control --reload, replug
+# the keyboard, and paste the report's block into a device report.
+#
+# Once a host writes 0x8051 fn 3 `03 ff`, as Gearbench does at each setup to
+# light the FN keys, interface 02 carries the modifier keys held (Ctrl,
+# Shift, Alt, Super and FN, each press and release), as the wired G515 TKL's
+# does (70-g515.rules) and the G915 X LIGHTSPEED's did on 2026-10-23, until
+# the keyboard loses power: unplugged, where it has no battery, or switched
+# off, since the G915 X LIGHTSPEED kept them through a replug of its cable.
+# The other two are taken to do the same. Gearbench
+# reads FN alone. Any program of the seat's user can write that and read
+# them, and one that holds the node open reads another account's after a
+# user switch; 70-g515.rules says how to limit the node to a group's
+# accounts.
+#
+# Matched on properties, as 70-g915.rules is, for the reason it gives.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c359", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c356", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c357", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"
+
+# The G915 X LIGHTSPEED and the G915 X LIGHTSPEED TKL through their
+# LIGHTSPEED receiver: the hidraw node of its own, 0003:046D:40B5.<n> and
+# 0003:046D:40B6.<n>, that the kernel's hid-logitech-dj gives a device paired
+# to a receiver it drives, as 70-g515.rules says of the G515 LIGHTSPEED TKL's
+# 40B4 node. The 40b5 and 40b6 ids are from G HUB's device records, and
+# Solaar issue 3328's listing names 40B5 on slot 1, read 2026-10-22. Neither
+# names the receiver: G HUB gives its kind, LS2, the kind it gives the G515
+# LIGHTSPEED TKL, whose receiver is a c547 (70-g515.rules). The G915 X
+# LIGHTSPEED's was a c547, with 40B5 on slot 1, on 2026-10-23; the TKL's is
+# not yet checked on this hardware, and a c547 is assumed.
+#
+# This node carries what is typed on the keyboard as well as its HID++
+# traffic, as the G515 LIGHTSPEED TKL's does (70-g515.rules says why). So
+# with these lines installed, any program the user of the active seat
+# session runs can read what is typed on the G915 X LIGHTSPEED or the G915 X
+# LIGHTSPEED TKL, not only Gearbench, which drops those reports unread. The
+# owner granted them on 2026-10-22, as the G515 LIGHTSPEED TKL's node was
+# granted. Each carries no other device's reports while nothing else is
+# paired to its receiver (70-g502x.rules says why).
+#
+# The grant crosses accounts, as 70-gearbench-uinput.rules says of
+# /dev/uinput's: a program that opened the node keeps reading it after another
+# account gets the seat, and so reads what that account types on the
+# keyboard, a password at the login screen included. On a machine several
+# people use, that file's group grant, in a copy of this file in
+# /etc/udev/rules.d/, limits the node to the group's accounts. A member then
+# reads it from any session, whoever has the seat.
+#
+# Matched by the HID device's name, as 70-g502x.rules matches the mouse: udev
+# gives this node the receiver's properties, so a property match would grant
+# the receiver's own interfaces too. KERNELS matches a parent's kernel name,
+# which for the paired device is bus:vendor:product.instance.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0003:046D:40B5.*", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0003:046D:40B6.*", TAG+="uaccess"

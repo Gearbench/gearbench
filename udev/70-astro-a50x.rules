@@ -1,0 +1,18 @@
+# Astro A50 X base station (046d:0b0b) control interface -> uaccess for the
+# seat user.
+#
+# Read off one on 2026-10-21: interface 08 is its one HID interface, beside
+# its four USB Audio Class functions, and its report descriptor holds a single
+# vendor collection (usage page 0xFF32, report id 0x02, 63 bytes each way),
+# so it carries no keystrokes. The audio interfaces are the sound subsystem,
+# which systemd's 70-uaccess.rules already grants the seat user; this rule
+# adds nothing there. G HUB lists a second id for it, 0b09, its firmware-update
+# mode; it stays out.
+#
+# Matched on properties, as 70-g915.rules is, for the reason it gives.
+#
+# install.sh puts this in /usr/local/lib/udev/rules.d/; the .deb puts it in
+# /usr/lib/udev/rules.d/. Either way, reload with:
+#   sudo udevadm control --reload
+#   sudo udevadm trigger --subsystem-match=hidraw --action=add
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0b0b", ENV{ID_USB_INTERFACE_NUM}=="08", TAG+="uaccess"

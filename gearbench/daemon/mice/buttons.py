@@ -18,6 +18,7 @@ from ...mouse import BUTTON_CODES
 from ...spy import decode_mask, edges, tilt as spy_tilt
 from ...uinput import EV_REL, UinputError
 from ...wording import reason
+from ..shared import said_once
 from .attached import MOUSE_RETRY, AttachedMouse
 
 if TYPE_CHECKING:
@@ -50,9 +51,9 @@ class Buttons:
         self.mice = mice
         #: When the event nodes of the mice that want one are next tried, monotonic.
         self.input_retry = 0.0
-        #: Event nodes the gearbench group would let the daemon read, for which a permission
-        #: refusal was logged at warning, so the retry says it once.
-        self._input_denied_said: set[str] = set()
+        #: The refusal line warned of for each event node the gearbench group would let the
+        #: daemon read, so a retry says it at debug.
+        self._input_denied_said: dict[str, str] = {}
 
     def button_edge(self, attached: AttachedMouse, button: str, pressed: bool) -> None:
         """A press or release of a G button, from the evdev node or the spy's mask, through one
@@ -97,9 +98,9 @@ class Buttons:
 
     def tilt_step(self, attached: AttachedMouse, now: float) -> None:
         """One notch of the held tilt, and when the next is due: TILT_REPEAT after this one's
-        time, or after now for a pass that came late, so a slow loop drops notches instead of
-        sending a burst. Without a virtual mouse nothing scrolls; one that fails lets go of the
-        tilt."""
+        time, or after now for a pass TILT_REPEAT or more late, so a slow loop drops notches
+        instead of sending a burst. Without a virtual mouse nothing scrolls; one that fails lets
+        go of the tilt."""
         due = (attached.tilt_at or now) + TILT_REPEAT
         attached.tilt_at = due if due > now else now + TILT_REPEAT
         if self.d.ptr is None:
@@ -187,15 +188,14 @@ class Buttons:
                     log.debug("no access to the mouse's %s, which is by design", path)
                     continue
                 denied = f"{path}, since {why}"
-                if str(path) not in self._input_denied_said:
-                    self._input_denied_said.add(str(path))
-                    log.warning("cannot read the %s's %s, since %s; with host mode off, G4 to G9 "
-                                "are read there", found.name, path, why)
+                said_once(self._input_denied_said, str(path),
+                          f"cannot read G4 to G9 on the {found.name} with host mode off from "
+                          f"{denied}", logging.WARNING)
                 continue
             except OSError as exc:
-                log.warning("cannot read the mouse's %s: %s", path, reason(exc))
+                log.warning("cannot read the %s's %s: %s", found.name, path, reason(exc))
                 continue
-            self._input_denied_said.discard(str(path))
+            self._input_denied_said.pop(str(path), None)
             self.d.selector.register(reader.fileno, selectors.EVENT_READ,
                                    ("mouse-input", reader, found))
             found.input.append(reader)
@@ -223,20 +223,16 @@ class Buttons:
     def pump_mouse_input(self, reader: EventReader, source: AttachedMouse) -> None:
         """Turn what one mouse evdev node has buffered into button actions for `source`.
 
-        A read error closes all of the mouse's nodes, since they are one device. EBADF is
-        caught on purpose: a select batch is computed before any handler runs, so a second node
-        in it can be read after this closed it.
+        A read error closes all of the mouse's nodes, since they are one device. The DPI under a
+        held shift stays owed, as at a link going down: no setup follows to write it.
         """
         try:
             events = reader.read()
-        except DeviceGone:
-            log.info("mouse input %s went away; will look for it again", reader.path)
-            self.close_mouse_input(source)
-            return
-        except OSError as exc:
-            log.info("mouse input %s failed (%s); will look for it again", reader.path,
-                     reason(exc))
-            self.close_mouse_input(source)
+        except (DeviceGone, OSError) as exc:
+            what = "went away" if isinstance(exc, DeviceGone) else f"failed ({reason(exc)})"
+            log.info("%s's event node %s %s; will look for it again", source.name, reader.path,
+                     what)
+            source.dpi_before_shift = self.close_mouse_input(source)
             return
         # In HOST mode a key code no mouse button sends is a keyboard's on the receiver
         # (saw_keystroke): it says nothing of whether the mouse is on.

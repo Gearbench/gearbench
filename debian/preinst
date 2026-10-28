@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+# A package removed but not purged comes back with "preinst install OLD NEW" and then
+# "postinst configure OLD", as an upgrade does, though prerm's remove stopped every daemon:
+# the mark has postinst start them as on a first install (the owner's decision of
+# 2026-10-25). It is made only where postinst reads it, on a running systemd and not into
+# another root; /run goes at a restart, after which the next login starts the daemon anyway.
+if [ "$1" = "install" ] && [ -n "$2" ] && [ -z "$DPKG_ROOT" ] && [ -d /run/systemd/system ]
+then
+    : > /run/gearbench-was-removed
+fi
+
+#DEBHELPER#

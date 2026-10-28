@@ -10,10 +10,11 @@ one.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterable, Mapping
 from typing import NamedTuple, cast
 
-from .config import BINDABLE_KEYS, MACRO_PREFIX, PER_KEY, PROFILE_IDS, Lighting
+from .config import BINDABLE_KEYS, MACRO_PREFIX, PER_KEY, PROFILE_IDS, Lighting, macro_name
 from .ghub import (
     MAX_DOCUMENT_BYTES,
     SHOWN_DEVICES,
@@ -26,27 +27,24 @@ from .ghub import (
     mouse_where,
 )
 from .import_plan import (
-    CHOICES,
     CLASH_MACRO,
     CLASH_PROFILE,
     KEEP,
     REPLACE,
     SKIP,
-    Clash,
     Existing,
     Plan,
     game_form,
-    keepers_last,
     m_profile_parts,
     macro_form,
-    macro_text,
-    programs_for,
     step_lines,
+    take_programs,
 )
 from .keyboard import G915_KEY
 from .library_files import Taken, slug
+from .macros import macro_summary
 from .mouse import MouseModel, bindings_of, model_named
-from .profiles import GameProfile
+from .profiles import GameProfile, layers_of
 from .wording import counted, first_of, word_list
 
 # -- the same as what is there ---------------------------------------------
@@ -86,16 +84,22 @@ def _already_there(profile: GhubProfile, have: str, found: Found, existing: Exis
             == game_form(game, theirs, imported.lighting))
 
 
+def _macros_bound(game: GameProfile) -> set[str]:
+    """By slug, the macros `game` binds on a G key, the MR layer or a mouse button."""
+    return {slug(name) for layer in layers_of(game.bindings, game.shift, game.mouse)
+            for spec in layer.values() if (name := macro_name(spec)) is not None}
+
+
 # -- the plan --------------------------------------------------------------
 
 class _Picked(NamedTuple):
-    """A profile that comes (`_pick_profiles`): the name it comes in under, whether it
-    replaces yours, whether it loads by hand whatever `make_plan`'s `with_programs` says (a
-    Keep both copy), and whether its clash is unanswered."""
+    """A profile that comes (`_pick_profiles`): the name it comes in under, the profile of
+    yours it replaces or None, whether it loads by hand whatever `make_plan`'s
+    `with_programs` says (a Keep both copy), and whether its clash is unanswered."""
 
     profile: GhubProfile
     name: str
-    replace: bool
+    replacing: str | None
     by_hand: bool
     unanswered: bool
 
@@ -110,7 +114,7 @@ def chosen_names(found: Found, names: Iterable[str], everything: bool) -> list[s
     for name in names:
         profile = found.get(name)
         if profile is None:
-            raise GhubError(f"the file has no G HUB profile named {name!r}; "
+            raise GhubError(f"the file has no profile listed as {name!r}; "
                             f"--list shows what it has")
         if profile.desktop:
             if desktop not in (None, profile.name):
@@ -130,51 +134,47 @@ def make_plan(found: Found, chosen: Iterable[str], existing: Existing,
     `choices` answers each clash by (kind, imported name) and `default` the rest; with
     neither, a clash stays unresolved. A macro already there step for step is no clash and
     is used as it is; nor is a game profile that holds what the import would write
-    (`_already_there`), which is left as it is, programs and all, and said. Only the macros
-    the imported profiles use are imported.
+    (`_already_there`), which is left as it is, programs and all, and said; an imported
+    macro of other steps or another repeat mode, under the name of one of yours that it
+    binds, is not asked about and comes in under a new name, so the profile keeps playing
+    yours. Only the macros the imported profiles use are imported.
 
     A game profile loads for G HUB's programs only when `with_programs` names it, the
     owner's decision of 2026-09-28: a name from someone else's file also matches the Linux
     program of that name. Any other is saved with none and loads by hand, and one replacing
     yours keeps your programs. A program another game profile already loads stays with it,
-    a replace that takes G HUB's programs included (`programs_for`), and one that two
-    imported profiles name goes to G HUB's active one, else the first
-    (`import_plan._programs_left`).
+    a replace that takes G HUB's programs included (`programs_for`). Of two of yours that
+    load it, it stays with one the import does not replace with programs, else with the
+    first (`import_plan._owner`). One that two imported profiles name goes to G HUB's
+    active one, else the first (`import_plan._programs_left`).
     """
     choices = choices or {}
     plan = Plan()
     wanted = set(chosen)
     loaded = set(with_programs)
-    # plan.clashes as a set: the window plans again at each answer, on its main thread.
-    asked: set[Clash] = set()
 
     def choose(kind: str, name: str, have: str) -> str | None:
-        # Asked once a name: two macros of one name share the answer. The choice is keyed
-        # by the clash's kind and name, so its first sight says whether it is unresolved.
-        clash = Clash(kind, name, have)
-        choice = choices.get((kind, name), default)
-        if clash not in asked:
-            asked.add(clash)
-            plan.clashes.append(clash)
-            if choice not in CHOICES:
-                plan.unresolved.append(clash)
-        return choice if choice in CHOICES else None
+        # Asked once a name: two macros of one name share the answer (Plan.ask).
+        return plan.ask(kind, name, have, choices, default)
 
     # The profiles first, for which of them come at all. One whose clash is
     # unanswered still counts, so its macros' clashes are asked in the same
     # pass; nothing is written until every one is answered.
-    picked = _pick_profiles(found, wanted, existing, plan, choose)
+    #: By slug, the macros of yours a game profile already there binds.
+    kept: set[str] = set()
+    picked = _pick_profiles(found, wanted, existing, plan, choose, kept)
     # Then the macros: a clash, or two of one name in the file, renames one,
     # and the bindings follow.
-    names = _macro_names(found, picked, existing, plan, choose)
+    names = _macro_names(found, picked, existing, plan, choose, kept)
 
     def resolved(binding: Binding) -> str | None:
         if isinstance(binding, MacroRef):
             return f"{MACRO_PREFIX}{names[binding.card]}"
         return binding
 
-    programs, keeping = _programs_by_profile(picked, loaded, existing)
-    for profile, name, replace, _by_hand, unanswered in picked:
+    taking = _taking(picked, loaded)
+    takers = {name for _programs, name, _replacing in taking}
+    for profile, name, replacing, _by_hand, unanswered in picked:
         if profile.desktop:
             for bank in PROFILE_IDS:
                 # An M profile's name may be only spaces, and a game profile's
@@ -189,27 +189,30 @@ def make_plan(found: Found, chosen: Iterable[str], existing: Existing,
                 plan.m_profiles.append((bank, body, profile.lighting is not None, keys))
         elif not unanswered:
             body = _body(profile, 1, resolved, name=name)
-            body["processes"], said = programs.get(name, ([], []))
-            yours = existing.games.get(existing.profile(profile.name) or "") if replace else None
-            if name not in programs and yours is not None:
+            yours = existing.games.get(replacing) if replacing is not None else None
+            if name not in takers and yours is not None:
                 plan.keep_programs(body, yours)
-            plan.said += said
-            plan.profiles.append((body, replace))
-    keepers_last(plan, keeping)
+            plan.profiles.append((body, replacing is not None))
+    # Its sentences on programs cut at MAX_DOCUMENT_BYTES characters: a crafted file can
+    # name an application's programs again in each of its profiles.
+    take_programs(plan, taking, existing, MAX_DOCUMENT_BYTES)
     return plan
 
 
 def _pick_profiles(found: Found, wanted: set[str], existing: Existing, plan: Plan,
-                   choose: Callable[[str, str, str], str | None]) -> list[_Picked]:
-    """The `wanted` profiles that come; one left out or already there is said in `plan`."""
+                   choose: Callable[[str, str, str], str | None],
+                   kept: set[str]) -> list[_Picked]:
+    """The `wanted` profiles that come; one left out or already there is said in `plan`, and
+    the macros of yours one already there binds go into `kept`, by slug."""
     picked: list[_Picked] = []
     # The chosen names too, so a rename takes none a later profile comes in under.
     taken = Taken([*existing.profiles, *wanted])
     for profile in (p for p in found.profiles if p.name in wanted):
-        name, replace, by_hand, unanswered = profile.name, False, False, False
+        name, replacing, by_hand, unanswered = profile.name, None, False, False
         have = None if profile.desktop else existing.profile(profile.name)
         if have is not None and _already_there(profile, have, found, existing):
             plan.say_already(CLASH_PROFILE, profile.name, have)
+            kept |= _macros_bound(existing.games[have])
             continue
         if have is not None:
             choice = choose(CLASH_PROFILE, profile.name, have)
@@ -219,7 +222,7 @@ def _pick_profiles(found: Found, wanted: set[str], existing: Existing, plan: Pla
                 plan.say_skipped(CLASH_PROFILE, profile.name)
                 continue
             if choice == REPLACE:
-                replace = True
+                replacing = have
             elif choice == KEEP:
                 # Two profiles for one program: the scan takes the first
                 # by filename, and the copy would take over from the one the
@@ -228,20 +231,22 @@ def _pick_profiles(found: Found, wanted: set[str], existing: Existing, plan: Pla
                 plan.said.append(f'Game profile "{profile.name}" is imported as '
                                  f'"{name}", loaded by hand.')
         taken.add(name)
-        picked.append(_Picked(profile, name, replace, by_hand, unanswered))
+        picked.append(_Picked(profile, name, replacing, by_hand, unanswered))
     return picked
 
 
 def _macro_names(found: Found, picked: list[_Picked], existing: Existing, plan: Plan,
-                 choose: Callable[[str, str, str], str | None]) -> dict[str, str]:
+                 choose: Callable[[str, str, str], str | None],
+                 kept: set[str]) -> dict[str, str]:
     """The name each macro card of the `picked` profiles is bound by; one
     written goes into `plan.macros`, and one renamed or left out is said."""
     names: dict[str, str] = {}
     #: The user's macros and those the import writes, whose names a new one may not take.
     macro_names = Taken(existing.macros)
-    #: The names an earlier macro of the import is written or already there
-    #: under, which a later one of the same name may not write over.
-    given: set[str] = set()
+    #: By slug, the names an earlier macro of the import is written or already there
+    #: under, and the `kept` macros a game profile already there binds, which a later one
+    #: of the same name may not write over.
+    given: set[str] = set(kept)
     #: Of `given`, those of yours an earlier macro of the import writes over.
     replaced: set[str] = set()
     #: By slug, the spelling a clash was first asked under: two names the library takes for
@@ -284,22 +289,19 @@ def _macro_names(found: Found, picked: list[_Picked], existing: Existing, plan: 
     return names
 
 
-def _programs_by_profile(picked: list[_Picked], loaded: set[str], existing: Existing
-                         ) -> tuple[dict[str, tuple[list[str], list[str]]], dict[str, list[str]]]:
-    """By the name it comes in under, each `loaded` game profile's programs and the sentences
-    for those it goes without, a count in their place past MAX_DOCUMENT_BYTES characters of
-    them, and the names that keep a program of yours, each with the keepers it waits for
-    (`programs_for`). A Keep both copy, which loads by hand, and one whose clash is
+def _taking(picked: list[_Picked], loaded: set[str]) -> list[tuple[list[str], str, str | None]]:
+    """(programs, the name it comes in under, the profile of yours it replaces) of each
+    `loaded` game profile that takes G HUB's programs (`take_programs`), G HUB's active one of
+    an application first. A Keep both copy, which loads by hand, and one whose clash is
     unanswered take none.
     One G HUB names no programs for is not loaded, as the window's Load for has it, so one
     that replaces yours keeps your programs (the owner's decision of 2026-09-29)."""
     # G HUB's active profile of an application first: the library would
     # load whichever sorts first by filename.
-    return programs_for([
-        (p.profile.processes, p.name, existing.profile(p.profile.name) if p.replace else None)
-        for p in sorted(picked, key=lambda p: not p.profile.active)
-        if (p.profile.name in loaded and p.profile.processes
-            and not (p.by_hand or p.unanswered))], existing, MAX_DOCUMENT_BYTES)
+    return [(p.profile.processes, p.name, p.replacing)
+            for p in sorted(picked, key=lambda p: not p.profile.active)
+            if (p.profile.name in loaded and p.profile.processes
+                and not (p.by_hand or p.unanswered))]
 
 
 def _body(profile: GhubProfile, bank: int, resolved: Callable[[Binding], str | None],
@@ -412,7 +414,7 @@ def details(profile: GhubProfile, found: Found, m_names: Mapping[int, str] | Non
         sections.append((f"The {model.name}'s buttons", [
             f"{button_label(model, b)}: "
             + (binding_text(mouse[b], found, labels.get(mouse_where(model, b)))
-               if b in mouse else f"{default} (Gearbench's default)")
+               if b in mouse else f"{default} (factory binding)")
             for b, default in bindings_of({}, key).items()]))
     if profile.lighting is not None:
         n = len(profile.lighting.keys)
@@ -425,7 +427,7 @@ def details(profile: GhubProfile, found: Found, m_names: Mapping[int, str] | Non
         lines = []
         for card in profile.macros:
             macro, steps = found.macros[card], found.steps(card)
-            lines.append(f"{macro.name}: {macro_text(macro.repeat, steps)}")
+            lines.append(f"{macro.name}: {macro_summary(len(steps), macro.repeat)}")
             lines += step_lines(steps)
         sections.append(("Macros", lines))
     if profile.desktop:
@@ -443,8 +445,25 @@ def details(profile: GhubProfile, found: Found, m_names: Mapping[int, str] | Non
 
 
 def found_as_json(found: Found, with_programs: bool = False) -> list[dict]:
-    """The profiles found, for `--json`."""
-    return [{"name": p.name, "application": p.application, "ghub_name": p.ghub_name,
-             "desktop": p.desktop, "processes": p.processes, "summary": summary(p),
-             "macros": [found.macros[c].name for c in p.macros],
-             "skipped": p.skipped, "notes": notes(p, with_programs)} for p in found.profiles]
+    """The profiles found, for `--json`.
+
+    Each profile repeats its application's programs and the names of the macros it binds,
+    so a crafted file can make many times its own size of them: once those lists pass
+    MAX_DOCUMENT_BYTES characters as JSON writes them, as `--list`'s sections do
+    (cli.library), the profile that passed it and each after it keep their names and
+    desktop flag, with "listed_by_name": true in place of the lists, and the lists of those
+    after it are not made."""
+    entries: list[dict] = []
+    left = MAX_DOCUMENT_BYTES
+    for p in found.profiles:
+        named = {"name": p.name, "application": p.application, "ghub_name": p.ghub_name,
+                 "desktop": p.desktop}
+        lists = {} if left < 0 else {
+            "processes": p.processes, "summary": summary(p),
+            "macros": [found.macros[c].name for c in p.macros],
+            "skipped": p.skipped, "notes": notes(p, with_programs)}
+        # Counted as print_json writes it, its indent aside: ensure_ascii writes one
+        # character as up to 12.
+        left -= len(json.dumps(lists))
+        entries.append(named | lists if left >= 0 else named | {"listed_by_name": True})
+    return entries

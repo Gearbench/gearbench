@@ -3,11 +3,11 @@
 `Existing` is what Gearbench has now, read from the libraries and config.json. A `Plan`
 holds what an import would write, its clashes with what is there and the sentences that say
 what it leaves out. `ghub_plan.make_plan` and `pack.make_plan` each build one, with
-`programs_for` and `keepers_last` for a program another game profile already loads.
-`requests` turns a plan into control socket commands, the one place they are built, so the
-daemon writes every file and its hand-edit protection covers an import; `held_back` and
-`reply_lines` are for the front end that sends them. Nothing here reads G HUB's settings or
-the pack, and nothing here writes a profile, macro or setting.
+`take_programs` (`programs_for` and `keepers_last`) for a program another game profile
+already loads. `requests` turns a plan into control socket commands, the one place they are
+built, so the daemon writes every file and its hand-edit protection covers an import;
+`held_back` and `reply_lines` are for the front end that sends them. Nothing here reads
+G HUB's settings or the pack, and nothing here writes a profile, macro or setting.
 """
 
 from __future__ import annotations
@@ -19,18 +19,23 @@ from itertools import groupby
 from typing import cast
 
 from .apps import wanted_forms
-from .config import MOUSE_ACTIONS, Config, ConfigError, macro_name
+from .config import MOUSE_ACTIONS, Config, macro_name
 from .keyboard import own_entry, own_named_keys
 from .library_files import slug
-from .macros import KEY_STEPS, MacroLibrary, macro_summary, step_summary
+from .macros import KEY_STEPS, MacroLibrary, step_summary
 from .mouse import MODEL_IDS, MODEL_OF, bindings_of
-from .profiles import MAX_PROCESSES, GameProfile, Library
+from .profiles import MAX_PROCESSES, GameProfile, Library, layers_of
+from .settings_files import ConfigError
 from .uinput import MODIFIER_KINDS, parse_binding
-from .wording import counted, without_controls, word_list
+from .wording import NO_REASON, RESTART_DAEMON, counted, without_controls, word_list
 
-#: What to do with an imported name Gearbench already has.
+#: What to do with an imported name Gearbench already has: write the import over it, keep
+#: both (the import under a new name), or keep it and import nothing for it.
 REPLACE, KEEP, SKIP = "replace", "keep", "skip"
 CHOICES = (REPLACE, KEEP, SKIP)
+#: --on-clash's words for each, in the dialogs' words (the owner's decision of 2026-10-22),
+#: and the ones it took in 1.1.0, which keep working.
+ON_CLASH = {REPLACE: REPLACE, "keep-both": KEEP, "keep-mine": SKIP, KEEP: KEEP, SKIP: SKIP}
 
 
 # -- what the user has already ---------------------------------------------
@@ -144,7 +149,7 @@ def game_form(game: GameProfile, macro: Callable[[str], object],
         name = macro_name(spec)
         return ("macro", macro(name)) if name is not None else _keys(spec)
 
-    # A model with no entry, as Restore defaults leaves it, runs its defaults, and the import
+    # A model with no entry, as Use factory bindings… leaves it, runs its defaults, and the import
     # writes each model it has in full; an id no model has keeps its entry.
     mice = {model: bindings_of(game.mouse, model) for model in MODEL_IDS}
     mice |= {key: entry for key, entry in game.mouse.items() if int(key, 16) not in MODEL_OF}
@@ -159,9 +164,8 @@ def game_form(game: GameProfile, macro: Callable[[str], object],
 
 # -- the plan --------------------------------------------------------------
 
-#: A clash's kind, and how the review page, the CLI, a plan's Skip and Already
-#: sentences and the faults the pack finds in its notes name it. `ghub.MACRO` is
-#: an Action's kind.
+#: A clash's kind, and its name in the words the user reads. `ghub.MACRO` is an
+#: Action's kind.
 CLASH_PROFILE, CLASH_MACRO = "profile", "macro"
 CLASH_WORDS = {CLASH_PROFILE: "Game profile", CLASH_MACRO: "Macro"}
 
@@ -206,15 +210,37 @@ class Plan:
     #: The game profiles that replace one of yours and keep its programs,
     #: none included: the daemon keeps what it has when it writes.
     kept: list[str] = field(default_factory=list)
-    #: The pack's: a game profile replacing yours writes its name,
-    #: programs and lighting only, and leaves your bindings as they are.
+    #: The pack's: a game profile replacing yours writes its name, programs, lighting and
+    #: mouse color only, and leaves your bindings as they are.
     lighting_only: bool = False
+    #: The pack's: (your game profile's name, the pack's mouse color as '#rrggbb') for
+    #: each of yours with the pack profile's lighting and no mouse color of its own,
+    #: which takes the pack's and nothing else (the owner's decision of 2026-10-23).
+    mouse_colors: list[tuple[str, str]] = field(default_factory=list)
+    #: `clashes` as a set: a planner asks for each name it meets, and the window plans
+    #: again at each answer, on its main thread.
+    _asked: set[Clash] = field(default_factory=set, init=False, repr=False, compare=False)
 
     @property
     def empty(self) -> bool:
-        return not (self.macros or self.profiles or self.m_profiles)
+        return not (self.macros or self.profiles or self.m_profiles or self.mouse_colors)
 
-    # What both imports' planners write the same way.
+    # What the planners write to a plan, each rule in one place.
+
+    def ask(self, kind: str, name: str, have: str, choices: Mapping[tuple[str, str], str],
+            default: str | None, answers: Collection[str] = CHOICES) -> str | None:
+        """The answer to the clash of `kind` over the imported `name`, your `have`: its
+        choice in `choices` by (kind, name), else `default`, or None where that is not one of
+        `answers`. The clash goes into `clashes` at its first ask, and into `unresolved` too
+        when it has no answer; a later ask records nothing, and gets the same answer."""
+        clash = Clash(kind, name, have)
+        choice = choices.get((kind, name), default)
+        if clash not in self._asked:
+            self._asked.add(clash)
+            self.clashes.append(clash)
+            if choice not in answers:
+                self.unresolved.append(clash)
+        return choice if choice in answers else None
 
     def say_already(self, kind: str, name: str, have: str) -> None:
         """Say the game profile or macro named `name`, of clash `kind`, is already there, as
@@ -223,8 +249,16 @@ class Plan:
                             + ("." if have == name else f', as "{have}".'))
         self.said.append(self.already[-1])
 
+    def fill_mouse_color(self, name: str, have: str, color: str) -> None:
+        """Give your game profile `have` the mouse color `color` of the pack's `name`, and
+        nothing else, and say so."""
+        self.mouse_colors.append((have, color))
+        self.said.append(f'Game profile "{name}" is already in Gearbench'
+                         + ("" if have == name else f', as "{have}"')
+                         + f", and takes the pack's mouse color, {color}.")
+
     def say_skipped(self, kind: str, name: str) -> None:
-        """Say the clash of `kind` over the imported `name` was answered Skip."""
+        """Say the clash of `kind` over the imported `name` was answered Keep mine (SKIP)."""
         self.said.append(f'{CLASH_WORDS[kind]} "{name}" is not imported; yours is kept.')
 
     def keep_programs(self, body: dict, yours: GameProfile) -> None:
@@ -237,8 +271,21 @@ class Plan:
                             "steps": [dict(s) for s in steps], "replace": replace})
 
 
+def take_programs(plan: Plan, taking: list[tuple[list[str], str, str | None]],
+                  existing: Existing, limit: int | None = None) -> None:
+    """Each game profile of `taking`, already in `plan`, given the programs it loads for and
+    the sentences for those it goes without (`programs_for`), and the keepers sent last
+    (`keepers_last`): once every game profile is in `plan`."""
+    programs, keeping = programs_for(taking, existing, limit)
+    for body, _replace in plan.profiles:
+        if body["name"] in programs:
+            body["processes"], said = programs[body["name"]]
+            plan.said += said
+    keepers_last(plan, keeping)
+
+
 def keepers_last(plan: Plan, keeping: Mapping[str, list[str]]) -> None:
-    """Sort the game profiles that keep a program of yours (`programs_for`)
+    """Sort the game profiles that keep or take a program of yours (`programs_for`)
     after the rest, and each after the keepers `keeping` names for it, sent in
     that order: the daemon writes the program only once no other profile loads
     it, and a profile of yours the import replaces without it may load it
@@ -264,18 +311,19 @@ def keepers_last(plan: Plan, keeping: Mapping[str, list[str]]) -> None:
 
 
 def programs_for(taking: list[tuple[list[str], str, str | None]], existing: Existing,
-                 limit: int | None = None
+                 limit: int | None
                  ) -> tuple[dict[str, tuple[list[str], list[str]]], dict[str, list[str]]]:
     """By the name it comes in under, the programs of each game profile in `taking` that it
     loads for, and the sentences for those it goes without (`_programs_left`). Each of
     `taking` is (its programs, that name, the profile of yours it replaces or None), in the
     order they take programs.
 
-    A program the import goes without because one of your profiles loads it stays with that
-    profile, one the import leaves alone before one it replaces, even when the import
-    replaces that profile with programs of its own: the replace keeps each such program
-    after the import's, and its name is a key of the mapping returned, with the other such
-    replaces it waits for: those that replace a profile of yours loading a program it keeps
+    A program the import goes without because your profiles load it stays with the first of
+    them, one the import leaves alone before one it replaces (`_owner`), even when the import
+    replaces that profile with programs of its own: the replace keeps each such program after
+    the import's. Its name, and that of a replace taking a program another the import
+    replaces loads too, is a key of the mapping returned, with the other such replaces it
+    waits for: those that replace a profile of yours loading a program it keeps or takes
     (`keepers_last`). The import's programs past MAX_PROCESSES with those are left out (the
     owner's decision of 2026-10-02), and said unless one it takes or keeps loads for them too
     (Claude Code's call of 2026-10-04, confirmed by the owner's decision of 2026-10-06).
@@ -295,11 +343,11 @@ def programs_for(taking: list[tuple[list[str], str, str | None]], existing: Exis
     held: dict[str, set[str]] = {}
     for programs, _name, replacing in taking:
         for program in programs:
-            owner = owners.first(program, but=replacing)
+            owner = _owner(owners, program, replacing)
             if owner is not None:
                 held.setdefault(owner, set()).update(wanted_forms(program))
     out: dict[str, tuple[list[str], list[str]]] = {}
-    #: By each replace that keeps a program of yours, the wanted forms of those it keeps.
+    #: By each replace keeping a program of yours or taking one another of yours loads, their forms.
     keeping: dict[str, set[str]] = {}
     # By wanted form, the keepers whose profile of yours loads it: until such a replace is
     # written, the daemon leaves that program out of any other profile.
@@ -308,15 +356,8 @@ def programs_for(taking: list[tuple[list[str], str, str | None]], existing: Exis
     for programs, name, replacing in taking:
         keep = [p for p in existing.games[replacing].processes
                 if not held[replacing].isdisjoint(wanted_forms(p))] if replacing in held else []
-        room = MAX_PROCESSES
-        while True:
-            left, cut, said = _programs_left(programs, name, owners, replacing, given, room)
-            kept = _not_loaded(keep, left)
-            if len(left) + len(kept) <= MAX_PROCESSES:
-                break
-            # Cut to MAX_PROCESSES less the number kept: fewer of the import's can leave
-            # more of yours to keep, so again until they fit.
-            room = MAX_PROCESSES - len(kept)
+        free, said = _programs_left(programs, name, owners, replacing, given)
+        left, cut, kept = _fitted(free, keep)
         # A cut program the profile still loads for, through one it takes or keeps, is not said.
         loads = set().union(*map(wanted_forms, [*left, *kept]))
         said += [f'Game profile "{name}" is imported without {program}: with the programs '
@@ -326,9 +367,12 @@ def programs_for(taking: list[tuple[list[str], str, str | None]], existing: Exis
             said, left_to_say = _said_within(said, name, left_to_say, limit)
         for program in left:
             given.add(program, name)
-        if kept:
-            keeping[name] = set().union(*map(wanted_forms, kept))
-            # A name: `kept` is of `keep`, which is empty unless `replacing` is in `held`.
+        # Taken from the profile it replaces while another the import replaces loads it too.
+        waits = set().union(*(wanted_forms(p) for p in left
+                              if owners.first(p, but=replacing) is not None))
+        if kept or waits:
+            keeping[name] = waits.union(*map(wanted_forms, kept))
+            # A name: `kept` and `waits` are empty while `replacing` is None.
             yours = existing.games[cast(str, replacing)]
             for form in set().union(*map(wanted_forms, yours.processes)):
                 loaded_by.setdefault(form, []).append(name)
@@ -338,6 +382,20 @@ def programs_for(taking: list[tuple[list[str], str, str | None]], existing: Exis
     return out, {name: list(dict.fromkeys(other for form in sorted(forms)
                                           for other in loaded_by.get(form, ()) if other != name))
                  for name, forms in keeping.items()}
+
+
+def _fitted(free: list[str], keep: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """Of `free`, the programs a game profile takes and those cut, and of `keep`, the
+    programs of yours it keeps (`_not_loaded`), together within MAX_PROCESSES."""
+    room = MAX_PROCESSES
+    while True:
+        left, cut = free[:room], free[room:]
+        kept = _not_loaded(keep, left)
+        if len(left) + len(kept) <= MAX_PROCESSES:
+            return left, cut, kept
+        # Cut to MAX_PROCESSES less the number kept: fewer of the import's can leave
+        # more of yours to keep, so again until they fit.
+        room = MAX_PROCESSES - len(kept)
 
 
 def _said_within(said: list[str], name: str, left: int, limit: int) -> tuple[list[str], int]:
@@ -395,20 +453,26 @@ class _Programs:
         return min((e for e in firsts if e is not None), default=(0, None))[1]
 
 
+def _owner(owners: _Programs, program: str, replacing: str | None) -> str | None:
+    """The profile of yours `program` stays with, or None for one the import may take: the
+    first `owners` has with it, unless that is `replacing`, whose replace then takes it. Those
+    the import leaves alone come first (programs_for), so any after `replacing` is another
+    the import replaces, and two of yours that load one program do not each keep it for the
+    other."""
+    owner = owners.first(program)
+    return None if owner == replacing else owner
+
+
 def _programs_left(programs: list[str], name: str, owners: _Programs,
-                   replacing: str | None, given: _Programs,
-                   room: int) -> tuple[list[str], list[str], list[str]]:
-    """`programs` less each that a game profile other than `replacing` already loads
-    (`owners`), or that `given` gave another profile of the import, with a sentence for
+                   replacing: str | None, given: _Programs) -> tuple[list[str], list[str]]:
+    """`programs` less each that stays with a game profile of yours (`_owner`), or that
+    `given` gave another profile of the import, with a sentence for
     each: the scan takes the first match by filename, so the import would take the
-    program from the user's profile or load two of its own for it. Each past the first
-    `room` is cut, returned apart for `programs_for` to say: the replaced profile's
-    programs that it keeps take the rest."""
+    program from the user's profile or load two of its own for it."""
     left: list[str] = []
-    cut: list[str] = []
     said: list[str] = []
     for program in programs:
-        owner = owners.first(program, but=replacing)
+        owner = _owner(owners, program, replacing)
         taker = given.first(program)
         if owner is not None:
             said.append(f'Game profile "{name}" is imported without {program}, which stays '
@@ -416,11 +480,9 @@ def _programs_left(programs: list[str], name: str, owners: _Programs,
         elif taker is not None:
             said.append(f'Game profile "{name}" is imported without {program}, which goes '
                         f'to "{taker}".')
-        elif len(left) == room:
-            cut.append(program)
         else:
             left.append(program)
-    return left, cut, said
+    return left, said
 
 
 def requests(plan: Plan) -> list[dict]:
@@ -448,15 +510,14 @@ def requests(plan: Plan) -> list[dict]:
             for body, replace in plan.profiles]
     out += [{"command": "import_m_profile", "value": bank, "profile": body,
              "lighting": lighting, "keys": keys} for bank, body, lighting, keys in plan.m_profiles]
+    # Only while yours has none: a mouse color of yours set since the plan was made
+    # stays, since one that differs from the pack's is asked about (pack._there_already).
+    out += [{"command": "profile_mouse_color", "value": have, "color": color, "if_none": True}
+            for have, color in plan.mouse_colors]
     return out
 
 
 # -- saying it -------------------------------------------------------------
-
-def macro_text(repeat: str, steps: list[dict]) -> str:
-    """A macro in a few words, as the window's macro rows have it (macro_summary)."""
-    return macro_summary(len(steps), repeat)
-
 
 def step_lines(steps: list[dict]) -> list[str]:
     """A macro's steps, one indented line each, as the macro editor names
@@ -464,23 +525,35 @@ def step_lines(steps: list[dict]) -> list[str]:
     return [f"    {title}: {value}" for title, value in map(step_summary, steps)]
 
 
-def plan_lines(plan: Plan) -> list[str]:
-    """What a plan writes, one line each and a macro's steps under it, for a
-    dry run and the review."""
-    lines = []
-    for macro in plan.macros:
-        lines.append(f"macro \"{macro['name']}\", {counted(len(macro['steps']), 'step')}"
-                     + (", replacing yours" if macro.get("replace") else ""))
-        lines += step_lines(macro["steps"])
-    over = ", replacing your lighting" if plan.lighting_only else ", replacing yours"
-    lines += [f"game profile \"{body['name']}\"" + (over if replace else "")
-              + (", loads by hand" if not body["processes"]
-                 else ", keeps your programs" if body["name"] in plan.kept
-                 else f", loads for {word_list(body['processes'], 'and')}")
+def plan_items(plan: Plan) -> list[list[str]]:
+    """What a plan writes, an item each, as lines: a macro's line with its steps under it, or
+    a game profile's, an M profile's or a mouse color's line."""
+    items = [[f"macro \"{macro['name']}\", {counted(len(macro['steps']), 'step')}"
+              + (", replacing yours" if macro.get("replace") else ""),
+              *step_lines(macro["steps"])] for macro in plan.macros]
+    items += [[f"game profile \"{body['name']}\"" + (_replacing(plan, body) if replace else "")
+               + (", loads by hand" if not body["processes"]
+                  else ", keeps your programs" if body["name"] in plan.kept
+                  else f", loads for {word_list(body['processes'])}")]
               for body, replace in plan.profiles]
-    lines += [f"M{bank}: " + word_list(m_profile_parts(keys, bool(body["mouse"]), light), "and")
+    items += [[f"M{bank}: " + word_list(m_profile_parts(keys, bool(body["mouse"]), light), "and")]
               for bank, body, light, keys in plan.m_profiles]
-    return lines
+    items += [[f"game profile \"{have}\", the pack's mouse color {color}"]
+              for have, color in plan.mouse_colors]
+    return items
+
+
+def _replacing(plan: Plan, body: dict) -> str:
+    """What a replace writes over yours, for its line: the pack's writes its lighting, and its
+    mouse color where it has one (GameCommands._import_profile)."""
+    if not plan.lighting_only:
+        return ", replacing yours"
+    return ", replacing your lighting" + (" and mouse color" if body["mouse_color"] else "")
+
+
+def plan_lines(plan: Plan) -> list[str]:
+    """What a plan writes, one line each and a macro's steps under it (plan_items' lines)."""
+    return [line for item in plan_items(plan) for line in item]
 
 
 def m_profile_parts(keys: Collection[str], mouse: bool, lighting: bool) -> list[str]:
@@ -493,12 +566,14 @@ def m_profile_parts(keys: Collection[str], mouse: bool, lighting: bool) -> list[
 
 
 def plan_summary(plan: Plan, verb: str = "Writes") -> str:
-    """A sentence for the review page, and with "Imported" for after."""
-    parts = [counted(n, noun) for n, noun in ((len(plan.profiles), "game profile"),
+    """A line for the review page, and with "Imported" for the toast after, with no final
+    period, as every one-line text the window shows."""
+    parts = [counted(n, noun) for n, noun in ((len(plan.profiles) + len(plan.mouse_colors),
+                                               "game profile"),
                                               (len(plan.macros), "macro")) if n]
     if plan.m_profiles:
         parts.append("M1, M2 and M3")
-    return f"{verb} {word_list(parts, 'and')}." if parts else "Nothing to write."
+    return f"{verb} {word_list(parts, 'and')}" if parts else "Nothing to write"
 
 
 def held_back(request: Mapping, sent: list[tuple[dict, dict]]) -> dict | None:
@@ -513,11 +588,12 @@ def held_back(request: Mapping, sent: list[tuple[dict, dict]]) -> dict | None:
     # By slug: whether the save went unanswered, as against refused.
     failed = {slug(r["value"]): bool(reply.get("unanswered")) for r, reply in sent
               if r["command"] == "macro_save" and not reply.get("ok")}
-    if not failed or request["command"] == "macro_save":
+    # Only a profile's body binds a macro.
+    if not failed or "profile" not in request:
         return None
     body = request["profile"]
-    for binding in (*body["bindings"].values(), *body["shift"].values(),
-                    *(spec for entry in body["mouse"].values() for spec in entry.values())):
+    for binding in (spec for layer in layers_of(body["bindings"], body["shift"], body["mouse"])
+                    for spec in layer.values()):
         name = macro_name(binding)
         if name is not None and slug(name) in failed:
             said = "may not have been saved" if failed[slug(name)] else "was not saved"
@@ -525,17 +601,15 @@ def held_back(request: Mapping, sent: list[tuple[dict, dict]]) -> dict | None:
     return None
 
 
-#: A failed line's reason when the daemon did not know the command, and the
-#: line after them all, worded as the other hints to start or restart a
-#: service are.
+#: A failed line's reason when the daemon did not know the command.
 OLDER_DAEMON = "the daemon running is older than this Gearbench and wrote nothing"
-RESTART_DAEMON = "restart the Gearbench service: systemctl --user restart gearbench"
 
 
 def reply_lines(sent: list[tuple[dict, dict]]) -> tuple[list[str], list[str]]:
     """What each reply of an import said, as (done, failed) lines. A command
     the daemon does not know is one from after it started, the pack's
-    `import_profile_lighting`: the failed lines end on RESTART_DAEMON."""
+    `import_profile_lighting` or `profile_mouse_color`: the failed lines end on
+    RESTART_DAEMON."""
     done, failed = [], []
     older = False
     for request, reply in sent:
@@ -546,7 +620,7 @@ def reply_lines(sent: list[tuple[dict, dict]]) -> tuple[list[str], list[str]]:
             failed.append(f"{what}: {OLDER_DAEMON}")
             older = True
         else:
-            failed.append(f"{what}: {reply.get('error', 'unknown error')}")
+            failed.append(f"{what}: {reply.get('error', NO_REASON)}")
     if older:
         failed.append(RESTART_DAEMON)
     return done, failed
@@ -557,4 +631,6 @@ def _what(request: Mapping) -> str:
         return f"macro \"{request['value']}\""
     if request["command"] in ("import_profile", "import_profile_lighting"):
         return f"game profile \"{request['profile']['name']}\""
+    if request["command"] == "profile_mouse_color":
+        return f"game profile \"{request['value']}\"'s mouse color"
     return f"M{request['value']}"

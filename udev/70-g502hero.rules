@@ -12,13 +12,13 @@
 # keystrokes there, so a program that can read this node reads those
 # keystrokes. It carries no other device's: the mouse has no receiver, so no
 # other device reports through it. The owner granted it for this trial on
-# 2026-10-17, through uaccess, as the other rules do. Interface 00, the
-# pointer, is not granted.
+# 2026-10-17, through uaccess, as the other hidraw grants are. Interface
+# 00, the pointer, is not granted.
 #
 # The grant crosses accounts, as 70-gearbench-uinput.rules says of
 # /dev/uinput's: a program that opened the node keeps reading it after another
 # account gets the seat, and so reads what that account types with a button
 # bound to a key. On a machine several people use, that file's group grant, in
 # a copy of this file in /etc/udev/rules.d/, limits the node to the group's
-# accounts.
+# accounts. A member then reads it from any session, whoever has the seat.
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c08b", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"

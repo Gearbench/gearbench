@@ -1,5 +1,5 @@
-"""Bindings and macros: what a G key, an M key, the MR layer or a mouse
-button does, the keys they hold, and the macro runner."""
+"""Bindings and macros: what a G key, an M key, the MR layer, a mouse button or a
+headset's G key does, the keys they hold, and the macro runner."""
 
 from __future__ import annotations
 
@@ -10,21 +10,27 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, cast
 
 from ..config import (
-    BINDABLE_KEYS,
+    HEADSET_ACTIONS,
+    HEADSET_DEFAULTS,
+    HEADSET_KEYS,
     MACRO_PREFIX,
-    MOUSE_MODEL,
-    ConfigError,
+    NO_HEADSET_SHIFT,
     expect,
     keep_under,
+    key_binding,
     macro_name,
     mouse_button_name,
     not_bindable,
     parse_mouse_binding,
-    product_key,
-    validate_binding,
 )
 from ..hidpp import DeviceGone, HidppFailure
-from ..keyboard import bound_as, keystroke
+from ..keyboard import (
+    MODEL_OF as KEYBOARDS,
+    assignments_untested,
+    bound_as,
+    keystroke,
+    untested_assignment_words,
+)
 from ..library_files import not_deleted, slug
 from ..macros import (
     MAX_PLAY_DELAY,
@@ -37,13 +43,25 @@ from ..macros import (
     MacroRunner,
     describe_macros,
 )
-from ..mouse import MODEL_OF, MouseError, key_name, model_ids, model_key
+from ..mouse import MODEL_IDS, MouseError, key_name, model_ids, model_key
+from ..profiles import layers_of
+from ..settings_files import ConfigError
 from ..uinput import POINTER_ACTIONS, UinputError, parse_binding
-from ..wording import escaped, number, reason, word_list, written
-from .shared import digest, name_text, refusal
+from ..wording import (
+    MACRO_NEEDS_A_NAME,
+    counted,
+    escaped,
+    number,
+    quoted,
+    reason,
+    word_list,
+    written,
+)
+from .shared import attached_list, digest, mouse_model_named, name_text, refusal, with_note
 
 if TYPE_CHECKING:
     from . import Daemon
+    from .keyboard import Keyboard
     from .mice.attached import AttachedMouse
 
 log = logging.getLogger("gearbench")
@@ -51,9 +69,11 @@ log = logging.getLogger("gearbench")
 #: Each DPI step action: its way through the stages, +1 up and -1 down, and whether it goes
 #: from the last stage round to the first (Mouse.step_dpi's `wrap`).
 DPI_STEPS = {"dpi-up": (1, False), "dpi-down": (-1, False), "dpi-cycle": (1, True)}
-#: The refusal of a mouse bind made before any mouse was attached, with no `device` named.
-NO_MOUSE_YET = ("No mouse has been connected since the Gearbench daemon started, and each "
-                "mouse model keeps its own bindings: connect the mouse first.")
+#: The refusal of a mouse bind with no `device` named, before any mouse was attached and with
+#: no pick kept (Bindings.mouse_model).
+NO_MOUSE_YET = ("no mouse has been connected since the daemon started, and each "
+                "mouse model keeps its own bindings: connect the mouse, or name its model "
+                "with `--mouse`")
 
 
 def mouse_holder(model: str, button: str) -> str:
@@ -76,14 +96,19 @@ class Bindings:
         #: model holding a button of one name at once share one hold, which the first release
         #: lets go of.
         self._mouse_owner: dict[str, AttachedMouse] = {}
-        #: The mouse whose button started the running macro, kept after the macro ends: a
-        #: mouse going away stops a macro of its own alone (stop_mouse_macro).
-        self._macro_owner: AttachedMouse | None = None
+        #: The keyboard or mouse that started the running macro, set at each start and None
+        #: for a headset's key and a play: one going away stops a macro of its own alone
+        #: (keyboard_gone, stop_mouse_macro). Read only while a macro runs.
+        self._macro_source: Keyboard | AttachedMouse | None = None
         #: What each held binding put down on the virtual keyboard, by holder
         #: (a G key, or a mouse button by mouse_holder), let go of at its release.
         self._keys_held: dict[str, tuple[int, ...]] = {}
-        #: MR held: the G keys resolve on the shift layer.
-        self.shifted = False
+        #: The keyboards MR is held on: their G keys resolve on the shift layer (shifted_on).
+        self._shifted_by: list[Keyboard] = []
+        #: The keyboard each G key held was pressed on, by the name its binding is under: a
+        #: keyboard going lets go of its own alone (keyboard_gone), as a mouse does
+        #: (_mouse_owner).
+        self._key_owner: dict[str, Keyboard] = {}
         self.macros = MacroLibrary()
         #: The one macro that can be running. It looks the virtual devices up
         #: at every step, so it never holds one the daemon replaced.
@@ -110,9 +135,7 @@ class Bindings:
         """Stop a macro a button of `source` started, where a press or release of that button
         could be lost (Buttons.drop_spy_state)."""
         macro = self.runner.macro
-        # A running macro has its key: macros.MacroRunner sets and clears the two together.
-        if (macro is not None and cast("str", self.runner.key).startswith("mouse:")
-                and self._macro_owner is source):
+        if macro is not None and self._macro_source is source:
             log.info("macro %r stopped: a press or release of %s may be lost",
                      macro.name, self.runner.key)
             self.runner.cancel()
@@ -135,16 +158,27 @@ class Bindings:
             except UinputError as exc:
                 log.debug("could not let go of %s: %s", holder, exc)
 
-    def keyboard_gone(self, held_only: bool = False) -> None:
-        """Let go of what the keyboard holds, whose releases will not come: MR's shift layer,
-        a macro a G key started (with `held_only`, only a while_held one) and the keys the G
-        keys hold."""
-        self.shifted = False
+    def keyboard_gone(self, source: Keyboard, held_only: bool = False) -> None:
+        """Let go of what the keyboard `source` holds, whose releases will not come: MR's
+        shift layer, a macro a G key of its started (with `held_only`, only a while_held one)
+        and the keys the G keys hold."""
+        if source in self._shifted_by:
+            self._shifted_by.remove(source)
         macro = self.runner.macro
-        if macro is not None and self.runner.key in BINDABLE_KEYS and (
-                not held_only or macro.repeat == WHILE_HELD):
+        if (macro is not None and self._macro_source is source
+                and (not held_only or macro.repeat == WHILE_HELD)):
             self.runner.cancel()
-        self.let_go_of_keys(mouse=False)
+        self.let_go_of_keys(mouse=False, source=source)
+
+    @property
+    def shifted(self) -> bool:
+        """Whether MR is held on any keyboard."""
+        return bool(self._shifted_by)
+
+    def shifted_on(self, keyboard: Keyboard) -> bool:
+        """Whether MR's shift layer is held for the G keys of `keyboard`, which its MR LED
+        shows."""
+        return keyboard in self._shifted_by
 
     def let_go_away(self, why: str) -> None:
         """Let go of what the G keys, MR and mouse buttons hold, and forget it,
@@ -158,9 +192,9 @@ class Bindings:
         if not held:
             return
         log.info("let go of what %s held: %s", ", ".join(held), why)
-        if self.shifted:
-            self.shifted = False
-            self.d.keyboard.show_mr(False, dark_too=True)
+        shown, self._shifted_by = self._shifted_by, []
+        for keyboard in shown:
+            keyboard.show_mr(False, dark_too=True)
         for holder, binding in pointer:
             # Its release does nothing now, as a button bound to nothing does.
             self._mouse_held[holder] = "none"
@@ -181,54 +215,60 @@ class Bindings:
         self.runner.cancel()
 
 
-    def on_key(self, key: str, pressed: bool) -> None:
+    def on_key(self, key: str, pressed: bool, source: Keyboard | None = None) -> None:
+        """A G, M or MR key of the keyboard `source`, the leader's by default, going down or up.
+        An M key switches every keyboard's M profile; MR shifts the G keys of its own
+        keyboard, whose MR LED shows it."""
+        keyboard = self.d.keyboard if source is None else source
         if key == "MR":
-            self.shifted = pressed
-            if not (pressed and self.d.session.note_key_input()):
-                # A press that lit the board again leaves the LED to that apply.
-                self.d.keyboard.show_mr(pressed)
+            self._take_mr(keyboard, pressed)
             return
 
         if key.startswith("M"):
             if pressed:
                 index = int(key[1:])
-                # Lit again while locked: once, by the switch's own apply
-                # when it switches, or here when it does not.
-                woke = self.d.session.note_key_input(paint=False)
-                if woke and not self.d.config.switches_to(index):
-                    self.d.keyboard.apply_profile()
+                # Lit again while locked: each keyboard once, by the switch's own apply
+                # when it switches, or here when it does not and the relight moved any
+                # keyboard's level, which note_key_input gives for the leader's alone.
+                shown = [driven.lights for driven in self.d.keyboards.driven()]
+                self.d.session.note_key_input(paint=False)
+                relit = shown != [driven.lights for driven in self.d.keyboards.driven()]
+                if relit and not self.d.config.switches_to(index):
+                    self.d.keyboards.apply_each(keyboard)
                 else:
-                    self.d.keyboard.switch_profile(index)
+                    keyboard.switch_profile(index)
             return
 
         # Under its model's name for it from here on: the G915 TKL's G1 is its F1.
-        product = self.d.keyboard.keyboard_product
+        product = keyboard.keyboard_product
         key = bound_as(product, key)
         if not pressed:
             # Before any lookup: the layer may have changed since the press.
             self.runner.release(key)
+            self._key_owner.pop(key, None)
             try:
                 self.let_go_binding(key)
             except UinputError as exc:
-                log.warning("%s released: %s", key, exc)
+                log.warning("could not let go of %s: %s", key, exc)
             return
 
-        board = self.d.keyboard.dev
+        board = keyboard.dev
         self.d.session.note_key_input()
-        if board is not None and self.d.keyboard.dev is None:
+        if board is not None and keyboard.dev is None:
             # The relight tore the keyboard down, letting go of what the G keys hold:
             # this key's release will not come.
             return
 
         # A G915 TKL's F key with nothing bound types its own key, which HOST mode stops it
         # typing by itself.
-        binding = self.d.games.active_binding(key, self.shifted) or keystroke(product, key)
+        binding = (self.d.games.active_binding(key, self.shifted_on(keyboard))
+                   or keystroke(product, key))
         if binding is None:
             log.debug("%s down (unbound)", key)
             return
         name = macro_name(binding)
         if name is not None:
-            self.run_macro(name, key, pressed)
+            self.run_macro(name, key, pressed, keyboard)
             return
         try:
             self.hold_binding(key, binding)
@@ -237,6 +277,66 @@ class Bindings:
             log.debug("%s down -> %s", key, escaped(binding))
         except UinputError as exc:
             log.warning("%s bound to %r: %s", key, binding, exc)
+        if key in self._keys_held:
+            # A hold alone: an owner left by a press that held nothing would keep another
+            # keyboard's later hold of the key from that keyboard's keyboard_gone.
+            self._key_owner.setdefault(key, keyboard)
+
+    def _take_mr(self, keyboard: Keyboard, pressed: bool) -> None:
+        """MR going down or up on `keyboard`: its G keys shifted while its own MR is down
+        (shifted_on), and its MR LED."""
+        if pressed and keyboard not in self._shifted_by:
+            self._shifted_by.append(keyboard)
+        elif not pressed and keyboard in self._shifted_by:
+            self._shifted_by.remove(keyboard)
+        if not (pressed and self.d.session.note_key_input()):
+            # A press that lit the board again leaves the LED to that apply.
+            keyboard.show_mr(pressed)
+
+    def on_headset_key(self, key: str, pressed: bool) -> None:
+        """A headset's G key going down or up, by the name it binds under
+        (g432.HeadsetModel.g_keys), which names its model too, so what a key holds is held
+        apart from another model's. The press does what headset_binding gives, an action of
+        the headset's through G432Headset.key_action; the release lets go of what the press
+        held and ends a macro running while it is held, as a keyboard's G key's does."""
+        if not pressed:
+            self.runner.release(key)
+            try:
+                self.let_go_binding(key)
+            except UinputError as exc:
+                log.warning("could not let go of %s: %s", key, exc)
+            return
+        binding = self.headset_binding(key)
+        log.debug("%s down -> %s", key, escaped(binding))     # as on_key's
+        if binding == "none":
+            return
+        name = macro_name(binding)
+        if name is not None:
+            self.run_macro(name, key, pressed)
+            return
+        if binding in HEADSET_ACTIONS:
+            self.d.g432.key_action(binding, key)
+            return
+        try:
+            self.hold_binding(key, binding)
+        except UinputError as exc:
+            log.warning("%s bound to %r: %s", key, binding, exc)
+
+    def headset_binding(self, key: str) -> str:
+        """What a headset's G key does now: its binding on the layer in force, which MR does
+        not shift, or while it is unbound its default (HEADSET_DEFAULTS), else none."""
+        return self.d.games.active_binding(key, False) or HEADSET_DEFAULTS.get(key, "none")
+
+    def let_go_headset(self, keys: Iterable[str], gone: bool = False) -> None:
+        """Let go of what the headset's G keys `keys` hold, whose releases will not come: it
+        went, or forgot which are held as their events were turned on again. With `gone`, a
+        macro one of them started stops too, toggle or not, as a keyboard's does
+        (keyboard_gone)."""
+        keys = tuple(keys)
+        if gone and self.runner.key in keys:
+            self.runner.cancel()
+        for key in keys:
+            self.on_headset_key(key, False)
 
     def hold_binding(self, source: str, binding: str) -> None:
         """Put a key binding down, every key of the spec in order, until `source` (a G
@@ -282,14 +382,16 @@ class Bindings:
         if failed is not None:
             raise failed
 
-    def let_go_of_keys(self, mouse: bool) -> None:
-        """Let go of every key the G keys hold, or with `mouse` the mouse
-        buttons, whose releases will not come."""
-        for source in [s for s in self._keys_held if s.startswith("mouse:") == mouse]:
+    def let_go_of_keys(self, mouse: bool, source: Keyboard | None = None) -> None:
+        """Let go of every key the G keys hold, those of the keyboard `source` alone where it
+        is given, or with `mouse` the mouse buttons, whose releases will not come."""
+        for holder in [h for h in self._keys_held if h.startswith("mouse:") == mouse
+                       and (source is None or self._key_owner.get(h) is source)]:
+            self._key_owner.pop(holder, None)
             try:
-                self.let_go_binding(source)
+                self.let_go_binding(holder)
             except UinputError as exc:
-                log.debug("could not let go of %s: %s", source, exc)
+                log.debug("could not let go of %s: %s", holder, exc)
 
     def stop_orphaned_macro(self) -> None:
         """Stop a running macro whose key no longer starts it, or a toggle one would type
@@ -312,11 +414,13 @@ class Bindings:
         log.info("macro %r is no longer bound to %s; stopping it", macro.name, key)
         self.runner.cancel()
 
-    def run_macro(self, name: str, key: str, pressed: bool) -> None:
+    def run_macro(self, name: str, key: str, pressed: bool,
+                  source: Keyboard | AttachedMouse | None = None) -> None:
         """Start or stop the macro a key is bound to, read from the library at each press
         that neither stops a toggle nor is refused as inactive, so an edit needs no reload;
-        a binding may outlive its macro. The first step runs at once. Nothing starts while
-        locked or blank, the session inactive, or going to sleep."""
+        a binding may outlive its macro. The first step runs at once, the run kept as
+        `source`'s, the keyboard or mouse pressed (None for a headset's key). Nothing starts
+        while locked or blank, the session inactive, or going to sleep."""
         if not pressed:
             self.runner.release(key)
             return
@@ -343,6 +447,7 @@ class Bindings:
         log.debug("%s -> macro %r (%s)", key, macro.name, macro.repeat)
         now = time.monotonic()
         self.runner.start(macro, key, now)
+        self._macro_source = source
         self.runner.tick(now)
 
     def on_mouse_button(self, button: str, pressed: bool, source: AttachedMouse) -> None:
@@ -352,10 +457,16 @@ class Bindings:
         model = model_key(source.product)
         holder = mouse_holder(model, button)
         if pressed:
+            if self._mouse_held.get(holder) in POINTER_ACTIONS or holder in self._keys_held:
+                # Another mouse of this model holds it: the one hold its release lets go of.
+                log.debug("%s down on a second mouse: held already", holder)
+                return
             # "none" too: a rebind under the held button must not give its release a
             # binding the press never acted on.
             binding = self._mouse_held[holder] = self.d.games.active_mouse_binding(button, model)
-            self._mouse_owner.setdefault(holder, source)
+            # Not setdefault: past the guard, an owner left is a press's that held nothing,
+            # which would keep this mouse's hold from its release_mouse_holds.
+            self._mouse_owner[holder] = source
         else:
             held = self._mouse_held.pop(holder, None)
             self._mouse_owner.pop(holder, None)
@@ -366,9 +477,7 @@ class Bindings:
             return
         name = macro_name(binding)
         if name is not None:
-            self.run_macro(name, holder, pressed)
-            if pressed and self.runner.key == holder:
-                self._macro_owner = source
+            self.run_macro(name, holder, pressed, source)
             return
         if pressed and binding in POINTER_ACTIONS and self.refused_inactive(holder):
             # Its release lets go of nothing: a back pressed since keeps its count.
@@ -424,17 +533,29 @@ class Bindings:
     def _cmd_bind(self, request: dict) -> dict:
         self.d.retry_virtual_devices(now=True)
         key, spec = name_text(request["key"], "bind.key").upper(), request.get("value")
-        layer = self.d.games.key_layer(bool(request.get("shift")))
+        shift = request.get("shift") is True
+        layer = self.d.games.key_layer(shift)
         if key not in layer:
             return {"ok": False, "error": not_bindable(key)}
-        if spec is not None:
-            # Text or null, as the files take it: str() binds a JSON 5 to the 5 key, and 0 or
-            # false would unbind.
-            expect(spec, str, f"bind.{key}", "a key spec or macro:<name>")
-        if spec:
-            spec = validate_binding(spec, f"bind.{key}")
-        self.save_layer(layer, lambda: layer.update({key: spec or None}))
-        return self.layer_reply({"ok": True, "key": key, "binding": layer[key]})
+        if shift and key in HEADSET_KEYS:
+            return {"ok": False, "error": NO_HEADSET_SHIFT.format(key)}
+        spec = key_binding(key, spec, f"bind.{key}")
+        self.save_layer(layer, lambda: layer.update({key: spec}))
+        return with_note(self.layer_reply({"ok": True, "key": key, "binding": layer[key]}),
+                         self.untested_note(key, layer[key]))
+
+    def untested_note(self, key: str, binding: str | None) -> str | None:
+        """What a bind of `key` to `binding` adds where the leader's keyboard, or another
+        driven, binds `key` and its G keys take no binding until their write is tested on this
+        hardware (keyboard.assignments_untested); None otherwise."""
+        if binding is None:
+            return None
+        for keyboard in (self.d.keyboard, *self.d.keyboards.driven()):
+            product = keyboard.keyboard_product
+            if (assignments_untested(product)
+                    and key in KEYBOARDS[cast("int", product)].g_key_names):
+                return f"saved; {untested_assignment_words(cast('int', product))}"
+        return None
 
     def save_layer(self, layer: dict, change: Callable[[], object]) -> None:
         """Make `change` to `layer`, a layer of bindings or the mouse's by model, and save it,
@@ -489,19 +610,19 @@ class Bindings:
         expect(request["value"], str, "macro_save", "text")
         name = request["value"].strip()
         if not name:
-            return {"ok": False, "error": "a macro needs a name"}
+            return {"ok": False, "error": MACRO_NEEDS_A_NAME}
         # The name it was saved under, sent when the window renamed it.
         previous = name_text(request.get("previous") or "", "macro_save.previous").strip()
         existing = self.macros.get(previous or name)
         if existing is not None and request.get("new"):
-            return {"ok": False, "error": f"a macro named {existing.name!r} already exists"}
+            return {"ok": False, "error": f"a macro named {quoted(existing.name)} already exists"}
         # A rename onto another macro's name needs `replace`, and that macro
         # goes only once the write has succeeded.
         taken = self.macros.get(name) if previous else None
         if taken is not None and existing is not None and taken.path == existing.path:
             taken = None        # the same macro, renamed in case or spacing only
-        if taken is not None and not request.get("replace"):
-            return {"ok": False, "error": f"a macro named {taken.name!r} already exists; "
+        if taken is not None and request.get("replace") is not True:
+            return {"ok": False, "error": f"a macro named {quoted(taken.name)} already exists; "
                                           f"rename or delete that one first"}
         macro = existing or Macro(name=name)
         was = macro.name
@@ -520,8 +641,7 @@ class Bindings:
         if was != macro.name:
             self.repoint_macro(was, macro.name)
         count = len(macro.steps)
-        log.info("saved macro %r: %d step%s, %s", macro.name, count, "" if count == 1 else "s",
-                 macro.repeat)
+        log.info("saved macro %r: %s, %s", macro.name, counted(count, "step"), macro.repeat)
         return {"ok": True, "saved": macro.name, "repeat": macro.repeat,
                 "steps": count, "path": str(path)}
 
@@ -589,13 +709,13 @@ class Bindings:
         name = name_text(request["value"], "macro_delete")
         found = self.macros.get(name)
         if found is None:
-            return {"ok": False, "error": f"no macro named {name!r}"}
+            return {"ok": False, "error": self.macros.not_found(name)}
         gone = found.name
         try:
             deleted = self.macros.delete(gone)
         except OSError as exc:
             # Answered here: handle_command's OSError says a save failed.
-            return refusal(f"Could not delete {gone!r} ({reason(exc)}).", exc)
+            return refusal(f"could not delete {quoted(gone)}: {reason(exc)}", exc)
         if not deleted:
             return {"ok": False, "error": not_deleted(gone)}
         log.info("deleted macro %r", gone)
@@ -605,17 +725,17 @@ class Bindings:
         return {"ok": True, "deleted": gone}
 
     def _cmd_macro_run(self, request: dict) -> dict:
-        """Play a macro no key started: the window's Play or `macro-run`. By name it is
+        """Play a macro no key started: the window's Run or `macro-run`. By name it is
         the file; with `steps`, the editor's unsaved macro, never written. The daemon
         counts `delay` down, so every front end sees it and a Stop cancels it. Refused
         while locked or blank, the session inactive, or going to sleep."""
         name = name_text(request["value"], "macro_run").strip()
         if not name:
-            return {"ok": False, "error": "a macro needs a name"}
+            return {"ok": False, "error": MACRO_NEEDS_A_NAME}
         delay = request.get("delay", 0)
         if not number(delay) or not 0 <= delay <= MAX_PLAY_DELAY:
             return {"ok": False,
-                    "error": f"delay must be 0 to {MAX_PLAY_DELAY} seconds, "
+                    "error": f"delay is 0 to {MAX_PLAY_DELAY} s, "
                              f"not {written(delay)}"}
         macro: Macro | None
         if "steps" in request:
@@ -624,12 +744,13 @@ class Bindings:
         else:
             macro = self.macros.get(name)
             if macro is None:
-                return {"ok": False, "error": f"no macro named {name!r}"}
+                return {"ok": False, "error": self.macros.not_found(name)}
         why = self.d.session.why_away()
         if why is not None:
-            return {"ok": False, "error": f"macro {macro.name!r} not started: {why}"}
+            return {"ok": False, "error": f"macro {quoted(macro.name)} not started: {why}"}
         now = time.monotonic()
-        self.runner.play(macro, now, float(delay))
+        self.runner.play(macro, now, delay)
+        self._macro_source = None
         self.runner.tick(now)
         log.info("macro %r played (%s)%s", macro.name, macro.repeat,
                  f", starting in {delay:g} s" if delay else "")
@@ -647,11 +768,13 @@ class Bindings:
         return {"ok": True, "stopped": stopped}
 
     def mouse_model(self, request: dict) -> str:
-        """The mouse model (mouse.model_key) a bind is for: `device`, a product id of any mouse
-        model, attached or not, since a binding is saved and nothing is sent to the mouse; else
-        that of the mouse each mouse command acts on (Mice.current), or with none attached the
-        selected one, kept while it is away (Mice.selected). Refused before any mouse was
-        attached (NO_MOUSE_YET) and for an id no mouse model has."""
+        """The mouse model (mouse.model_key) a bind is for: the one `device` names by its name
+        or any of its product ids (mouse_model_named), attached or not, since a binding is
+        saved and nothing is sent to the mouse; else that of the mouse each mouse command acts
+        on (Mice.current), or with none attached the selected one, kept while it is away and
+        across a restart (Mice.selected). Refused with neither, before any mouse was attached
+        and with no pick kept (NO_MOUSE_YET), and for a `device` that names no mouse model,
+        with the mice attached, or with none the models there are."""
         wanted = request.get("device")
         if wanted is None:
             current = self.d.mice.current
@@ -659,10 +782,15 @@ class Bindings:
             if product is None:
                 raise ConfigError(NO_MOUSE_YET)
             return model_key(product)
-        key = product_key(name_text(wanted, "device"), "device", MOUSE_MODEL)
-        if int(key, 16) not in MODEL_OF:
-            raise ConfigError(f"device: {key!r} names no mouse model Gearbench drives")
-        return model_key(int(key, 16))
+        text = name_text(wanted, "device")
+        key = mouse_model_named(text)
+        if key is None:
+            said = f"{text.strip().lower()!r} names no mouse model Gearbench drives"
+            mice = self.d.mice.attached
+            listed = (attached_list(m.label for m in mice) if mice else
+                      f"they are {word_list([key_name(model) for model in MODEL_IDS], 'and')}")
+            raise ConfigError(f"{said}; {listed}")
+        return key
 
     def _cmd_mouse_bind(self, request: dict) -> dict:
         """Bind one button of a mouse model (mouse_model) on the layer in force. Its first bind
@@ -693,11 +821,6 @@ class Bindings:
         self.save_layer(entries, drop)
         return self.layer_reply({"ok": True, "bindings": self.d.games.mouse_bindings(model),
                                  "mouse": key_name(model)})
-
-
-def layers_of(keys: dict, shift: dict, mouse: dict[str, dict[str, str]]) -> list[dict]:
-    """A profile's layers of bindings: its G keys', its MR layer's and each mouse model's."""
-    return [keys, shift, *mouse.values()]
 
 
 def not_a_button(model: str, key: object, buttons: list[str]) -> str:

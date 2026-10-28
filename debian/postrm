@@ -1,9 +1,32 @@
 #!/bin/sh
 set -e
 
+# udev reads /etc/udev/hwdb.bin over /usr/lib/udev/hwdb.bin. Where an /etc one is there, only
+# a rebuild of it takes 71-gearbench-mouse-dpi.hwdb in or out of the hwdb udev reads. Where
+# none is, udev's own dpkg trigger rebuilds /usr/lib's (systemd-hwdb --usr update), but only
+# after this script's input trigger has read the old one, which leaves each mouse without the
+# entry until it is plugged in again (measured on a first install, 2026-10-27); so the rebuild
+# is made here first, as install.sh's hwdb_update does.
+hwdb_update() {
+    command -v systemd-hwdb >/dev/null 2>&1 || return 0
+    if [ -e /etc/udev/hwdb.bin ]; then
+        systemd-hwdb update || true
+    else
+        systemd-hwdb --usr update || true
+    fi
+}
+
+# dpkg has removed the file by now. Before the reload, so the input trigger takes each mouse's
+# entry away; with udev not running too, as in a chroot, since udev reads the hwdb at its next
+# start.
+if [ "$1" = "remove" ] && [ -z "$DPKG_ROOT" ]; then
+    hwdb_update
+fi
+
 # The reload and triggers refresh udev's database. The uaccess ACLs already granted stay
 # until the device is replugged or the machine restarts.
-if [ "$1" = "remove" ] && [ -d /run/udev ] && command -v udevadm >/dev/null 2>&1
+if [ "$1" = "remove" ] && [ -z "$DPKG_ROOT" ] && [ -d /run/udev ] \
+    && command -v udevadm >/dev/null 2>&1
 then
     udevadm control --reload || true
     udevadm trigger --subsystem-match=hidraw --action=add || true
@@ -16,6 +39,12 @@ fi
 # name it.
 if [ "$1" = "purge" ] && [ -z "$DPKG_ROOT" ] && [ -x /usr/bin/deb-systemd-helper ]; then
     deb-systemd-helper --user purge gearbench-spatial-login.service >/dev/null || true
+fi
+
+# preinst's mark of a reinstall after a remove, when the unpack after it failed and no
+# postinst follows to take it.
+if [ "$1" = "abort-install" ] && [ -z "$DPKG_ROOT" ]; then
+    rm -f /run/gearbench-was-removed
 fi
 
 #DEBHELPER#

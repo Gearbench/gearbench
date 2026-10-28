@@ -12,24 +12,23 @@ from typing import TYPE_CHECKING, cast
 
 from gi.repository import Adw, GLib, GObject, Gtk
 
-from ..config import unread_reason
 from ..focus import FOLLOWED, SHELL, held_until
+from ..library_files import unread_reason
 from ..profiles import GameProfile
-from ..wording import word_list
+from ..tray import listed_profiles
+from ..wording import LEFT_OUT, NO_GAME_PROFILE, word_list
 from .profile_manager import programs_text
-from .style import LeftOutRows, confirm
+from .style import LeftOutRows, answer_on_enter, confirm, respond, say_not_shown
+from .worker import named_layer
 
 if TYPE_CHECKING:                       # pragma: no cover
     from .keyboard_page import SendSwitch
     from .window import Window
     from .worker import LoadingGuard
 
-#: The Loaded row's first entry: the M profile alone.
-NO_OVERLAY = "No game profile"
-
 
 def held_off_text(profile: str, process: str | None,
-                  followed: bool = False, more: int = 0) -> tuple[str, str]:
+                  followed: bool, more: int) -> tuple[str, str]:
     """The held-off row's title and subtitle, from `status`'s `held_off`, the
     latest of `held_off_all`. `followed`: game profiles follow the focused
     window, so the hold-off ends when focus leaves the program, not when it
@@ -46,32 +45,43 @@ def held_off_text(profile: str, process: str | None,
 #: The Keep loaded switch's subtitle, by what a game profile follows.
 KEEP_LOADED_HELP = "A profile loaded by hand stays when another game starts"
 KEEP_LOADED_FOCUS = "A profile loaded by hand stays when another game gets focus"
-#: The focus row's subtitle: what is followed, and what is not seen.
-FOCUS_HELP = "A game profile is active while its program's window has focus"
+#: The focus row's subtitle: what is followed.
+FOCUS_HELP = "A game profile loads while its program's window has focus"
 #: Its subtitle while focus comes from Xwayland, without Gearbench's GNOME Shell extension.
 FOCUS_HELP_X11 = FOCUS_HELP + ". A native Wayland window counts as no program"
+#: The focus row's first words with none loaded, the M profile alone.
+NOTHING_LOADED = "No game profile loaded"
+#: The Save row's button that copies what shows into the active M profile (`promote`), its
+#: toasts, and its confirmation with a game profile loaded.
+SAVE_TO_M = "Save to M profile"
+SAVED_TO_M = "Saved to M{}"
+SAVED_OVERLAY_TO_M = "Saved {} to M{}"
+PROMOTE_HEADING = "Replace M{m} with {overlay}?"
+PROMOTE_BODY = ("{overlay}'s lighting and its G-key, MR and mouse bindings replace the M{m} "
+                "profile's, and {overlay} is unloaded.")
+PROMOTE = "Replace"
 
 
 def focus_text(focus: tuple[str, str | None, str | None], overlay: str | None,
                auto: bool, keep_loaded: bool | None) -> str:
     """The focus row's title while game profiles follow the focused window
-    (the owner's decision of 2026-09-24): what is active, and why.
+    (the owner's decision of 2026-09-24): what is loaded, and why.
 
     `focus` is `status`'s (source, program, profile): the focused program
     and the game profile it binds. Keep loaded and a hold-off are named, as
     they are why a focused game's profile is not the active one.
     """
     _source, program, profile = focus
-    active = overlay or "M profile"
+    loaded = f"{overlay} loaded" if overlay else NOTHING_LOADED
     if auto and overlay:
-        return f"{overlay} active: {program or 'its program'} has focus"
+        return f"{loaded}: {program or 'its program'} has focus"
     if not profile or not program:
-        return f"{active} active: no game profile's program has focus"
+        return f"{loaded}: no profile's program has focus"
     if profile == overlay:
-        return f"{overlay} active: {program} has focus"
+        return f"{loaded}: {program} has focus"
     if keep_loaded and overlay:
-        return f"{overlay} active: kept loaded while {program} has focus"
-    return f"{active} active: {program} has focus, and {profile} is held off"
+        return f"{loaded}: kept loaded while {program} has focus"
+    return f"{loaded}: {program} has focus, and {profile} is held off"
 
 
 def _first_under[W: Gtk.Widget](parent: Gtk.Widget, kind: type[W]) -> W:
@@ -113,10 +123,10 @@ class GameCard:
 
     def build(self) -> Adw.PreferencesGroup:
         """The group and its rows, for the page to place."""
-        group = self.group = Adw.PreferencesGroup(
+        group = Adw.PreferencesGroup(
             title="Game profile",
             description="Replaces the M profile's lighting, G-key and mouse button bindings "
-                        "until unloaded.")
+                        "until unloaded")
         # The Game profiles dialog edits every profile and loads nothing; the Loaded
         # row below chooses the one in force.
         manage = Gtk.Button(label="Manage…", valign=Gtk.Align.CENTER,
@@ -127,8 +137,10 @@ class GameCard:
         # A search in the list, for a long library (the owner's request of 2026-09-28),
         # by substring: libadwaita's default matches only a name's start. A pick
         # through the search still sets `selected` in the full list.
-        self.game_row = Adw.ComboRow(title="Loaded", model=Gtk.StringList.new([NO_OVERLAY]),
-                                     enable_search=True,
+        # The selected name as the subtitle, as Active's: the inline value is cut at 20
+        # characters, and a game profile's name is one people type.
+        self.game_row = Adw.ComboRow(title="Loaded", model=Gtk.StringList.new([NO_GAME_PROFILE]),
+                                     use_subtitle=True, enable_search=True,
                                      search_match_mode=Gtk.StringFilterMatchMode.SUBSTRING)
         self.game_row.set_expression(
             Gtk.PropertyExpression.new(Gtk.StringObject, None, "string"))
@@ -152,7 +164,7 @@ class GameCard:
         self.focus_row = Adw.ActionRow(use_markup=False, visible=False)
         group.add(self.focus_row)
 
-        # The programs that auto-load the loaded profile, shown while one is loaded.
+        # The programs that auto-load the loaded profile, shown while the library has it.
         # They are edited in the Game profiles dialog, for any profile: edited here,
         # binding one would need the profile loaded by hand, and going back to the M
         # profile while its program ran would hold it off. Not markup: program names.
@@ -174,19 +186,18 @@ class GameCard:
 
         actions = Adw.ActionRow(
             title="Save",
-            subtitle="Save what is on screen as a game profile, or as this M profile's "
-                     "default")
+            subtitle="Save what is on screen as a game profile, or to this M profile")
         save_as = Gtk.Button(label="Save as…", valign=Gtk.Align.CENTER)
         save_as.add_css_class("suggested-action")
         save_as.connect("clicked", self.on_save_as)
         actions.add_suffix(save_as)
-        promote = Gtk.Button(label="Set as M default", valign=Gtk.Align.CENTER)
+        promote = Gtk.Button(label=SAVE_TO_M, valign=Gtk.Align.CENTER)
         promote.connect("clicked", self.on_promote)
         actions.add_suffix(promote)
         group.add(actions)
         #: The dimmed rows of the profile files left out (show_unreadable).
         self.unreadable = LeftOutRows(
-            group, lambda name, why: f"Left out: {unread_reason(name, why)}")
+            group, lambda name, why: f"{LEFT_OUT}: {unread_reason(name, why)}")
         return group
 
     def show_unreadable(self, skipped: list[tuple[str, str]]) -> None:
@@ -209,11 +220,7 @@ class GameCard:
             self._game_row_owed = True
             return
         self._game_row_owed = False
-        names = [NO_OVERLAY] + [p.name for p in win.library]
-        # The daemon keeps a loaded profile whose file is now unreadable or gone: the tray
-        # lists it too.
-        if win.overlay and win.overlay not in names[1:]:
-            names.append(win.overlay)
+        names = [NO_GAME_PROFILE, *listed_profiles([p.name for p in win.library], win.overlay)]
         if names != self._game_names:
             self._game_names = names
             # build made the row on a Gtk.StringList.
@@ -297,8 +304,8 @@ class GameCard:
         self._send_switch(row, command="keep_loaded", key="keep_loaded")
 
     def show_programs(self) -> None:
-        """Say which programs load the loaded game profile. Hidden while none
-        is loaded: the dialog has every profile's."""
+        """Say which programs load the loaded game profile. Hidden while no profile
+        in the library is loaded: the dialog has every profile's."""
         profile = self.win.game_profile(self.win.overlay)
         self.programs_row.set_visible(profile is not None)
         if profile is not None:
@@ -336,8 +343,9 @@ class GameCard:
         self._game_row_owed = False
         self._unanswered["game_profile"] += 1
 
-        def done(_reply: dict | None) -> None:
+        def done(reply: dict | None) -> None:
             self._unanswered["game_profile"] -= 1
+            say_not_shown(self.win.toast, reply)
             self.win.resync()
         self.win.call({"command": "unload"} if wanted is None
                       else {"command": "load", "value": name}, done)
@@ -358,11 +366,7 @@ class GameCard:
         # Its only text is the placeholder, an example name.
         entry.update_property([Gtk.AccessibleProperty.LABEL], ["Game profile name"])
         dialog.set_extra_child(entry)
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("save", "Save")
-        dialog.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
-        dialog.set_default_response("save")
-        dialog.set_close_response("cancel")
+        respond(dialog, "save", "Save", Adw.ResponseAppearance.SUGGESTED)
         dialog.set_response_enabled("save", bool(entry.get_text().strip()))
         # The entry's handlers find the dialog as its ancestor: holding it
         # would make a cycle through GTK that Python's collector cannot see,
@@ -371,22 +375,14 @@ class GameCard:
         # Enter in the name is Save. Not through `activates-default`: the
         # entry's default action is the window's, not the dialog's, so it did
         # nothing, measured on libadwaita 1.9.
-        entry.connect("activate", self._save_name_entered)
+        entry.connect("activate", answer_on_enter, "save")
         dialog.connect("response", self._do_save_as, entry)
         dialog.present(self.win)
 
     @staticmethod
     def _save_name_changed(entry: Gtk.Entry) -> None:
-        dialog = entry.get_ancestor(Adw.AlertDialog)
-        if dialog is not None:
-            dialog.set_response_enabled("save", bool(entry.get_text().strip()))
-
-    @staticmethod
-    def _save_name_entered(entry: Gtk.Entry) -> None:
-        dialog = entry.get_ancestor(Adw.AlertDialog)
-        if dialog is not None and dialog.get_response_enabled("save"):
-            dialog.emit("response", "save")
-            dialog.force_close()
+        dialog = cast(Adw.AlertDialog, entry.get_ancestor(Adw.AlertDialog))
+        dialog.set_response_enabled("save", bool(entry.get_text().strip()))
 
     def _do_save_as(self, dialog: Adw.AlertDialog, response: str, entry: Gtk.Entry) -> None:
         """Save what is on screen as a game profile, asking first when the
@@ -412,31 +408,50 @@ class GameCard:
         programs = existing.processes
         confirm(self.win, f"Replace {existing.name}?",
                 f"Saving as {name} writes what is on screen over {existing.name}."
-                + (f" It still auto-loads for {word_list(programs, 'and')}." if programs else ""),
+                + (f" It still auto-loads for {word_list(programs)}." if programs else ""),
                 "Replace", lambda: self._save_as(name))
 
     def _save_as(self, name: str) -> None:
         """Send `save_profile`, then load what was saved."""
+        def loaded(reply: dict | None) -> None:
+            say_not_shown(self.win.toast, reply)
+            self.win.resync()
+
         def saved(reply: dict | None) -> None:
             if reply is None:
                 return
             self.win.toast(f"Saved {name}")
-            self.win.call({"command": "load", "value": name},
-                          lambda _reply: self.win.resync())
+            self.win.call({"command": "load", "value": name}, loaded)
         self.win.call({"command": "save_profile", "value": name}, saved)
 
     def on_promote(self, _b: Gtk.Button | None) -> None:
-        """Make what is on screen this M profile's default. The daemon reads the
-        lighting itself, as it saves every change when it is made."""
-        # A speed still settling goes first, so the default takes it.
-        self._flush_speed()
+        """Save what is on screen to this M profile. With a game profile loaded it
+        asks first, since the game profile's lighting and bindings write over the M
+        profile's (the owner's decision of 2026-10-22), and the promote names the layer of
+        the click, which the daemon refuses once another is in force; with none, the M
+        profile is what shows, and it goes at once."""
         overlay = self.win.overlay
+        if overlay is None:
+            self._promote(None, None)
+            return
+        layer = named_layer(self.win.layer)
+        active = self.win.active
+        confirm(self.win, PROMOTE_HEADING.format(m=active, overlay=overlay),
+                PROMOTE_BODY.format(overlay=overlay, m=active), PROMOTE,
+                lambda: self._promote(overlay, layer))
+
+    def _promote(self, overlay: str | None, layer: dict | None) -> None:
+        """Send `promote`, on `layer` if given. The daemon reads the lighting itself, as it
+        saves every change when it is made."""
+        # A speed still settling goes first, so the M profile takes it.
+        self._flush_speed()
 
         def done(reply: dict | None) -> None:
             # Resync either way: it re-reads config.json on the worker, which
             # is what promote just rewrote, and puts a refused one back.
             self.win.resync()
             if reply:
-                self.win.toast(f"{overlay} is now the M{self.win.active} default" if overlay
-                               else f"Saved as the M{self.win.active} default")
-        self.win.call({"command": "promote"}, done)
+                self.win.toast(SAVED_OVERLAY_TO_M.format(overlay, self.win.active) if overlay
+                               else SAVED_TO_M.format(self.win.active))
+                say_not_shown(self.win.toast, reply)
+        self.win.call({"command": "promote", "layer": layer}, done)

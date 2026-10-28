@@ -11,18 +11,30 @@ from pathlib import Path
 
 from .. import ghub, ghub_plan, import_plan, pack
 from ..apps import launcher_warning
-from ..config import MACRO_PREFIX
+from ..config import MACRO_PREFIX, MODE_WORDS
 from ..ghub import MAX_DOCUMENT_BYTES
 from ..lighting import ANIMATIONS
-from ..macros import MAX_PLAY_DELAY, PLAY_DELAY, TOGGLE, macros_dir, repeat_summary
+from ..macros import (
+    MACRO_RUNNING,
+    MACRO_STARTS,
+    MAX_PLAY_DELAY,
+    PLAY_DELAY,
+    REPEAT_SUMMARIES,
+    TOGGLE,
+    countdown_seconds,
+    macros_dir,
+)
 from ..profiles import profiles_dir
 from ..wording import counted, escaped as _escaped
-from .output import Subcommands, print_json, print_reply, send
+from .output import GAME_PROFILE_LABELS, Subcommands, print_json, print_reply, send
 
 #: import-ghub --all on a file whose profiles are all desktop defaults, which --all leaves out.
 ALL_FINDS_NONE = ("The file holds no game profile for --all, which leaves out the desktop "
                   "default; --profile NAME, as --list names it, imports the desktop default "
                   "onto M1, M2 and M3.")
+#: A mouse color given on the command line as this, in any case, is no mouse color of the
+#: profile's own: a synced mouse then shows the keyboard's color around its painted keys.
+NO_MOUSE_COLOR = "none"
 
 
 def cmd_apps(args: argparse.Namespace) -> int:
@@ -31,12 +43,12 @@ def cmd_apps(args: argparse.Namespace) -> int:
         return print_reply(reply, args.json)
     apps = reply.get("apps") or []
     if not apps:
-        print("nothing running that can be bound")
+        print("nothing running to pick")
         return 0
     for app in apps:
         print(f"  {_escaped(app['label']):<24} {_escaped(app['process'])}")
-    print("\nSet a profile's programs with: gearbench-ctl profile-programs <name> "
-          "<process>...", file=sys.stderr)
+    print("\nSet a profile's programs with `gearbench-ctl profile-programs <name> "
+          "<process>...`", file=sys.stderr)
     return 0
 
 
@@ -53,14 +65,37 @@ def cmd_profile_programs(args: argparse.Namespace) -> int:
     """Set which programs load a game profile."""
     _warn_launchers(args.programs)
     return print_reply(send({"command": "profile_processes", "value": args.name,
-                              "processes": args.programs}), args.json)
+                              "processes": args.programs}), args.json,
+                       labels=GAME_PROFILE_LABELS)
+
+
+def mouse_color_sent(text: str) -> str | None:
+    """A mouse color as given on the command line, as a request carries it: NO_MOUSE_COLOR,
+    in any case, as null, for none; anything else as it is, for the daemon to read."""
+    return None if text.strip().lower() == NO_MOUSE_COLOR else text
 
 
 def cmd_save_profile(args: argparse.Namespace) -> int:
-    """Save what shows as a game profile; --process names the programs that load it."""
+    """Save what shows as a game profile; --process names the programs that load it, and
+    --mouse-color the color a synced mouse shows while it is loaded, NO_MOUSE_COLOR for none."""
     _warn_launchers(args.process or [])
-    return print_reply(send({"command": "save_profile", "value": args.name,
-                              "processes": args.process}), args.json)
+    request = {"command": "save_profile", "value": args.name, "processes": args.process}
+    if args.mouse_color is not None:
+        request["mouse_color"] = mouse_color_sent(args.mouse_color)
+    return print_reply(send(request), args.json)
+
+
+def cmd_profile_mouse_color(args: argparse.Namespace) -> int:
+    """Set a game profile's mouse color alone, as the window's Mouse color row does."""
+    return print_reply(send({"command": "profile_mouse_color", "value": args.name,
+                             "color": mouse_color_sent(args.color)}), args.json,
+                       labels=GAME_PROFILE_LABELS)
+
+
+def _mode_words(mode: object) -> str | None:
+    """A lighting mode of a reply in the CLI's words (MODE_WORDS); None for a value no mode
+    has, which prints as it came. Looked up by str, since a reply's value can be any JSON."""
+    return MODE_WORDS.get(str(mode))
 
 
 def cmd_profiles(args: argparse.Namespace) -> int:
@@ -68,7 +103,7 @@ def cmd_profiles(args: argparse.Namespace) -> int:
     if args.json or not reply.get("ok"):
         return print_reply(reply, args.json)
     overlay = reply.get("overlay")
-    print(f"loaded: {_escaped(overlay or '(none — using the M profile default)')}"
+    print(f"loaded: {_escaped(overlay or 'none')}"
           + ("  [auto]" if reply.get("auto") else ""))
     entries = reply.get("profiles") or []
     if not entries:
@@ -79,13 +114,14 @@ def cmd_profiles(args: argparse.Namespace) -> int:
     print()
     for entry in entries:
         marker = "*" if entry["name"] == overlay else " "
-        procs = ", ".join(entry["processes"]) or "manual only"
+        procs = ", ".join(entry["processes"]) or "loads by hand"
         # An animation, or disabled, shows in place of the mode, which it keeps.
         effect = entry.get("effect")
-        shows = effect if effect in ANIMATIONS or effect == "disabled" else entry["mode"]
+        shows = (effect if effect in ANIMATIONS or effect == "disabled"
+                 else _mode_words(entry["mode"]) or entry["mode"])
         keys = "key " if entry["keys"] == 1 else "keys"    # padded: the programs line up
-        print(f"{marker} {_escaped(entry['name']):<20} {shows:<8} "
-              f"{entry['keys']:>3} {keys}   {_escaped(procs)}")
+        print(f"{marker} {_escaped(entry['name']):<20} {_escaped(shows):<8} "
+              f"{_escaped(entry['keys']):>3} {keys}   {_escaped(procs)}")
     return 0
 
 
@@ -101,14 +137,15 @@ def cmd_macros(args: argparse.Namespace) -> int:
     for macro in macros:
         marker = "*" if macro["name"] == running and not starts_in else " "
         steps = "step " if macro["steps"] == 1 else "steps"    # padded: the repeat lines up
-        print(f"{marker} {_escaped(macro['name']):<24} {macro['steps']:>3} {steps}   "
-              f"{repeat_summary(macro['repeat'])}")
+        print(f"{marker} {_escaped(macro['name']):<24} {_escaped(macro['steps']):>3} {steps}   "
+              f"{REPEAT_SUMMARIES[macro['repeat']]}")
     if running and starts_in:
-        print(f"\n{_escaped(running)} starts in {starts_in:g} s.")
+        print("\n" + MACRO_STARTS.format(name=_escaped(running),
+                                         seconds=countdown_seconds(starts_in)))
     elif running:
         # A toggled macro runs with nothing held, so say it is running.
-        print(f"\n* {_escaped(running)} is running now.")
-    print(f"\nBind one with: gearbench-ctl bind G1 '{MACRO_PREFIX}<name>'", file=sys.stderr)
+        print(f"\n* {MACRO_RUNNING.format(name=_escaped(running))}.")
+    print(f"\nBind one with `gearbench-ctl bind G1 '{MACRO_PREFIX}<name>'`", file=sys.stderr)
     return 0
 
 
@@ -121,15 +158,16 @@ def cmd_macro_run(args: argparse.Namespace) -> int:
     `macro-stop` or the banner's Stop cancels it.
     """
     if not 0 <= args.delay <= MAX_PLAY_DELAY:
-        print(f"error: --delay must be 0 to {MAX_PLAY_DELAY} seconds", file=sys.stderr)
+        print(f"error: --delay is 0 to {MAX_PLAY_DELAY} s, not {args.delay:g}",
+              file=sys.stderr)
         return 1
     reply = send({"command": "macro_run", "value": args.name, "delay": args.delay})
     if args.json or not reply.get("ok"):
         return print_reply(reply, args.json)
     name, repeat = _escaped(reply.get("played", args.name)), reply.get("repeat")
     delay = reply.get("delay") or 0
-    print(f"{name} starts in {delay:g} s: click into the window it is for." if delay
-          else f"{name} is running.")
+    print(MACRO_STARTS.format(name=name, seconds=countdown_seconds(delay)) if delay
+          else f"{MACRO_RUNNING.format(name=name)}.")
     print("It repeats until `gearbench-ctl macro-stop`." if repeat == TOGGLE
           else "It runs through once.")
     return 0
@@ -219,7 +257,7 @@ def cmd_import_ghub(args: argparse.Namespace) -> int:
     if not chosen:
         print(ALL_FINDS_NONE, file=sys.stderr)
     plan = ghub_plan.make_plan(found, chosen, import_plan.existing_from_disk(),
-                               default=args.on_clash,
+                               default=import_plan.ON_CLASH.get(args.on_clash),
                                with_programs=chosen if args.with_programs else ())
     if plan.unresolved:
         if not args.json:  # stdout holds JSON or nothing
@@ -230,7 +268,7 @@ def cmd_import_ghub(args: argparse.Namespace) -> int:
         for clash in plan.unresolved:
             print(f'    {import_plan.CLASH_WORDS[clash.kind].lower()} "{_escaped(clash.existing)}"',
                   file=sys.stderr)
-        print("Pass --on-clash replace, keep (both, the import under a new name) or skip.",
+        print("Pass --on-clash replace, keep-both (the import under a new name) or keep-mine.",
               file=sys.stderr)
         return 1
     return _import_plan(plan, args)
@@ -307,8 +345,9 @@ def add_lists_and_macros(sub: Subcommands) -> None:
     sub.add("profiles", help="list game profiles").set_defaults(func=cmd_profiles)
     sub.add("macros", help="list macros; edit them in the window's Macros tab").set_defaults(
         func=cmd_macros)
-    mrun = sub.add("macro-run", help="play a macro after a countdown to click into its window; "
-                                     "toggle runs until macro-stop, the others once")
+    mrun = sub.add("macro-run", help="run a macro after a countdown to click into its window; "
+                                     "Toggle repeats until macro-stop; Once and While held "
+                                     "run once")
     mrun.add_argument("name")
     mrun.add_argument("--delay", type=float, default=PLAY_DELAY, metavar="SECONDS",
                       help=f"seconds before the first step, 0 to {MAX_PLAY_DELAY} "
@@ -316,14 +355,15 @@ def add_lists_and_macros(sub: Subcommands) -> None:
     mrun.set_defaults(func=cmd_macro_run)
     sub.add("macro-stop", help="stop the macro that is running or counting down, "
                                "however it started").set_defaults(func=cmd_macro_stop)
-    sub.add("apps", help="list programs you are running that a profile can bind to").set_defaults(
+    sub.add("apps", help="list the running programs a game profile can load for").set_defaults(
         func=cmd_apps)
 
 
 def add_game_profiles_and_imports(sub: Subcommands) -> None:
-    ld = sub.add("load", help="load a game profile over the current M profile")
+    ld = sub.add("load", help="load a game profile over the active M profile")
     ld.add_argument("name")
-    ld.set_defaults(func=lambda a: print_reply(send({"command": "load", "value": a.name}), a.json))
+    ld.set_defaults(func=lambda a: print_reply(send({"command": "load", "value": a.name}), a.json,
+                                               {"mode": _mode_words}))
 
     sub.add("unload", help="unload the game profile, back to the M profile").set_defaults(
         func=lambda a: print_reply(send({"command": "unload"}), a.json))
@@ -338,7 +378,11 @@ def add_game_profiles_and_imports(sub: Subcommands) -> None:
     sp = sub.add("save-profile", help="save the live lighting and bindings as a game profile")
     sp.add_argument("name")
     sp.add_argument("--process", action="append", default=None,
-                    help="process name that auto-loads it; repeatable")
+                    help="a program that loads it, as `apps` lists it; repeatable")
+    sp.add_argument("--mouse-color", metavar="#RRGGBB",
+                    help="the color a mouse that follows the keyboard shows while it is "
+                         f"loaded, six hex digits like #0080ff, or {NO_MOUSE_COLOR} for the "
+                         "keyboard's; without it, the loaded game profile's")
     sp.set_defaults(func=cmd_save_profile)
 
     pp = sub.add("profile-programs",
@@ -350,8 +394,16 @@ def add_game_profiles_and_imports(sub: Subcommands) -> None:
                          "case, .exe optional")
     pp.set_defaults(func=cmd_profile_programs)
 
-    sub.add("promote", help="make what shows the active M profile's default and unload the "
-                            "game profile").set_defaults(
+    pm = sub.add("profile-mouse-color",
+                 help="set the color a mouse that follows the keyboard shows while a game "
+                      "profile is loaded, and nothing else of it")
+    pm.add_argument("name")
+    pm.add_argument("color", metavar="#RRGGBB",
+                    help=f"six hex digits like #0080ff, or {NO_MOUSE_COLOR} for the keyboard's")
+    pm.set_defaults(func=cmd_profile_mouse_color)
+
+    sub.add("promote", help="save what shows to the active M profile and unload the game "
+                            "profile").set_defaults(
         func=lambda a: print_reply(send({"command": "promote"}), a.json))
 
     rp = sub.add("rename-profile", help="rename a game profile; loaded or held off, it "
@@ -379,8 +431,11 @@ def add_game_profiles_and_imports(sub: Subcommands) -> None:
                     help="import every game profile; not the desktop default")
     ig.add_argument("--dry-run", action="store_true",
                     help="say what would be written, and write nothing")
-    ig.add_argument("--on-clash", choices=import_plan.CHOICES,
-                    help="for a name Gearbench already has: replace it, keep both, or skip it")
+    ig.add_argument("--on-clash", choices=import_plan.ON_CLASH,
+                    metavar="{replace,keep-both,keep-mine}",
+                    help="for a name Gearbench already has: replace it, keep both, or keep "
+                         "yours; keep and skip, its words in 1.1.0, mean keep-both and "
+                         "keep-mine")
     ig.add_argument("--with-programs", action="store_true",
                     help="load each game profile for the programs G HUB names, with or "
                          "without .exe; without it, each loads by hand, and one that replaces "
@@ -388,7 +443,7 @@ def add_game_profiles_and_imports(sub: Subcommands) -> None:
     ig.set_defaults(func=cmd_import_ghub)
 
     ip = sub.add("import-pack",
-                 help="import the game lighting profiles and macros that come with Gearbench")
+                 help="import the game profiles and macros that come with Gearbench")
     ip.add_argument("names", nargs="*", metavar="NAME",
                     help="a game profile or macro of the pack, as --list names it; with "
                          "none, all of them")

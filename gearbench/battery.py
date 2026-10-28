@@ -1,11 +1,13 @@
 """Batteries: one reader for every device, the words and the icon, the low-battery levels
 and the voltage curves of each cell that has them.
 
-The devices use three battery features, so the reader asks by feature: the G502 X PLUS
+The devices use different battery features, so the reader asks by feature: the G502 X PLUS
 answers a percentage over 0x1004 UnifiedBattery, as the G515 LIGHTSPEED TKL does through its
-receiver, the G305 a coarse level over 0x1000 BatteryStatus, and the G915 a voltage and a
-status byte over 0x1001 BatteryVoltage, as each model given a cell does. The Astro A50's
-base station is not HID++; `astro` puts its percentage and charging bit in the same shape.
+receiver, the G305 a coarse level over 0x1000 BatteryStatus, the G915 a voltage and a
+status byte over 0x1001 BatteryVoltage, as each keyboard and mouse given a cell does, and
+the wireless HID++ headsets a voltage and a flags byte over 0x1F20 ADCMeasurement. The
+Astro A50's base station is not HID++; `astro` puts its percentage and charging bit in the
+same shape.
 """
 
 from __future__ import annotations
@@ -15,7 +17,8 @@ from bisect import bisect_left
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .hidpp import DeviceGone, Feature, Hidpp, HidppFailure, not_there
+from .hidpp import DeviceGone, Feature, Hidpp, HidppError, HidppFailure, not_there
+from .wording import number
 
 log = logging.getLogger("gearbench")
 
@@ -27,8 +30,8 @@ UNKNOWN = "unknown"
 FAULT = "battery fault"
 #: On external power and not charging: the kernel's POWER_SUPPLY_STATUS_NOT_CHARGING.
 NOT_CHARGING = "not charging"
-#: A 0x1001 device charging above its cell's `nearly_full_mv` (NEARLY_FULL_MV without a
-#: curve), where the charging curve stops meaning much.
+#: A 0x1001 or 0x1F20 device charging above its cell's `nearly_full_mv` (a 0x1001 one with
+#: no cell above NEARLY_FULL_MV), where the charging curve stops meaning much.
 NEARLY_FULL = "charging, nearly full"
 
 #: The status byte of 0x1004 UnifiedBattery, as the kernel's
@@ -63,49 +66,88 @@ STATUS_STATES = {
 #: The two low-battery levels in whole percent, G HUB's LOW and CRITICAL, which the
 #: notices, the tray and the window's Battery row share.
 LOW_PERCENT, CRITICAL_PERCENT = 30, 15
-#: The low-battery notices, daemon.session's for the keyboard and the headset's, in percent:
-#: one below each, the second replacing the first, after two readings in a row below it.
-#: External power arms them again, and so does a reading at daemon.shared.BATTERY_REARM or
-#: more. The tray's low-battery icon goes by the lower one.
+#: The low-battery notices' thresholds in percent (daemon.shared.BatteryNotices), one notice
+#: below each; the tray's low-battery icon goes by the lower one.
 BATTERY_WARNINGS = (LOW_PERCENT, CRITICAL_PERCENT)
+#: What ends the low-battery notice of a device charged on its USB cable: a keyboard, the
+#: G432 family's wireless headsets and the Centurion headsets charged on a cable.
+CABLE_CHARGE = "Plug in its USB cable to charge it."
+#: What ends the low-battery notice of a headset charged on its base station.
+BASE_CHARGE = "Put the headset on its base station to charge it."
 
-#: The battery features, in the order tried: 0x1004 is the most direct, and 0x1001, last,
-#: needs a curve for the cell.
+#: The battery features, tried in READERS' order.
 F_UNIFIED = 0x1004
 F_STATUS = 0x1000
 F_VOLTAGE = 0x1001
-#: The three in that order, with the function `read` asks each for.
-FEATURES = ((F_UNIFIED, 1), (F_STATUS, 0), (F_VOLTAGE, 0))
+#: 0x1F20, the HID++ headsets' battery: getADCMeasurement (function 0) answers [millivolts
+#: BE16, flags], and the headset broadcasts the same as its event 0 (the kernel's
+#: CMD_ADC_MEASUREMENT_GET_ADC_MEASUREMENT and EVENT_ADC_MEASUREMENT_STATUS_BROADCAST, Linux
+#: 7.0; HeadsetControl's requestBatteryHIDPP reads the same bytes).
+F_ADC = 0x1F20
+
+#: 0x1F20's flags byte, as the kernel's hidpp20_map_adc_measurement_1f20 reads it whole:
+#: 0x01 discharging, 0x03 charging, 0x07 full, anything else (0x0F among them) unknown, which
+#: the kernel also takes as the headset off or out of reach.
+ADC_STATES = {0x01: ON_BATTERY, 0x03: CHARGING, 0x07: FULL}
 
 
 def has_battery(dev: Hidpp) -> bool:
     """Whether `dev`'s feature table lists one of the battery features `read` asks."""
-    return any(dev.feature(feature_id) is not None for feature_id, _function in FEATURES)
+    return any(dev.feature(feature_id) is not None for feature_id, _function, _decode in READERS)
 
 
-def amount_words(percent: float, approximate: bool) -> str:
-    """A percent as every reading shows it: whole, with "about" for a coarse one."""
-    return f"{'about ' if approximate else ''}{percent:.0f}%"
+#: The states that say nothing beyond the percent: the commonest, on battery, needs no word.
+PLAIN = (None, ON_BATTERY, UNKNOWN)
+
+
+def shown_percent(percent: float) -> int:
+    """The whole percent a view shows for a reading's `percent` (level_words), which every
+    comparison of a percent the user reads goes by: at 14.6 a row reads "15%", and is not
+    colored or warned of as below 15."""
+    return round(percent)
+
+
+def level_words(percent: float | None, approximate: bool, state: str | None) -> str:
+    """A reading in the one form every view gives it (the owner's decision of 2026-10-22):
+    "64%" on battery, "64%, charging", "fully charged", "about 60%" for a coarse percent; with
+    no percent, the state alone, since "?%" reads as a fault, but empty on battery, for an
+    unknown state or for none."""
+    if state == FULL:
+        return FULL
+    if percent is None:
+        return "" if state in PLAIN else str(state)
+    amount = f"{'about ' if approximate else ''}{shown_percent(percent)}%"
+    return amount if state in PLAIN else f"{amount}, {state}"
 
 
 def reading_words(reading: dict) -> str:
-    """A reading's percent and state in words, "about" for a coarse percent; empty for
-    neither. With no percent (nearly full on the cable, or a cell with no curve) the state
-    alone, since "?%" reads as a fault."""
+    """A battery.read() reading in level_words' form."""
     value = reading.get("percent")
-    amount = (f"{amount_words(value, bool(reading.get('approximate')))}  "
-              if isinstance(value, int | float) else "")
-    return f"{amount}{reading.get('state', '')}".strip()
+    return level_words(value if isinstance(value, int | float) else None,
+                       bool(reading.get("approximate")), reading.get("state"))
 
 
-def icon_name(reading: dict | None, cabled: bool = False) -> str:
-    """A reading's battery icon, the one the window and the tray show, a name the Adwaita
-    and Yaru themes both have. The level is the ten nearest the whole percent
-    amount_words shows, halfway going up. A charging cell with no percent (nearly full on
-    the cable) is drawn at 90, and with `cabled`, a keyboard on its cable with no reading,
-    as the adapter; only the tray passes `cabled`, so the window draws that case as a
-    missing battery."""
-    reading = reading or {}
+def kept_at(reply: dict) -> float | None:
+    """When a device reply's battery reading was taken (`battery_at`), while the reading is
+    not live: the device does not answer, or the A50's headset is off its link. None while it
+    is live, where a reply may give the time all the same, and for a time that is no number."""
+    at = reply.get("battery_at")
+    live = reply.get("answering") is not False and reply.get("linked") is not False
+    return None if live or not number(at) else at
+
+
+def on_power(reading: dict) -> bool:
+    """Whether a reading is on external power, which one feature's reading says in
+    `external_power` and another's only in `charging`."""
+    return bool(reading.get("external_power") or reading.get("charging"))
+
+
+def icon_name(reading: dict, cabled: bool = False) -> str:
+    """A reading's battery icon, the one the window, the tray and a low-battery notice show, a
+    name the Adwaita and Yaru themes both have. The level is the ten nearest the whole percent
+    level_words shows, halfway going up. A cell nearly full on the cable, with no percent,
+    is drawn at 90; one charging at a level its cell cannot tell (no cell, or no charging
+    curve) and, with `cabled`, a keyboard on its cable with no reading, as the adapter."""
     state, percent = reading.get("state"), reading.get("percent")
     charging = state in (CHARGING, NEARLY_FULL)
     if state == FAULT:
@@ -113,11 +155,11 @@ def icon_name(reading: dict | None, cabled: bool = False) -> str:
     if state == FULL:
         return "battery-level-100-charged-symbolic"
     if not isinstance(percent, int | float):
-        if charging:
+        if state == NEARLY_FULL:
             return "battery-level-90-charging-symbolic"
-        return "ac-adapter-symbolic" if cabled else "battery-missing-symbolic"
+        return "ac-adapter-symbolic" if cabled or charging else "battery-missing-symbolic"
     # The themes stop at 100, and a 0x1004 or 0x1000 percent byte is passed on as it comes.
-    level = min(100, (round(percent) + 5) // 10 * 10)
+    level = min(100, (shown_percent(percent) + 5) // 10 * 10)
     if charging:
         # Adwaita has no 100 % charging icon; Yaru has both.
         return ("battery-level-100-charged-symbolic" if level == 100
@@ -128,21 +170,20 @@ def icon_name(reading: dict | None, cabled: bool = False) -> str:
 
 def read(dev: Hidpp, cell: CellCurves | None, name: str = "device") -> dict | None:
     """What this device can say about its battery, in one shape, or None for no battery
-    feature or a refused read; silence and DeviceGone are raised (_ask). `name` is the
-    device's, for the journal line of a refusal.
+    feature or a read refused or failed; silence and DeviceGone are raised (_ask). `name`
+    is the device's, for the journal line of a refusal or failure.
 
     Every reading has `state` and `approximate`: whether `percent` is a measurement or the
     nearest step the device knows. `percent` is left out where it would be a guess: a
-    0x1001 device with no `cell`, or one charging above its cell's `nearly_full_mv`. Only
-    0x1004 and 0x1000 readings carry `charging`.
+    0x1001 device with no `cell`, a 0x1F20 one with none unless it reads full, one charging
+    above its cell's `nearly_full_mv`, or a 0x1F20 headset off or charging a cell with no
+    charging curve. 0x1004, 0x1000 and 0x1F20 readings carry `charging`.
     """
-    decoders: dict[int, Callable[[bytes], dict]] = {
-        F_UNIFIED: unified, F_STATUS: _status, F_VOLTAGE: lambda reply: _voltage(reply, cell)}
-    for feature_id, function in FEATURES:
+    for feature_id, function, decode in READERS:
         feature = dev.feature(feature_id)
         if feature is not None:
             reply = _ask(dev, feature, function, name)
-            return None if reply is None else decoders[feature_id](reply)
+            return None if reply is None else decode(reply, cell)
     return None
 
 
@@ -188,12 +229,13 @@ def _status(reply: bytes) -> dict:
 def _voltage(reply: bytes, cell: CellCurves | None) -> dict:
     """0x1001: millivolts, which only mean something against the device's cell. With no
     cell, or above the cell's `nearly_full_mv` while charging,
-    the percentage is left out."""
+    the percentage is left out. Only a charging reading takes the charging curve: on external
+    power and not charging, or in an unknown charge state, no charge current lifts the
+    voltage, so the discharge curve stands."""
     millivolts = (reply[0] << 8) | reply[1]
     flags = reply[2]
     external = bool(flags & EXTERNAL_POWER)
     charge = flags & CHARGE_STATE
-    full = external and charge == CHARGE_FULL
     if not external:
         state = ON_BATTERY
     elif charge == CHARGE_CHARGING:
@@ -205,21 +247,69 @@ def _voltage(reply: bytes, cell: CellCurves | None) -> dict:
         "millivolts": millivolts,
         "volts": round(millivolts / 1000, 2),
         "external_power": external,
-        "full": full,
+        "full": state == FULL,
         "critical": bool(flags & CRITICAL),
         "state": state,
         "approximate": False,
     }
     if cell is not None and state != NEARLY_FULL:
-        reading["percent"] = 100.0 if full else cell.percent(millivolts, external)
+        if state == FULL:
+            reading["percent"] = 100.0
+        else:
+            _put_percent(reading, cell, millivolts, state == CHARGING)
     return reading
 
 
+def adc(data: bytes, cell: CellCurves | None) -> dict:
+    """A 0x1F20 measurement, [millivolts BE16, flags], getADCMeasurement's reply and the
+    event the headset broadcasts alike, in the one shape. A headset off or out of reach
+    (ADC_STATES' unknown) has no percentage; nor has one charging past its cell's
+    `nearly_full_mv`, which reads NEARLY_FULL, or charging a cell with no charging curve."""
+    millivolts = int.from_bytes(data[:2], "big")
+    state = ADC_STATES.get(data[2], UNKNOWN)
+    charging = state == CHARGING
+    if charging and cell is not None and millivolts > cell.nearly_full_mv:
+        state = NEARLY_FULL
+    reading: dict = {
+        "millivolts": millivolts,
+        "volts": round(millivolts / 1000, 2),
+        "external_power": state in (CHARGING, NEARLY_FULL, FULL),
+        "state": state,
+        "charging": charging,
+        "approximate": False,
+    }
+    if state == FULL:
+        reading["percent"] = 100.0
+    elif cell is not None and state in (ON_BATTERY, CHARGING):
+        _put_percent(reading, cell, millivolts, charging)
+    return reading
+
+
+def _put_percent(reading: dict, cell: CellCurves, millivolts: int, charging: bool) -> None:
+    """The cell's percentage for `millivolts` into `reading`, left out where the cell has no
+    curve for it (CellCurves.percent)."""
+    percent = cell.percent(millivolts, charging)
+    if percent is not None:
+        reading["percent"] = percent
+
+
+#: The battery features in the order tried, each with the function `read` asks it for and
+#: its decoder, given the reply and the device's cell: 0x1004 is the most direct, and 0x1001
+#: and 0x1F20, last, need a curve for the cell.
+READERS: tuple[tuple[int, int, Callable[[bytes, CellCurves | None], dict]], ...] = (
+    (F_UNIFIED, 1, lambda reply, _cell: unified(reply)),
+    (F_STATUS, 0, lambda reply, _cell: _status(reply)),
+    (F_VOLTAGE, 0, _voltage),
+    (F_ADC, 0, adc),
+)
+
+
 def _ask(dev: Hidpp, feature: Feature, function: int, name: str) -> bytes | None:
-    """One read, or None when the device refuses: a battery it will not talk about does
-    not make the device unusable. Silence (a timeout, or a receiver that cannot reach the
-    device) and DeviceGone are raised: they say whether the device is there, and the
-    caller acts on that."""
+    """One read, or None when the device refuses it or the read fails short of saying
+    whether the device is there, as its node's failed write does: a battery it will not
+    talk about does not make the device unusable. Silence (a timeout, or a receiver that
+    cannot reach the device) and DeviceGone are raised: they say whether the device is
+    there, and the caller acts on that."""
     try:
         return dev.request(feature.index, function)
     except DeviceGone:
@@ -227,10 +317,13 @@ def _ask(dev: Hidpp, feature: Feature, function: int, name: str) -> bytes | None
     except HidppFailure as exc:
         if not_there(exc):
             raise
-        log.debug("the %s refused its battery read: %s", name, exc)
+        if isinstance(exc, HidppError):
+            log.debug("the %s refused its battery read: %s", name, exc)
+        else:
+            log.debug("the %s's battery read failed: %s", name, exc)
         return None
 
-#: Bit 7 of the status byte: the keyboard is on external power.
+#: Bit 7 of 0x1001's status byte: the device is on external power.
 EXTERNAL_POWER = 0x80
 #: The low three bits, meaningful only while bit 7 is set: 0 charging, 1 full, 2 not
 #: charging, anything else unknown (the kernel's hidpp20_battery_map_status_voltage).
@@ -248,7 +341,7 @@ CRITICAL = 0x20
 #: charging curve ends at 91 % at 4.20 V, so the number stalled at 80 to 91 % (measured
 #: 2026-09-22). G HUB's battery.xml also stops trusting the curve here, counting 1 % per
 #: 220 s once the cell is stable above 4100 mV (charging_time_slots); this does not. A
-#: 0x1001 product with no curve takes it too.
+#: 0x1001 device with no cell takes it too.
 NEARLY_FULL_MV = 4100
 
 #: Running on battery: (millivolts, percent remaining), rising. The G915's curves are
@@ -287,7 +380,7 @@ DISCHARGE_CURVE: tuple[tuple[int, float], ...] = (
     97.8), (4112, 98.6), (4154, 99), (4200, 100)
 )
 
-#: On external power, where the reading sits high for the same charge: the depot's
+#: While charging, where the reading sits high for the same charge: the depot's
 #: (volts, percent) points, dropped as above.
 CHARGING_CURVE: tuple[tuple[int, float], ...] = (
     (3400, 0), (3419, 1), (3512, 2), (3600, 3), (3677, 4), (3762, 5), (3800,
@@ -313,15 +406,18 @@ class CellCurves:
 
     #: Running on battery: charge remaining.
     discharge: tuple[tuple[int, float], ...]
-    #: On external power, where the reading sits high for the same charge.
+    #: While charging, where the reading sits high for the same charge; empty for a cell
+    #: whose charging voltage says nothing of its charge (G733_0AFE_CELL).
     charging: tuple[tuple[int, float], ...]
     #: Charging above this, the device reads NEARLY_FULL and no percentage.
     nearly_full_mv: int
 
-    def percent(self, millivolts: int, external_power: bool) -> float:
+    def percent(self, millivolts: int, charging: bool) -> float | None:
         """Charge remaining, 0 to 100, linear between the curve's points; off either end,
-        that end's value."""
-        curve = self.charging if external_power else self.discharge
+        that end's value; None from an empty curve."""
+        curve = self.charging if charging else self.discharge
+        if not curve:
+            return None
         at = bisect_left(curve, millivolts, key=lambda point: point[0])
         if at == 0:
             return curve[0][1]
@@ -529,13 +625,177 @@ G903_HERO_CHARGING: tuple[tuple[int, float], ...] = (
 #: G502 LIGHTSPEED's file counts a voltage that moves within 3 mV a minute as held. So a
 #: mouse reads NEARLY_FULL from its curve's voltage at the percent where G HUB's
 #: charging_time_slots begin, 66 % and 86 %; from there G HUB raises the percent by time,
-#: which this does not.
-#: The last reading under 66 %, which lies at 4193.5 mV, between the G502 LIGHTSPEED curve's
-#: 4190 at 65 % and 4197 at 67.
-G502_LIGHTSPEED_SLOTS_FROM_MV = 4193
-#: One millivolt under the G903 curve's 4182 mV point at 86 %.
-G903_HERO_SLOTS_FROM_MV = 4181
+#: which this does not. 4193 mV is the last reading under 66 %, which lies at 4193.5 mV,
+#: between the G502 LIGHTSPEED curve's 4190 at 65 % and 4197 at 67.
 G502_LIGHTSPEED_CELL = CellCurves(G502_LIGHTSPEED_DISCHARGE, G502_LIGHTSPEED_CHARGING,
-                                  nearly_full_mv=G502_LIGHTSPEED_SLOTS_FROM_MV)
-G903_HERO_CELL = CellCurves(G903_HERO_DISCHARGE, G903_HERO_CHARGING,
-                            nearly_full_mv=G903_HERO_SLOTS_FROM_MV)
+                                  nearly_full_mv=4193)
+#: One millivolt under the G903 curve's 4182 mV point at 86 %.
+G903_HERO_CELL = CellCurves(G903_HERO_DISCHARGE, G903_HERO_CHARGING, nearly_full_mv=4181)
+
+# The HID++ headsets' cells, from their G HUB device packages (build 869589, each battery
+# file's `<powermodel>` for its product id), by the G915's recipe above with four steps
+# more. In the file's order, where the voltage rises more than 10 mV from one row to the
+# next and later falls back under where it rose from, the rows of both branches between
+# that voltage and the highest the later branch reaches are dropped, so the curve runs
+# straight across the overlap; a point is also dropped when its voltage goes back past the
+# last one kept, since these logs bounce by a few millivolts; then, from the curve's low
+# end, a point is dropped while the straight line between the points kept around it gives
+# every dropped point's percent within 0.2, under the whole percent shown; and a
+# "charging_topping" file's ascending rows are the charging curve. Its descending rows, the
+# charger topping the cell off, read lower than the curve's end for more charge, so such a
+# cell reads NEARLY_FULL from their lowest voltage up, its `nearly_full_mv` one millivolt
+# under it.
+#: The G933's and the G935's cell, `g933` and `g935`, whose files give `pid="0x0a5b"`
+#: and `"0x0a87"` the same rows: discharge over the 4037.25 mWh the curve spans.
+G933_G935_DISCHARGE: tuple[tuple[int, float], ...] = (
+    (3304, 0), (3442, 1.8), (3533, 4), (3547, 4.9), (3548, 5.1), (3592, 24), (3596, 24.5),
+    (3598, 25.6), (3600, 26.2), (3601, 26.9),
+    (3606, 28.9), (3608, 29.1), (3609, 30.2), (3612, 30.9), (3613, 31.8), (3614, 32), (3615, 33.1),
+    (3617, 33.4), (3620, 35.8), (3621, 36), (3622, 36.9), (3623, 37.1), (3624, 38), (3628, 38.9),
+    (3629, 39.6), (3631, 40), (3632, 41.2), (3637, 42.5), (3639, 43.6), (3643, 44.8), (3646, 46.1),
+    (3649, 46.5), (3650, 47.2), (3654, 47.9), (3655, 48.6), (3661, 50.1), (3662, 50.6),
+    (3666, 51.3), (3667, 51.9), (3672, 53.1), (3673, 53.6), (3677, 54), (3679, 54.7), (3681, 54.9),
+    (3683, 55.6), (3688, 56.9), (3690, 57), (3691, 57.6), (3696, 58.3), (3703, 59.7), (3704, 60.1),
+    (3713, 61.3), (3714, 61.7), (3716, 61.8), (3717, 62.2), (3727, 63.9), (3731, 64.3),
+    (3740, 65.7), (3742, 66.2), (3746, 66.4), (3749, 67.1), (3758, 68.3), (3768, 69.9),
+    (3772, 70.3), (3775, 71), (3780, 71.5), (3782, 72), (3789, 72.7), (3792, 73.4), (3805, 75.3),
+    (3811, 76.4), (3816, 77), (3817, 77.4), (3831, 79.3), (3844, 81.3), (3873, 84.1), (3915, 87.6),
+    (3953, 92.5), (3979, 95), (4010, 97.7), (4038, 99.5), (4057, 100)
+)
+G933_G935_CHARGING: tuple[tuple[int, float], ...] = (
+    (3404, 0), (3600, 0.4), (3720, 1.7), (3833, 4), (3866, 5.3), (3875, 6.9), (3886, 9.6),
+    (3909, 13.6), (3929, 16.8), (3948, 20.4), (3959, 23.1), (3966, 25.9), (3970, 28.6),
+    (3976, 33.4), (3981, 36.6), (3986, 39.3), (3995, 43.1), (4006, 46.7), (4020, 50.4),
+    (4043, 55.3), (4085, 63.9), (4115, 69.4), (4140, 73.5), (4183, 79.8), (4214, 83.7), (4292, 92)
+)
+#: One under the 4217 mV its topping rows end at.
+G933_G935_CELL = CellCurves(G933_G935_DISCHARGE, G933_G935_CHARGING, nearly_full_mv=4216)
+
+#: The G533's cell, `g533` (`pid="0x0a66"`): discharge over 1038.75 mAh, as its file
+#: counts it.
+G533_DISCHARGE: tuple[tuple[int, float], ...] = (
+    (3319, 0.1), (3490, 2.3), (3594, 4.8), (3625, 6.1), (3634, 7.3), (3638, 8.6), (3643, 11.3),
+    (3646, 13), (3649, 13.9), (3657, 14.9), (3661, 15.8), (3664, 16.9), (3666, 17.1), (3667, 17.7),
+    (3669, 17.9), (3670, 18.5), (3678, 20.1), (3687, 22.5), (3697, 26.2), (3698, 26.6),
+    (3699, 27.6), (3702, 28.2), (3714, 32.5), (3718, 34.4), (3719, 35.4), (3721, 35.9), (3722, 37),
+    (3724, 37.5), (3725, 38.6), (3727, 39.1), (3728, 40.2), (3730, 40.7), (3731, 41.8),
+    (3734, 42.9), (3746, 49), (3760, 54.9), (3773, 59.5), (3774, 60.2), (3776, 60.5), (3777, 61.1),
+    (3779, 61.5), (3780, 62), (3782, 62.4), (3783, 62.9), (3785, 63.2), (3786, 63.8), (3788, 64.2),
+    (3789, 64.8), (3791, 65.1), (3792, 65.6), (3794, 65.9), (3795, 66.5), (3821, 71.9),
+    (3831, 73.4), (3832, 75.6), (3843, 75.7), (3850, 76.7), (3859, 77.7), (3865, 78.8),
+    (3873, 79.9), (3877, 80.8), (3878, 81.6), (3881, 82.3), (3968, 95.3), (3969, 95.7),
+    (3986, 97.7), (4013, 99.9), (4042, 100)
+)
+G533_CHARGING: tuple[tuple[int, float], ...] = (
+    (3480, 0), (3673, 1.7), (3792, 3.9), (3859, 5.9), (3874, 7.1), (3883, 9.5), (3902, 10),
+    (3933, 12.2), (3934, 15.4), (3943, 16.5), (3949, 17.7), (3960, 19.8), (3967, 21.7),
+    (3972, 23.1), (3978, 23.8), (3989, 27), (3991, 28), (3994, 29.3), (3995, 30.1), (3996, 30.4),
+    (3997, 31.3), (3999, 32.5), (4002, 35.3), (4010, 41.9), (4019, 47.5), (4024, 50.3),
+    (4033, 54.6), (4034, 54.9), (4035, 55.7), (4039, 56.9), (4044, 58.8), (4046, 59.3),
+    (4047, 59.9), (4052, 61.3), (4056, 62.7), (4071, 67), (4099, 74.6), (4120, 79.9), (4144, 85.3),
+    (4161, 89), (4162, 89.5), (4166, 90.1), (4168, 90.7), (4173, 92.1), (4186, 94.9), (4199, 96.8),
+    (4208, 97.8)
+)
+#: One under the 4067 mV its topping rows end at.
+G533_CELL = CellCurves(G533_DISCHARGE, G533_CHARGING, nearly_full_mv=4066)
+
+#: The G535's cell, `g535` (`pid="0x0ac4"`): discharge over 927.46 mWh.
+G535_DISCHARGE: tuple[tuple[int, float], ...] = (
+    (3353, 0), (3550, 2.1), (3654, 4.5), (3674, 5.5), (3678, 6.1), (3682, 7.5), (3684, 8.6),
+    (3686, 10.4), (3689, 11.5), (3691, 11.9), (3692, 12.5), (3702, 13.4), (3713, 15.4),
+    (3718, 16.6), (3730, 18.8), (3731, 20), (3737, 20.6), (3738, 21), (3739, 22.4), (3744, 23),
+    (3755, 26.2), (3770, 31.6), (3783, 37.8), (3799, 44.4), (3817, 50.2), (3834, 54.4),
+    (3846, 56.8), (3849, 57.2), (3850, 58), (3858, 58.7), (3882, 61.8), (3883, 62.4), (3893, 63.3),
+    (3903, 64.9), (3909, 65.8), (3910, 66.6), (3917, 67.3), (3932, 70), (3949, 73), (3950, 73.5),
+    (3952, 74), (3955, 75.5), (3966, 78), (3984, 80.8), (4009, 83.2), (4047, 86.2), (4057, 87.6),
+    (4058, 88.6), (4066, 89.8), (4113, 96), (4148, 99.8), (4155, 100)
+)
+G535_CHARGING: tuple[tuple[int, float], ...] = (
+    (3344, 0), (3751, 1.1), (3910, 3.4), (3948, 4.6), (3966, 5.8), (4029, 15.4), (4036, 16.6),
+    (4052, 20.3), (4068, 25.2), (4074, 27.6), (4078, 28.8), (4081, 30.1), (4092, 33.7), (4095, 35),
+    (4109, 39.9), (4131, 47.3), (4140, 49.8), (4174, 58.5), (4204, 64.7), (4205, 66), (4207, 72.7),
+    (4209, 81), (4212, 87.4), (4214, 94), (4216, 98.8)
+)
+#: Its charging curve's last voltage, at 98.8 %: its file has no topping rows.
+G535_CELL = CellCurves(G535_DISCHARGE, G535_CHARGING, nearly_full_mv=4216)
+
+#: The cell of the G733 on 0ab5, `g733_0ab5` (`battery_0ab5.xml`): discharge over
+#: 5731.50 mWh.
+G733_0AB5_DISCHARGE: tuple[tuple[int, float], ...] = (
+    (3341, 0), (3470, 1.6), (3634, 5.1), (3660, 6.3), (3667, 7.1), (3672, 8.5), (3676, 10.7),
+    (3677, 11.6), (3680, 13), (3690, 14.4), (3699, 15.5), (3705, 16.9), (3709, 17.4), (3729, 20.9),
+    (3741, 24.4), (3749, 26.3), (3759, 30), (3766, 32.9), (3774, 36.4), (3780, 38.6), (3784, 40.1),
+    (3789, 41.9), (3800, 45.1), (3804, 46), (3805, 46.6), (3826, 52.2), (3848, 56.4), (3859, 58.1),
+    (3901, 63), (3932, 67.9), (3960, 72.8), (3965, 74), (3972, 76.3), (3990, 78.9), (4016, 81.2),
+    (4048, 83.9), (4068, 87.8), (4159, 98.7), (4172, 99.9), (4175, 100)
+)
+G733_0AB5_CHARGING: tuple[tuple[int, float], ...] = (
+    (3447, 0), (3727, 0.3), (3913, 2.3), (4025, 4.7), (4043, 5.5), (4048, 6.7), (4057, 9.5),
+    (4070, 12), (4102, 16.5), (4129, 21.1), (4136, 22.3), (4144, 24.8), (4150, 27.3), (4151, 28.1),
+    (4153, 29), (4155, 30.6), (4156, 31), (4157, 31.9), (4158, 32.3), (4161, 34.8), (4164, 36.1),
+    (4166, 37.3), (4167, 37.7), (4168, 38.6), (4176, 41.9), (4178, 42.3), (4182, 44), (4184, 44.4),
+    (4186, 45.3), (4191, 46.5), (4193, 47.4), (4210, 51.6), (4215, 52.9), (4228, 55.4),
+    (4251, 60.5), (4266, 63.5), (4267, 64), (4340, 77.8), (4359, 80.4), (4414, 84.8), (4424, 86.1)
+)
+#: One under the 4234 mV its topping rows end at.
+G733_0AB5_CELL = CellCurves(G733_0AB5_DISCHARGE, G733_0AB5_CHARGING, nearly_full_mv=4233)
+
+#: The cell of the G733 on 0afe, `g733_0afe` (`battery_0afe.xml`): discharge over
+#: 3122.37 mWh. Its charging rows sit between 3988 and 3998 mV from 7 % to 99.99 %,
+#: so its charging curve is left empty and a charging reading below their end gives no
+#: percentage.
+G733_0AFE_DISCHARGE: tuple[tuple[int, float], ...] = (
+    (3462, 0), (3552, 2.2), (3623, 4.9), (3658, 6.6), (3671, 8), (3675, 8.8), (3678, 10.2),
+    (3679, 11.1), (3680, 11.5), (3682, 13.7), (3683, 15.5), (3685, 18.2), (3687, 19.5),
+    (3704, 23.5), (3711, 25.7), (3719, 28.4), (3728, 31.1), (3735, 34.2), (3736, 35.1), (3738, 36),
+    (3741, 38.2), (3753, 43.5), (3755, 44.9), (3763, 48.4), (3767, 49.8), (3774, 52.9),
+    (3776, 54.7), (3777, 55.1), (3779, 56.9), (3781, 58.3), (3784, 60.9), (3787, 62.7),
+    (3790, 65.4), (3793, 67.2), (3796, 69.5), (3797, 69.9), (3798, 70.8), (3799, 71.2),
+    (3801, 72.6), (3802, 73), (3803, 73.9), (3806, 75.3), (3807, 76.2), (3809, 77.1), (3810, 78),
+    (3815, 80.2), (3816, 81.2), (3836, 90.1), (3840, 91.4), (3843, 92.8), (3845, 93.2), (3850, 95),
+    (3856, 96.8), (3860, 97.7), (3871, 99.5)
+)
+G733_0AFE_CHARGING: tuple[tuple[int, float], ...] = ()
+#: Its charging rows' last voltage, at 99.99 %.
+G733_0AFE_CELL = CellCurves(G733_0AFE_DISCHARGE, G733_0AFE_CHARGING, nearly_full_mv=3998)
+
+#: The cell of the G733 on 0b1f, `g733_0b1f` (`battery_0b1f.xml`): discharge over
+#: 2747.22 mWh.
+G733_0B1F_DISCHARGE: tuple[tuple[int, float], ...] = (
+    (3309, 0), (3447, 1.3), (3576, 3.4), (3656, 5.5), (3673, 6.8), (3678, 8.1), (3679, 8.5),
+    (3680, 9.4), (3681, 9.8), (3683, 12), (3685, 13.8), (3702, 16.4), (3718, 19.9), (3725, 21.2),
+    (3731, 23.4), (3736, 25.6), (3751, 29.6), (3754, 30.5), (3757, 31.4), (3770, 35.3),
+    (3776, 37.9), (3777, 38.8), (3799, 48.3), (3802, 49.2), (3806, 50.9), (3808, 51.3),
+    (3810, 52.2), (3814, 53.5), (3815, 54), (3823, 56.1), (3824, 56.6), (3826, 57), (3827, 57.5),
+    (3831, 58.3), (3835, 59.6), (3841, 60.9), (3842, 61.4), (3852, 63.6), (3868, 66.2),
+    (3903, 70.2), (3915, 71.9), (3936, 75.4), (3963, 80.3), (3968, 82), (3971, 83.4), (3982, 85.6),
+    (3991, 86.9), (4008, 88.7), (4051, 92.3), (4060, 94), (4064, 95.3), (4071, 96.5), (4099, 99.5),
+    (4107, 100)
+)
+G733_0B1F_CHARGING: tuple[tuple[int, float], ...] = (
+    (3680, 1), (3797, 2), (3924, 4), (3999, 6), (4016, 7), (4067, 17), (4089, 21), (4105, 25),
+    (4117, 30), (4147, 45), (4150, 46), (4158, 50), (4161, 51), (4165, 53), (4168, 54), (4170, 55),
+    (4176, 57), (4178, 58), (4181, 59), (4187, 62), (4189, 64), (4190, 72), (4191, 77), (4192, 79),
+    (4193, 85), (4194, 87), (4195, 92), (4197, 96), (4198, 99)
+)
+#: Its charging curve's last voltage, at 99 %: its file has no topping rows.
+G733_0B1F_CELL = CellCurves(G733_0B1F_DISCHARGE, G733_0B1F_CHARGING, nearly_full_mv=4198)
+
+#: The PRO X Wireless's cell, `pro_headset` (`pro_x_wireless_headset_battery.xml`,
+#: `pid="0x0aba"`): discharge over 1271.36 mWh.
+PRO_X_WIRELESS_DISCHARGE: tuple[tuple[int, float], ...] = (
+    (3293, 0), (3512, 8.4), (3622, 13.4), (3643, 14.9), (3652, 16.5), (3658, 18.6), (3663, 20.6),
+    (3681, 23.7), (3708, 30.5), (3733, 38.9), (3741, 42.4), (3758, 50), (3774, 55.9), (3795, 61.8),
+    (3818, 66.8), (3840, 70.3), (3919, 80.5), (3959, 86.2), (3985, 89.3), (4029, 92.9), (4055, 96),
+    (4098, 99.8), (4102, 100)
+)
+PRO_X_WIRELESS_CHARGING: tuple[tuple[int, float], ...] = (
+    (3444, 0.2), (3635, 1), (3770, 2.4), (3862, 4.1), (3915, 5.8), (3925, 7), (3942, 10.3),
+    (3982, 16.5), (4001, 20.1), (4011, 22.5), (4017, 24.3), (4025, 27.9), (4031, 31.2),
+    (4035, 33.4), (4040, 36.1), (4044, 37.9), (4046, 38.8), (4051, 40.9), (4057, 43.4),
+    (4061, 44.6), (4063, 45.5), (4087, 52.8), (4091, 53.8), (4115, 59.9), (4136, 64.5),
+    (4166, 70.4), (4193, 75.1), (4238, 82.4), (4275, 86.9)
+)
+#: One under the 4206 mV its topping rows end at.
+PRO_X_WIRELESS_CELL = CellCurves(PRO_X_WIRELESS_DISCHARGE, PRO_X_WIRELESS_CHARGING,
+                                 nearly_full_mv=4205)

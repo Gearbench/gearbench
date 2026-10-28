@@ -4,9 +4,9 @@ Three profiles, one per M key, each with its G-key bindings, a shift layer held 
 MR, its lighting for each keyboard model, and its bindings for each mouse model's buttons. A
 binding is a key spec like "ctrl+f13" or `macro:<name>`; a mouse button also takes a
 built-in action. G keys ship unbound, so nothing sends keystrokes the user did not ask
-for; the G915 TKL's, its F1 to F12, type their own keys while unbound
-(keyboard.keystroke). JSON, since the daemon writes this file and the standard library
-only reads TOML.
+for; G keys that are a model's F row, as the G915 TKL's are, type their own keys while
+unbound (KeyboardModel.g_key_defaults and .reports_unbound in keyboard.py). JSON, since
+the daemon writes this file and the standard library only reads TOML.
 
 Version 2 keeps the lighting and the brightness by keyboard model, under the model's
 first product id (keyboard.model_key). Version 1 kept one of each, which are read as the
@@ -16,22 +16,38 @@ G915's (V1_KEYBOARD). Version 3 keeps the mouse bindings by mouse model in the s
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import stat
 import string
-import tempfile
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-from .lighting import ANIMATIONS, DEFAULT_PERIODS, SPEEDS, WAVE_DIRECTIONS
+from .lighting import (
+    ANIMATIONS,
+    DEFAULT_PERIODS,
+    DEFAULT_SECOND_COLOR,
+    SPEEDS,
+    TWO_COLORED,
+    WAVE_DIRECTIONS,
+)
+from .settings_files import (
+    FIRST_VERSION,
+    ConfigError,
+    backup_dir,
+    config_dir,
+    from_file,
+    keep_old_version,
+    link_to_nothing,
+    make_folder,
+    missing_behind,
+    unprefixed,
+    version_problem,
+    write_json,
+)
 from .uinput import UinputError, parse_binding
 from .wording import (
-    MAX_REFUSAL,
     both_ends,
     escaped,
     kind_of,
@@ -45,9 +61,6 @@ from .wording import (
 log = logging.getLogger("gearbench")
 
 VERSION = 3
-#: The first version of each file format with a newer one: the oldest one read or backed up,
-#: and the one a file without `version` is.
-FIRST_VERSION = 1
 #: The first format to keep the mouse bindings by mouse model; an older one's are V2_MOUSE's.
 MOUSE_BY_MODEL = 3
 #: The model a version 1 file's lighting and brightness are read as: the G915, which
@@ -60,6 +73,8 @@ V2_MOUSE = "4099"
 KEYBOARD_MODEL = "a keyboard model like 'c33e'"
 #: The same for a mouse model: mouse.model_key's form.
 MOUSE_MODEL = "a mouse model like '4099'"
+#: How a refusal names one mouse's product id, on the route it was picked on.
+MOUSE_PRODUCT = "a mouse's product id like 'c095'"
 #: The brightness of a keyboard model with none saved and none to copy.
 DEFAULT_BRIGHTNESS = 50
 #: The G915's and the G815's G keys, by the names a layer of bindings keeps them under.
@@ -68,8 +83,65 @@ G_KEYS = ("G1", "G2", "G3", "G4", "G5")
 #: binding made for the G915's G1 is not the TKL's F1 (the owner's decision of 2026-10-18,
 #: "Their own"). keyboard.KeyboardModel.g_key_names gives each model its own.
 F_ROW_KEYS = tuple(f"F{n}" for n in range(1, 13))
+#: The G515 TKL's and the G515 LIGHTSPEED TKL's F1 to F12, under names of their own, so a
+#: binding made for the G915 TKL's F1 is not theirs (the owner's decisions of 2026-10-18,
+#: "Their own", and of 2026-10-21). The names are Claude Code's call of 2026-10-21, pending the
+#: owner: the model and the keycap, with no space, as `gearbench-ctl bind` takes a name.
+G515_F_KEYS = tuple(f"G515-F{n}" for n in range(1, 13))
+#: The PRO X TKL LIGHTSPEED's F1 to F12, its G1 to G12, under names of their own (the owner's
+#: decision of 2026-10-18, "Their own"). The names are Claude Code's call of 2026-10-21,
+#: pending the owner: the G515's form, the model and the keycap with no space.
+PRO_X_TKL_F_KEYS = tuple(f"PROXTKL-F{n}" for n in range(1, 13))
+#: The G515 generation's other keyboards' keys of their own, which their custom assignments
+#: bind, under names of their own in the G515s' form (the owner's decisions of 2026-10-18,
+#: "Their own", and of 2026-10-21, carried by Claude Code's calls of 2026-10-21, pending the
+#: owner): the G915 X's G1 to G9, shared with the G915 X LIGHTSPEED, which has its keys, and
+#: each other board's F1 to F12, shared by the two models on one board.
+G915X_G_KEYS = tuple(f"G915X-G{n}" for n in range(1, 10))
+G915XTKL_F_KEYS = tuple(f"G915XTKL-F{n}" for n in range(1, 13))
+G316X_F_KEYS = tuple(f"G316X-F{n}" for n in range(1, 13))
+G512X75_F_KEYS = tuple(f"G512X75-F{n}" for n in range(1, 13))
+G512X98_F_KEYS = tuple(f"G512X98-F{n}" for n in range(1, 13))
+#: The G933's G1 to G3, on its left earcup, under names of their own (the owner's answer of
+#: 2026-10-25, "named like G933-G1", in each M profile and game profile): g432's
+#: HeadsetModel.g_keys. The G935's, G633's and G635's, taken to be the G933's, under each
+#: model's own in the same form (the owner's decision of 2026-10-25; the form Claude Code's
+#: call of that day, pending the owner). HEADSET_KEYS are every headset's, which take
+#: HEADSET_ACTIONS too.
+G933_G_KEYS = tuple(f"G933-G{n}" for n in range(1, 4))
+G935_G_KEYS = tuple(f"G935-G{n}" for n in range(1, 4))
+G633_G_KEYS = tuple(f"G633-G{n}" for n in range(1, 4))
+G635_G_KEYS = tuple(f"G635-G{n}" for n in range(1, 4))
+HEADSET_G_KEYS = (G933_G_KEYS, G935_G_KEYS, G633_G_KEYS, G635_G_KEYS)
+HEADSET_KEYS = tuple(key for keys in HEADSET_G_KEYS for key in keys)
+#: What a headset's G key can do but hold a key spec or run a macro, the owner's answers of
+#: 2026-10-25: nothing; the lighting's brightness cycle, G HUB's G1 on a G933; the lighting
+#: off or on; the next preset of the headset's equalizer library; sidetone off or on.
+HEADSET_ACTIONS = ("none", "brightness-cycle", "lights-toggle", "eq-next", "sidetone-toggle")
+#: What a headset's G key does while unbound: G1 the brightness cycle, as G HUB has it on a
+#: G933 (the owner's answer of 2026-10-25), and as the G933's on the models whose G keys are
+#: taken to be its (Claude Code's call of 2026-10-25, pending the owner: their setup guides
+#: give G1 a lighting cycle); the others nothing.
+HEADSET_DEFAULTS = {keys[0]: "brightness-cycle" for keys in HEADSET_G_KEYS}
+#: Each model's keys bound under names of their own, beside the models whose keys they are,
+#: as a refusal and `gearbench-ctl bind`'s help name them: keyboard.MODEL_OF's names and
+#: g432.PRODUCTS', which this module may not import.
+OWN_KEYS = (
+    (F_ROW_KEYS, "the G915 TKL"),
+    (G515_F_KEYS, "the G515 TKL and G515 LIGHTSPEED TKL"),
+    (PRO_X_TKL_F_KEYS, "the PRO X TKL LIGHTSPEED"),
+    (G915X_G_KEYS, "the G915 X and G915 X LIGHTSPEED"),
+    (G915XTKL_F_KEYS, "the G915 X LIGHTSPEED TKL"),
+    (G316X_F_KEYS, "the G316 X and G316 X 98"),
+    (G512X75_F_KEYS, "the G512 X 75"),
+    (G512X98_F_KEYS, "the G512 X 98"),
+    (G933_G_KEYS, "the G933"),
+    (G935_G_KEYS, "the G935"),
+    (G633_G_KEYS, "the G633"),
+    (G635_G_KEYS, "the G635"),
+)
 #: Every name a layer of bindings keeps, in the order its files write them.
-BINDABLE_KEYS = G_KEYS + F_ROW_KEYS
+BINDABLE_KEYS = G_KEYS + tuple(key for keys, _models in OWN_KEYS for key in keys)
 PROFILE_IDS = (1, 2, 3)          # one per M key
 
 
@@ -80,10 +152,12 @@ def profile_label(index: int, name: str) -> str:
 
 
 #: The two lighting modes, of M and game profiles alike: one color for the whole
-#: board, or the per-key layout over a background. profiles.py imports and
-#: re-exports them.
+#: board, or the per-key layout over a background.
 STATIC, PER_KEY = "static", "perkey"
 MODES = (STATIC, PER_KEY)
+#: Each mode in the CLI's text, as the Effect row names it: the file's "perkey" with its
+#: hyphen. --json and the file keep the mode's own word.
+MODE_WORDS = {STATIC: "static", PER_KEY: "per-key"}
 #: A lighting layer's Static color and per-key background where its file has none.
 DEFAULT_COLOR, DEFAULT_BACKGROUND = 0x0080FF, 0x000000
 
@@ -120,406 +194,15 @@ IDLE_RANGE = (10, 3600)
 
 #: Prefix of a binding that names a macro, on a G key or a mouse button (macros.py).
 MACRO_PREFIX = "macro:"
-#: The most read_json takes from one file. What Gearbench writes is a few
-#: kilobytes, so anything past this is not one of its files.
-MAX_JSON_BYTES = 1 << 20
-
-
-def config_home() -> Path:
-    """XDG_CONFIG_HOME, or ~/.config when it is unset, empty or relative, as the XDG
-    spec has it. systemd's %E ignores a relative value too, but it is the user
-    manager's own XDG_CONFIG_HOME, which environment.d does not change: the unit makes
-    and opens %E/gearbench, and the daemon logs an error at start when that is not
-    config_dir() (cli.service.cmd_daemon)."""
-    base = Path(os.environ.get("XDG_CONFIG_HOME") or "")
-    return base if base.is_absolute() else Path.home() / ".config"
-
-
-def runtime_home(environ: Mapping[str, str] = os.environ) -> Path | None:
-    """XDG_RUNTIME_DIR, or None when it is unset, empty or relative, which the XDG spec
-    says to ignore: a relative one is a folder under the working one, where, in /tmp or a
-    shared checkout, another account can listen in the daemon's place."""
-    base = Path(environ.get("XDG_RUNTIME_DIR") or "")
-    return base if base.is_absolute() else None
-
-
-def others_may_write(folder: Path) -> bool:
-    """Whether another account owns `folder` or may write in it, through its group or as any
-    account (mode & 0o022): it could bind a socket there first, or put its own file in place
-    of one written there before it is read. OSError passes through."""
-    info = os.stat(folder)
-    return info.st_uid != os.geteuid() or bool(info.st_mode & 0o022)
-
-
-def open_to_others(folder: Path) -> Path | None:
-    """The first path through which another account could put a folder of its own where
-    this process looks for the runtime folder `folder`, a full path; None when there is
-    none. That is `folder` itself, links followed, when another account owns it or others
-    may write in it (others_may_write); a folder or link on the way, by the path as given
-    and by the path its links lead to, a link given as `folder` included, that an account
-    other than root or this one owns; and a folder on the way that others may write in
-    without the sticky bit, since they may rename what it holds."""
-    if others_may_write(folder):
-        return folder
-    uid = os.geteuid()
-    # Root as this process sees it: in a user namespace that does not map root, as the
-    # unit's PrivateUsers=yes makes one (systemd.exec(5)), stat gives root's files the
-    # overflow id, 65534 by default (user_namespaces(7)), and every other unmapped
-    # account's files too, which this cannot tell from root's.
-    root = Path("/").stat().st_uid
-    for path in dict.fromkeys((*reversed(folder.parents), folder,
-                               *reversed(folder.resolve().parents))):
-        info = path.stat(follow_symlinks=False)
-        if info.st_uid not in (root, uid) or (
-                stat.S_ISDIR(info.st_mode) and info.st_mode & 0o022
-                and not info.st_mode & stat.S_ISVTX):
-            return path
-    return None
-
-
-#: Why a runtime folder another account owns or may write in is refused, and the way out.
-SHARED_FOLDER = ("another account owns it or other accounts may write in it. Set "
-                 "XDG_RUNTIME_DIR to a folder only you may write in, as /run/user/{uid} is")
-#: private_runtime's refusal of such a folder.
-SHARED_RUNTIME = "{what} uses no file in {folder}: " + SHARED_FOLDER + "."
-
-
-def private_runtime(error: type[Exception], unset: str, what: str) -> Path:
-    """XDG_RUNTIME_DIR for `what`'s files, or `error`: with `unset` while it is not set
-    (runtime_home), and with why not where another account owns it or may write in it
-    (others_may_write), as Daemon.listen refuses it, since that account could swap a conf
-    before PipeWire reads it, or put its own file, or a link, where one is read or written.
-    The folder's stat raises its OSError, as a write in it would."""
-    folder = runtime_home()
-    if folder is None:
-        raise error(unset)
-    if others_may_write(folder):
-        raise error(SHARED_RUNTIME.format(what=what, folder=escaped(folder), uid=os.geteuid()))
-    return folder
-
-
-def config_dir() -> Path:
-    return config_home() / "gearbench"
-
-
-def shown_path(path: Path) -> str:
-    """`path` as the window names it, the home folder written ~."""
-    try:
-        return f"~/{path.relative_to(Path.home())}"
-    except ValueError:
-        return str(path)
-
-
-def shown_config_dir() -> str:
-    """config_dir() as the window names it, the home folder written ~."""
-    return shown_path(config_dir())
 
 
 def config_path() -> Path:
     return config_dir() / "config.json"
 
 
-def backup_dir() -> Path:
-    """The settings folder's backups: the mouse's onboard sectors before each write
-    (onboard.py), and a file's bytes in an older format before its first save in its newest
-    (keep_old_version)."""
-    return config_dir() / "backup"
-
-
 def config_backup(version: int) -> Path:
     """Where config.json's bytes in format `version` are kept (keep_old_version)."""
     return backup_dir() / f"config.v{version}.json"
-
-
-def file_stamp(path: Path) -> tuple[int, int, int, int] | None:
-    """A file version's identity: inode, size, mtime and ctime, or None if stat fails, as
-    for a config directory that is a file.
-
-    Compared with the stamp from the daemon's last read or write, it says whether
-    someone else wrote the file since: an atomic replace changes the inode, an edit
-    in place the times. ctime is there because nothing can set it (`cp -p` and
-    `touch -r` restore mtime).
-    """
-    try:
-        info = path.stat()
-    except OSError:
-        return None
-    return info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
-
-
-def link_to_nothing(path: Path) -> Path | None:
-    """The first of `path` and its folders that is a link to nothing, or None: a file or
-    folder missing behind one is somewhere, in a dotfiles folder not mounted say, and must
-    not read as never made."""
-    return next((place for place in (path, *path.parents)
-                 if place.is_symlink() and not place.exists()), None)
-
-
-def missing_behind(target: Path, place: Path) -> str:
-    """Why `target` cannot be read or written: `place`, it or a folder above it, is a
-    link to nothing (link_to_nothing)."""
-    link = "a link" if place == target else f"{place} is a link"
-    return f"{target}: {link} to {os.readlink(place)}, which is not there"
-
-
-def changed_on_disk(path: Path, save: bool = True) -> ConfigError:
-    """The refusal for a file edited since it was read. `save` False is a macro's file,
-    which a delete leaves too, and leaves out `gearbench-ctl save`, which writes no
-    macro: the daemon holds no copy of one."""
-    kept = "nothing is saved over it" if save else "it is not saved over or deleted"
-    return FileChanged(
-        f"{path} changed on disk since the daemon read it; {kept}. "
-        f"`gearbench-ctl reload` takes your edit"
-        + ("; `gearbench-ctl save` writes the daemon's copy over it." if save else ".")
-    )
-
-
-def write_json(target: Path, payload: dict, prefix: str) -> None:
-    """Write `payload` to `target` atomically, through a temporary file.
-
-    A symlink is written through: replacing the link would cut off the file the read
-    follows (read_capped). The temporary sits in that file's directory, so the replace
-    stays on one filesystem, and `prefix` names a leftover after its caller. The
-    directory is synced after the replace, or a power loss could bring the old file back
-    (fsync(2)); a sync that fails is a warning, since the file is already in place. It is
-    opened before anything is written, so a folder that cannot be
-    opened refuses the save with the old file in place, and one moved away after the
-    replace is still the one synced. O_DIRECTORY refuses a file or a named pipe at its
-    path, where a pipe would block. Text over MAX_JSON_BYTES is refused before anything
-    is written: read_json would not read it back. The new file is its owner's alone,
-    whatever the old file's mode or the umask: mkstemp makes the temporary 0600, which a
-    umask cannot widen, and a macro's text step can hold a password.
-    """
-    # ASCII (ensure_ascii), so its length is its size in bytes.
-    text = json.dumps(payload, indent=2) + "\n"
-    if len(text) > MAX_JSON_BYTES:
-        raise ConfigError(f"{target.name}: {len(text)} bytes is more than the "
-                          f"{MAX_JSON_BYTES} a file may hold; nothing is saved")
-    target = target.resolve()
-    directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        replace_file(target, text.encode("ascii"), prefix, ".json")
-        # Raised, the caller would undo a change the file holds and keep the stamp of the
-        # file it replaced, so that its next save is refused as a hand edit.
-        try:
-            os.fsync(directory)
-        except OSError as exc:
-            log.warning("%s is saved, but its folder could not be synced (%s): a power loss "
-                        "may bring the old file back", escaped(target), reason(exc))
-    finally:
-        os.close(directory)
-
-
-#: keep_old_version's refusal of a save whose older version's bytes could not be copied.
-BACKUP_REFUSED = ("{target} is not saved: its settings from version {version} could not be "
-                  "copied to {kept} first ({why}).")
-
-
-def keep_old_version(target: Path, backup: Callable[[int], Path], current: int = VERSION) -> None:
-    """Copy `target`'s bytes to `backup(version)` just before its first save in `current`, its
-    format's newest, where they are an older `version`'s file, which a Gearbench from before
-    `current` reads and `current` is not. Once: a backup already there, from an earlier save,
-    is never written over. Nothing is copied for a `target` not there, or not a JSON file of
-    a version before `current` that read_json would read: one the save writes over, as
-    `gearbench-ctl save` does a hand edit. A copy, or a sync of a folder it is in, that fails
-    refuses the save with the backup's path and the cause, `target` untouched, and the copy
-    and the folders made for it removed (replace_synced), so the next save makes them again;
-    a read of `target` that fails goes to the caller as the save's own write would."""
-    try:
-        data = read_capped(target, MAX_JSON_BYTES)
-        old = json.loads(data)
-    except (FileNotFoundError, ValueError, RecursionError):
-        return
-    if not isinstance(old, dict) or version_problem(old, current - 1, FIRST_VERSION) is not None:
-        return
-    version = old.get("version", FIRST_VERSION)
-    kept = backup(version)
-    if kept.exists(follow_symlinks=False):
-        return
-    # Synced here: the save's own write syncs only its file's folder.
-    try:
-        replace_synced(kept, data, ".backup-", ".json")
-    except OSError as exc:
-        raise ConfigError(BACKUP_REFUSED.format(target=target, version=version, kept=kept,
-                                                why=reason(exc))) from None
-
-
-def replace_file(target: Path, data: bytes, prefix: str, suffix: str) -> None:
-    """Put `data` in a temporary beside `target`, on disk (fsync), then rename it over
-    `target`, so a full disk or a power loss leaves the old file or the new one whole. A
-    caller whose file must outlast a power loss syncs the directory. On any error the
-    temporary is removed."""
-    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=prefix, suffix=suffix)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, target)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-
-
-def replace_synced(target: Path, data: bytes, prefix: str, suffix: str) -> None:
-    """replace_file into `target`, a new file, in its folder, made first where it is not
-    there, then that folder synced and the folder each one the mkdir made is in, since a
-    folder made is on disk only once the folder it is in is synced (fsync(2)). On an
-    OSError, `target`, once replace_file has put it in place, and the folders made are
-    removed before it is raised: left, the next try would take them as on disk and sync none
-    of their parents. A removal that fails is a warning, so it is the write's failure that
-    is raised."""
-    made = [folder for folder in (target.parent, *target.parent.parents)
-            if not folder.exists(follow_symlinks=False)]
-    placed = False
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        replace_file(target, data, prefix, suffix)
-        placed = True
-        sync_directory(target.parent)
-        for folder in made:
-            sync_directory(folder.parent)
-    except OSError:
-        # A mkdir that failed may have stopped short of a folder.
-        leftovers: list[tuple[Path, Callable[[], None]]] = (
-            [(target, target.unlink)] if placed else [])
-        leftovers += [(folder, folder.rmdir) for folder in made
-                      if folder.exists(follow_symlinks=False)]
-        for leftover, remove in leftovers:
-            try:
-                remove()
-            except OSError as exc:
-                log.warning("%s could not be removed after a write that failed (%s)",
-                            escaped(leftover), reason(exc))
-        raise
-
-
-def sync_directory(directory: Path) -> None:
-    """Put a change to `directory`'s entries, a replace, an unlink or a new folder, on
-    disk: until then a power loss can undo it (fsync(2)). Opened as a directory
-    (O_DIRECTORY), so a file or a named pipe put at its path since the change is refused
-    at the open, where a pipe would block."""
-    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def sync_removal(removed: Path) -> None:
-    """sync_directory after `removed` was unlinked. A sync that fails is a warning, as in
-    write_json: the file is already gone, and raised, the daemon would answer a delete or a
-    rename that happened as refused and go on naming the file that is gone."""
-    try:
-        sync_directory(removed.parent)
-    except OSError as exc:
-        log.warning("%s is removed, but its folder could not be synced (%s): a power loss "
-                    "may bring it back", escaped(removed), reason(exc))
-
-
-class ConfigError(ValueError):
-    #: The file problem, for a front end that shows it in a banner; None for a bad value.
-    kind: str | None = None
-
-
-class FileChanged(ConfigError):
-    """A file edited on disk since the daemon read it, which is not written over."""
-
-    kind = "config_changed"
-
-
-class FileUnreadable(ConfigError):
-    """config.json or the loaded game profile's file could not be read, so nothing is
-    written over it."""
-
-    kind = "config_unreadable"
-
-
-def read_capped(path: Path, limit: int) -> bytes:
-    """A regular file's bytes, or a ConfigError naming it if it is anything else or
-    holds more than `limit` bytes.
-
-    The daemon reads its libraries on its one thread, where a FIFO would block it for
-    good and a link to /dev/zero grow it until killed. The open does not block and the
-    type is checked on the open file, so a symlink to a regular file still reads. Run as
-    the unit, the daemon leads its session with no terminal, so a terminal no session
-    holds, opened without O_NOCTTY, would become its own, and a ^C byte or a hangup on it
-    would stop the daemon.
-    OSError passes through.
-    """
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ConfigError(f"{path}: not a regular file")
-        # Joined once at the end: bytes += would copy all read so far at each short read.
-        chunks: list[bytes] = []
-        size = 0
-        while size <= limit and (chunk := os.read(fd, limit + 1 - size)):
-            chunks.append(chunk)
-            size += len(chunk)
-    finally:
-        os.close(fd)
-    if size > limit:
-        raise ConfigError(f"{path}: larger than {limit} bytes")
-    return b"".join(chunks)
-
-
-def read_json(path: Path) -> object:
-    """A JSON file's contents, or a ConfigError naming the file.
-
-    Read as bytes: json.loads tells UTF-8, UTF-16 and UTF-32 apart (Windows
-    PowerShell 5's `>` writes UTF-16), and anything else is a ConfigError, where
-    read_text() would raise a UnicodeDecodeError no caller expects. So is a file
-    nested too deeply, not regular, or over MAX_JSON_BYTES. OSError passes through,
-    so a caller can tell a missing file from a bad one.
-    """
-    data = read_capped(path, MAX_JSON_BYTES)
-    try:
-        return json.loads(data)
-    except json.JSONDecodeError as exc:
-        raise ConfigError(f"{path}: invalid JSON at line {exc.lineno}: {exc.msg}") from None
-    except UnicodeDecodeError as exc:
-        # The codec json.loads chose by the first bytes: UTF-16 or UTF-32 cut short is not
-        # a UTF-8 problem. utf-8-sig decodes the bytes after its BOM, so the offset is
-        # counted back from the end of what it was given.
-        at = exc.start + len(data) - len(exc.object)
-        raise ConfigError(f"{path}: not {exc.encoding.upper()} text "
-                          f"({exc.reason} at byte {at})") from None
-    except RecursionError:
-        raise ConfigError(f"{path}: nested too deeply to read") from None
-    except ValueError:
-        # What json.loads raises that is neither of the above: an integer literal
-        # longer than Python converts (sys.get_int_max_str_digits, 4300 by default).
-        raise ConfigError(f"{path}: holds a number too long to read") from None
-
-
-def from_file[T](path: Path, parse: Callable[[object], T]) -> T:
-    """`parse` over one file's JSON, with every failure a ConfigError.
-
-    A bad file must be a ConfigError naming it, so a library skips it and keeps the
-    rest, and the daemon starts on the defaults instead of crash-looping. A TypeError,
-    AttributeError or ValueError from a shape `parse` does not check is the same kind
-    of bad file. A refusal longer than MAX_REFUSAL is cut to its two ends (both_ends).
-    """
-    raw = read_json(path)
-    try:
-        return parse(raw)
-    except ConfigError as exc:
-        if len(str(exc)) <= MAX_REFUSAL:
-            raise
-        raise ConfigError(both_ends(str(exc))) from None
-    except (TypeError, AttributeError, ValueError) as exc:
-        raise ConfigError(both_ends(f"{path}: {exc}")) from exc
-    except RecursionError:
-        # json.loads accepts nesting deeper than str() and repr() can walk,
-        # so a value parse only turns into text can still be too deep.
-        raise ConfigError(f"{path}: nested too deeply to read") from None
-
-
-def unprefixed(why: str, path: Path) -> str:
-    """`why` without the `<path>: ` that read_json, from_file and Config.load put in front
-    of an error, for a message that names the file already."""
-    return why.removeprefix(f"{path}: ")
 
 
 def unusable(exc: BaseException) -> str:
@@ -529,80 +212,17 @@ def unusable(exc: BaseException) -> str:
     return unprefixed(reason(exc), config_path())
 
 
-def unread_reason(name: str, why: str) -> str:
-    """A skipped file's reason without the file's name or path in front, for a line or a
-    row that names the file itself: `<path>/doom.json: invalid JSON…` and
-    `doom.json: version 99…` lose it, `doom.json.mode: …` keeps the field. A folder's
-    entry (library_files.read_folder), which gives the folder's path in words, is left whole."""
-    for prefix in (f"{name}: ", f"{name}."):
-        head, found, rest = why.partition(prefix)
-        if found and (not head or head.endswith("/")):
-            return rest
-    return why
-
-
-class SkipWarnings:
-    """Say once that a library is skipping a file, and again only if it changes or
-    has been read (`read`) since.
-
-    The daemon reads the game-profile library every five seconds and the macro
-    library at a press of a macro-bound key, so a warning per read floods the log.
-    """
-
-    def __init__(self, what: str) -> None:
-        self.what = what
-        self._said: dict[Path, tuple[int | None, str]] = {}
-
-    def skip(self, path: Path, exc: Exception, *, folder: bool = False) -> None:
-        """`folder`: `path` is the library's own folder, which could not be listed."""
-        try:
-            stamp: int | None = path.stat().st_mtime_ns
-        except OSError:
-            stamp = None
-        said = (stamp, str(exc))
-        if self._said.get(path) != said:
-            self._said[path] = said
-            # The name and the error come from a file anyone who can name one
-            # chooses, and the CLI prints this line to a terminal.
-            if folder:
-                log.warning("cannot list %s: %s", escaped(path), escaped(reason(exc)))
-            else:
-                log.warning("skipping %s %s: %s", self.what, escaped(path.name),
-                            escaped(unread_reason(path.name, reason(exc))))
-
-    def read(self, path: Path) -> None:
-        """`path` was read, so its next skip is news even with the same time and error."""
-        self._said.pop(path, None)
-
-
-def version_problem(data: dict, expected: int, oldest: int | None = None) -> str | None:
-    """Why a file's `version` is not `expected`, or one from `oldest` to `expected` where an
-    older one is still read, in words, or None. A file without one is the oldest read."""
-    first = expected if oldest is None else oldest
-    version = data.get("version", first)
-    taken = word_list([str(n) for n in range(first, expected + 1)])
-    # written() gives a list or an object by its kind, which "version ... is not supported"
-    # can't hold.
-    if isinstance(version, (list, dict)):
-        return f"version must be {taken}, not {written(version)}"
-    # true == 1 and 1.0 == 1, so the type is checked first.
-    if not whole(version) or not first <= version <= expected:
-        return f"version {written(version)} is not supported (expected {taken})"
-    return None
-
-
 def idle_problem(value: object) -> str | None:
     """Why `value` is not a whole number of seconds in IDLE_RANGE, or None."""
     low, high = IDLE_RANGE
     if not whole(value) or not low <= value <= high:
-        return f"must be a whole number of seconds from {low} to {high}, not {written(value)}"
+        return f"is a whole number of seconds from {low} to {high}, not {written(value)}"
     return None
 
 
 def idle_seconds(value: object, where: str) -> int:
     """An idle time from the file, or ConfigError naming the field."""
-    problem = idle_problem(value)
-    if problem is not None:
+    if (problem := idle_problem(value)) is not None:
         raise ConfigError(f"{where} {problem}")
     # A whole number: idle_problem found nothing wrong with it.
     return cast(int, value)
@@ -610,16 +230,21 @@ def idle_seconds(value: object, where: str) -> int:
 
 def flag(data: dict, name: str, default: bool) -> bool:
     """A true-or-false field of the file, or ConfigError naming it."""
-    value = data.get(name, default)
+    return read_switch(data.get(name, default), name)
+
+
+def read_switch(value: object, where: str) -> bool:
+    """A switch, true or false, or ConfigError naming `where`."""
     if not isinstance(value, bool):
-        raise ConfigError(f"{name} must be true or false, not {written(value)}")
+        raise ConfigError(f"{where} is true or false, not {written(value)}")
     return value
 
 
-def expect(value: object, kind: type, where: str, what: str) -> None:
-    """Raise ConfigError unless `value` is a `kind`, naming what was found (kind_of)."""
+def expect[T](value: object, kind: type[T], where: str, what: str) -> T:
+    """`value` as a `kind`, or ConfigError naming what was found (kind_of)."""
     if not isinstance(value, kind):
-        raise ConfigError(f"{where}: must be {what}, not {kind_of(value)}")
+        raise ConfigError(f"{where} is {what}, not {kind_of(value)}")
+    return value
 
 
 def refuse_controls(text: str, where: str) -> None:
@@ -681,10 +306,15 @@ PROFILE_CHOICES = word_list([str(i) for i in PROFILE_IDS])
 RATE_CHOICES = word_list([str(rate) for rate in REPORT_RATES])
 
 
+#: Why an animation outside lighting.SPEEDS has no speed, for its refusal and the journal.
+OWN_PACE = "the keyboard runs it at its own pace"
+
+
 def speed_problem(effect: str, value: object) -> str | None:
     """Why `value` is not a speed `effect` takes, in words, or None when it is."""
-    if effect not in ANIMATIONS:
-        return f"{effect} has no speed; only {word_list(ANIMATIONS, 'and')} have one"
+    if effect not in SPEEDS:
+        why = f": {OWN_PACE};" if effect in ANIMATIONS else ";"
+        return f"{effect} has no speed{why} only {word_list(list(SPEEDS), 'and')} have one"
     fastest, slowest = SPEEDS[effect]
     if not whole(value) or not fastest <= value <= slowest:
         return (f"{effect}'s speed is {fastest} to {slowest} ms, how long one cycle "
@@ -699,8 +329,15 @@ def direction_problem(value: object) -> str | None:
     return f"wave's direction is {word_list(list(WAVE_DIRECTIONS))}, not {written(value)}"
 
 
-#: (where, effect, ms) of each clamp read_speeds has said at info.
+#: (where, effect, ms) of each clamp or drop read_speeds has said at info.
 _CLAMPS_SAID: set[tuple[str, str, int]] = set()
+
+
+def _say_once(said: tuple[str, str, int], message: str, *args: object) -> None:
+    """`message` at info the first time read_speeds meets `said`, (where, effect, ms), and at
+    debug after: the daemon reads every game profile every 5 s."""
+    log.log(logging.DEBUG if said in _CLAMPS_SAID else logging.INFO, message, *args)
+    _CLAMPS_SAID.add(said)
 
 
 def read_speeds(raw: object, where: str) -> dict[str, int]:
@@ -709,27 +346,28 @@ def read_speeds(raw: object, where: str) -> dict[str, int]:
 
     A whole number outside its range is clamped to the nearer end and said once at
     info, so a narrowed range (ripple's, to 1000 ms on 2026-09-24) does not leave the
-    daemon without its configuration. The file keeps the old number until the next
-    save. Anything else wrong is refused, naming the field."""
+    daemon without its configuration, and one for an animation that takes no speed, which
+    an earlier build saved for Pulsar Point and the G512 X's three, is left out the same
+    way. The file keeps the old number until the next save. Anything else wrong is refused,
+    naming the field."""
     if raw is None:
         return {}
-    expect(raw, dict, where, "an object of effect names and milliseconds")
-    raw = cast(dict, raw)       # expect raised for anything else
+    raw = expect(raw, dict, where, "an object of effect names and milliseconds")
     speeds = {}
     for name, value in raw.items():
         if name in ANIMATIONS and whole(value):
+            said = (where, name, value)
+            if name not in SPEEDS:
+                _say_once(said, "%s.%s: %s has no speed: %s; its %d ms is left out",
+                          escaped(where), name, name, OWN_PACE, value)
+                continue
             fastest, slowest = SPEEDS[name]
             if not fastest <= value <= slowest:
                 kept = min(max(value, fastest), slowest)
-                # Once: the daemon reads every game profile every 5 s.
-                said = (where, name, value)
-                log.log(logging.DEBUG if said in _CLAMPS_SAID else logging.INFO,
-                        "%s.%s: %d ms is outside %s's %d to %d; using %d", escaped(where), name,
-                        value, name, fastest, slowest, kept)
-                _CLAMPS_SAID.add(said)
+                _say_once(said, "%s.%s: %d ms is outside %s's %d to %d; using %d",
+                          escaped(where), name, value, name, fastest, slowest, kept)
                 value = kept
-        problem = speed_problem(name, value)
-        if problem is not None:
+        if (problem := speed_problem(name, value)) is not None:
             raise ConfigError(f"{where}.{name}: {problem}")
         speeds[name] = value
     return speeds
@@ -739,27 +377,13 @@ def read_direction(raw: object, where: str) -> str | None:
     """Wave's saved direction from JSON, by name; absent or null for none."""
     if raw is None:
         return None
-    problem = direction_problem(raw)
-    if problem is not None:
+    if (problem := direction_problem(raw)) is not None:
         raise ConfigError(f"{where}: {problem}")
     return str(raw)
 
 
-def effect_settings(effect: str, speeds: dict[str, int], direction: str | None,
-                    params: dict[str, int]) -> dict[str, int]:
-    """What a profile saved for `effect`, as set_effect parameters: `params` (an M
-    profile's raw ones), overridden by its speed as `period` and, for wave, its
-    direction's byte. Nothing saved runs at lighting's defaults."""
-    settings = dict(params)
-    if effect in speeds:
-        settings["period"] = speeds[effect]
-    if effect == "wave" and direction is not None:
-        settings["direction"] = WAVE_DIRECTIONS[direction]
-    return settings
-
-
 def speed_shown(effect: str, settings: dict[str, int]) -> int:
-    """The period `effect` runs at, from effect_settings: the saved one, or the default."""
+    """The period `effect` runs at, from Lighting.settings: the saved one, or the default."""
     return settings.get("period", DEFAULT_PERIODS[effect])
 
 
@@ -791,7 +415,7 @@ def read_mode(data: dict, where: str) -> str:
     mode = data.get("mode", STATIC)
     expect(mode, str, f"{where}.mode", word_list(MODES))
     if mode not in MODES:
-        raise ConfigError(f"{where}.mode: must be {word_list(MODES)}, not {mode!r}")
+        raise ConfigError(f"{where}.mode is {word_list(MODES)}, not {mode!r}")
     return mode
 
 
@@ -827,6 +451,19 @@ def validate_binding(spec: str, where: str) -> str:
     return spec
 
 
+def key_binding(key: str, spec: object, where: str) -> str | None:
+    """`key`'s binding from a file or a request, as validate_binding answers it, or None for
+    None and "". Anything else must be text: str() would bind a JSON 5 to the 5 key, and 0 or
+    false would unbind. A headset's key, one of HEADSET_KEYS, takes one of HEADSET_ACTIONS
+    too, in any case and with white space around it, as a mouse button takes its actions."""
+    if spec is None or spec == "":
+        return None
+    spec = expect(spec, str, where, "a key spec or macro:<name>")
+    if key in HEADSET_KEYS and spec.strip().lower() in HEADSET_ACTIONS:
+        return spec.strip().lower()
+    return validate_binding(spec, where)
+
+
 def parse_mouse_binding(spec: object, where: str) -> str:
     """Validate one mouse binding: a built-in action, a key spec or a macro.
 
@@ -837,8 +474,7 @@ def parse_mouse_binding(spec: object, where: str) -> str:
     """
     if spec is None or spec == "":
         return "none"
-    expect(spec, str, where, "an action, a key spec or macro:<name>")
-    spec = cast(str, spec)      # expect raised for anything else
+    spec = expect(spec, str, where, "an action, a key spec or macro:<name>")
     word = spec.strip().lower()
     if word in MOUSE_ACTIONS:
         return word
@@ -855,12 +491,10 @@ def mouse_entry(raw: object, where: str) -> dict[str, str]:
     """The mouse bindings an object of JSON holds, by button name, in the file's order. A
     button a model lacks is kept and does nothing on it; one it has and the object leaves out
     takes the model's default (mouse.bindings_of)."""
-    expect(raw, dict, where, "an object of mouse buttons and bindings")
-    raw = cast(dict, raw)       # expect raised for anything else
+    raw = expect(raw, dict, where, "an object of mouse buttons and bindings")
     found: dict[str, str] = {}
     for key, spec in raw.items():
-        name = mouse_button_name(key)
-        if name is None:
+        if (name := mouse_button_name(key)) is None:
             raise ConfigError(
                 f"{where}: {key!r} is not a mouse button; they are {', '.join(MOUSE_BUTTONS)}"
             )
@@ -894,16 +528,23 @@ def product_key(key: str, where: str, what: str) -> str:
     return product
 
 
+def product_or_null(data: dict, name: str, what: str) -> str | None:
+    """config.json's field `name`, a product id in product_key's form, `what` the kind it
+    should be, or null."""
+    if (value := data.get(name)) is None:
+        return None
+    expect(value, str, name, f"{what} or null")
+    return product_key(value, name, what)
+
+
 def by_model[T](raw: object, where: str, read: Callable[[object, str], T], what: str,
                 kind: str) -> dict[str, T]:
     """What a file keeps by device model, each value read by `read(value, where)`: absent or
-    null is nothing. A key is a model's product id, `what` (KEYBOARD_MODEL, MOUSE_MODEL), read
-    in lowercase, and one named twice is refused, in any key order, as naming a `kind`
-    another key names."""
+    null is nothing. Each key is read by product_key, `what` the kind of id it should be, and
+    one named twice is refused, in any key order, as naming a `kind` another key names."""
     if raw is None:
         return {}
-    expect(raw, dict, where, f"an object keyed by {what}")
-    raw = cast(dict, raw)       # expect raised for anything else
+    raw = expect(raw, dict, where, f"an object keyed by {what}")
     out: dict[str, T] = {}
     for key, value in raw.items():
         model = product_key(key, where, what)
@@ -987,7 +628,7 @@ def read_brightness(value: object, where: str) -> int:
     """A keyboard's saved brightness, a whole number from 0 to 100, or ConfigError naming
     `where`."""
     if not whole(value) or not 0 <= value <= 100:
-        raise ConfigError(f"{where} must be a whole number from 0 to 100, not {written(value)}")
+        raise ConfigError(f"{where} is a whole number from 0 to 100, not {written(value)}")
     return value
 
 
@@ -1016,36 +657,44 @@ def mouse_rate_map(raw: object) -> dict[str, int]:
 
 
 def not_bindable(key: object) -> str:
-    """The refusal of a key no binding takes. It names the bindable keys, because M1-M3
+    """The refusal of a key no binding takes. It names the bindable keys, because M1 to M3
     and MR look bindable and are not."""
-    # The G915 TKL is keyboard.G915_TKL's name, which this module may not import.
     return (f"{written(key)} is not bindable; bindable keys are {G_KEYS[0]} to {G_KEYS[-1]}, "
-            f"and {F_ROW_KEYS[0]} to {F_ROW_KEYS[-1]} on the G915 TKL. "
-            "M1-M3 switch profiles and MR is the shift layer.")
+            f"{own_keys_words('and')}; M1 to M3 switch profiles, and holding MR switches to "
+            f"the MR layer")
 
 
-def g_key_layer(raw: object, where: str) -> dict[str, str | None]:
+def own_keys_words(last: str) -> str:
+    """Each model's keys of its own (OWN_KEYS) as a line names them, `last` before the last
+    group: "F1 to F12 on the G915 TKL, ... and G512X98-F1 to G512X98-F12 on the G512 X 98"."""
+    return word_list([f"{keys[0]} to {keys[-1]} on {models}" for keys, models in OWN_KEYS], last)
+
+
+#: The refusal of a headset's G key bound on the MR layer, the key's name put in.
+NO_HEADSET_SHIFT = "{} has no MR layer: MR shifts a keyboard's G keys alone"
+
+
+def g_key_layer(raw: object, where: str, shift: bool = False) -> dict[str, str | None]:
     """A layer of G-key bindings from JSON, every one of BINDABLE_KEYS, unbound ones None;
-    game profiles share it."""
+    game profiles share it. On the MR layer (`shift`) a headset's key that is bound is
+    refused, as `bind` refuses it (NO_HEADSET_SHIFT), since nothing reads it there."""
     if raw is None:
         raw = {}
-    expect(raw, dict, where, "an object of G keys and bindings")
-    raw = cast(dict, raw)       # expect raised for anything else
+    raw = expect(raw, dict, where, "an object of G keys and bindings")
     out: dict[str, str | None] = dict.fromkeys(BINDABLE_KEYS)
     for key, spec in raw.items():
         if key not in BINDABLE_KEYS:
             raise ConfigError(f"{where}: {not_bindable(key)}")
-        if spec is None or spec == "":
-            continue
-        expect(spec, str, f"{where}.{key}", "a key spec or macro:<name>")
-        out[key] = validate_binding(spec, f"{where}.{key}")
+        out[key] = key_binding(key, spec, f"{where}.{key}")
+        if shift and key in HEADSET_KEYS and out[key] is not None:
+            raise ConfigError(f"{where}: {NO_HEADSET_SHIFT.format(key)}")
     return out
 
 
 def layer_json(layer: dict[str, str | None]) -> dict[str, str | None]:
-    """A layer of bindings as its file writes it: each of G_KEYS, bound or not, and one of
-    F_ROW_KEYS only while it is bound, so a file that binds none of them is written as before
-    they were bindable."""
+    """A layer of bindings as its file writes it: each of G_KEYS, bound or not, and any other
+    key, a model's own (OWN_KEYS), only while it is bound, so a file that binds none of them
+    is written as before they were bindable."""
     return {key: spec for key, spec in layer.items() if key in G_KEYS or spec is not None}
 
 
@@ -1062,8 +711,10 @@ class Lighting:
 
     effect: str = "static"
     #: The Static color: the whole board in static mode, and the color an
-    #: animation takes, breathe's and ripple's, whatever the mode.
+    #: animation with a color takes, Pulsar Point's first, whatever the mode.
     color: int = DEFAULT_COLOR
+    #: The second color of an animation with two, Pulsar Point's (lighting.TWO_COLORED).
+    second_color: int = DEFAULT_SECOND_COLOR
     #: Extra effect parameters, e.g. {"period": 5000} for cycle, applied to
     #: whatever effect runs. Only a hand edit fills them; a game profile's
     #: lighting has none, and copy first drops them (keyboard.cut_lighting).
@@ -1090,14 +741,25 @@ class Lighting:
         return layer_color(self.effect, self.mode, self.color, self.background)
 
     def settings(self, effect: str | None = None) -> dict[str, int]:
-        """What this profile saved for `effect`, its own by default (effect_settings)."""
-        return effect_settings(effect or self.effect, self.speeds, self.direction,
-                               self.params)
+        """What this profile saved for `effect`, its own by default, as set_effect parameters:
+        `params` (an M profile's raw ones), overridden by its speed as `period`, for wave its
+        direction's byte, and for an effect with two colors its `second_color`. Nothing saved
+        runs at lighting's defaults."""
+        effect = effect or self.effect
+        settings = dict(self.params)
+        if effect in self.speeds:
+            settings["period"] = self.speeds[effect]
+        if effect == "wave" and self.direction is not None:
+            settings["direction"] = WAVE_DIRECTIONS[self.direction]
+        if effect in TWO_COLORED:
+            settings["second_color"] = self.second_color
+        return settings
 
     def to_json(self) -> dict:
         return {
             "effect": self.effect,
             "color": format_color(self.color),
+            "second_color": format_color(self.second_color),
             "params": dict(self.params),
             "speeds": dict(self.speeds),
             "direction": self.direction,
@@ -1112,8 +774,7 @@ class Lighting:
         """One keyboard model's lighting from a file's JSON: config.json's, and a game
         profile's (profiles.game_lighting), whose Static color is its `color_field` and
         whose `params`, which only an M profile has, are left unread (`with_params`)."""
-        expect(data, dict, where, "an object")
-        data = cast(dict, data)     # expect raised for anything else
+        data = expect(data, dict, where, "an object")
         # Only null is the default, as in Config.from_json.
         params = data.get("params") if with_params else None
         if params is None:
@@ -1135,6 +796,8 @@ class Lighting:
         return cls(
             effect=effect,
             color=color,
+            second_color=parse_color(data.get("second_color", DEFAULT_SECOND_COLOR),
+                                     f"{where}.second_color"),
             params=dict(params),
             speeds=read_speeds(data.get("speeds"), f"{where}.speeds"),
             direction=read_direction(data.get("direction"), f"{where}.direction"),
@@ -1161,10 +824,6 @@ class Profile:
     #: leaves out, takes the model's defaults (mouse.bindings_of).
     mouse: dict[str, dict[str, str]] = field(default_factory=dict)
 
-    def binding(self, key: str, shifted: bool) -> str | None:
-        """A G key's binding, the MR layer's when `shifted` and it has one (layer_binding)."""
-        return layer_binding(self.keys, self.shift, key, shifted)
-
     def to_json(self) -> dict:
         return {
             "name": self.name,
@@ -1179,8 +838,7 @@ class Profile:
         """An M profile from a file of format `version`: version 1's one lighting, its defaults
         for any field it lacks, is V1_KEYBOARD's, and an older format's mouse bindings are
         read_mouse_bindings'."""
-        expect(data, dict, where, "an object")
-        data = cast(dict, data)     # expect raised for anything else
+        data = expect(data, dict, where, "an object")
 
         name = data.get("name", default_name)
         expect(name, str, f"{where}.name", "text")
@@ -1196,13 +854,13 @@ class Profile:
         return cls(
             name=name,
             keys=g_key_layer(data.get("keys"), f"{where}.keys"),
-            shift=g_key_layer(data.get("shift"), f"{where}.shift"),
+            shift=g_key_layer(data.get("shift"), f"{where}.shift", shift=True),
             lighting=entries,
             mouse=read_mouse_bindings(data.get("mouse"), f"{where}.mouse", version),
         )
 
 
-#: The most saved colors config.json holds: the Keyboard tab's swatch row has no scroller.
+#: The most saved colors config.json holds: one swatch each in every picker's scrolling row.
 SAVED_COLORS_MAX = 24
 
 
@@ -1220,10 +878,20 @@ class Config:
     #: its brightness, the lock, and its idle dimming once the whole desktop is idle. A
     #: device preference, not a profile's: the mouse is one device whatever profile is active.
     mouse_sync_color: bool = False
-    #: The keyboard model the mice follow, by keyboard.model_key or, written by hand, another
-    #: of the model's ids (keyboard.model_ids), which a keyboard with no lighting or brightness
-    #: of its own also starts from; None for the first attached since the daemon started.
+    #: A headset's lights follow the keyboard's as a synced mouse does, one setting for every
+    #: headset whose lights Gearbench drives and every profile (the owner's decision of
+    #: 2026-10-25).
+    headset_sync_color: bool = False
+    #: The keyboard model chosen to lead, by keyboard.model_key or, written by hand, another
+    #: of the model's ids (keyboard.model_ids), or None for none chosen: it leads while it is
+    #: driven or none is (PerKeyboard.leader).
     sync_keyboard: str | None = None
+    #: Each keyboard model's follow switch, by keyboard.model_key as `brightness` is: on, while
+    #: another keyboard leads it shows the leader's lighting at the leader's brightness in place
+    #: of its own (the owner's decision of 2026-10-21, "B: separate pages, follow switch"). On
+    #: for a model not named. Gearbench 1.1.0 reads a file with the field and leaves it out of
+    #: its next save.
+    follow_leader: dict[str, bool] = field(default_factory=dict)
     #: The keyboard's lights, and a synced mouse's, go off while the screen is locked
     #: or blanked and before a suspend (the owner's decision of 2026-09-23).
     lights_off_when_locked: bool = True
@@ -1263,6 +931,11 @@ class Config:
     #: HOST mode in place of profile 1's, which the mouse keeps for when Gearbench stops
     #: (Claude Code's call of 2026-10-18, pending the owner).
     mouse_rate: dict[str, int] = field(default_factory=dict)
+    #: The mouse last picked on the Mouse tab's switcher or with `gearbench-ctl mouse-select`,
+    #: by the product id it was picked on: the one the window, the tray and a command without
+    #: `device` start on after a restart once it is attached (the owner's decision of
+    #: 2026-10-21). None for the first attached since the daemon started.
+    mouse_selected: str | None = None
     profiles: dict[int, Profile] = field(
         default_factory=lambda: {
             i: Profile(name=f"Profile {i}") for i in PROFILE_IDS
@@ -1286,7 +959,9 @@ class Config:
             "saved_colors": [format_color(c) for c in self.saved_colors],
             "active_game_profile": self.active_game_profile,
             "mouse_sync_color": self.mouse_sync_color,
+            "headset_sync_color": self.headset_sync_color,
             "sync_keyboard": self.sync_keyboard,
+            "follow_leader": dict(sorted(self.follow_leader.items())),
             "lights_off_when_locked": self.lights_off_when_locked,
             "idle_dim_after": self.idle_dim_after,
             "idle_off_after": self.idle_off_after,
@@ -1297,13 +972,14 @@ class Config:
             "keyboard_link_notices": self.keyboard_link_notices,
             "mouse_dpi": self.mouse_dpi,
             "mouse_rate": self.mouse_rate,
+            "mouse_selected": self.mouse_selected,
             "profiles": {str(i): p.to_json() for i, p in sorted(self.profiles.items())},
         }
 
     @classmethod
     def from_json(cls, data: object) -> Config:
         if not isinstance(data, dict):
-            raise ConfigError(f"config must be a JSON object, not {kind_of(data)}")
+            raise ConfigError(f"config is a JSON object, not {kind_of(data)}")
         if (problem := version_problem(data, VERSION, FIRST_VERSION)) is not None:
             raise ConfigError(f"config {problem}")
         version = data.get("version", FIRST_VERSION)
@@ -1317,7 +993,7 @@ class Config:
         # Read only by these keys, so any other would be dropped at the next save.
         for key in stored:
             if key not in {str(i) for i in PROFILE_IDS}:
-                raise ConfigError(f'profiles: {key!r} is not a profile; they are '
+                raise ConfigError(f'profiles: {key!r} is not an M profile; they are '
                                   f'"1", "2" and "3", one per M key')
         profiles = {}
         for i in PROFILE_IDS:
@@ -1327,7 +1003,7 @@ class Config:
         active = data.get("active_profile", 1)
         # An int check first: 2.0 is `in` PROFILE_IDS and would reach `1 << (which - 1)`.
         if not whole(active) or active not in PROFILE_IDS:
-            raise ConfigError(f"active_profile must be {PROFILE_CHOICES}, "
+            raise ConfigError(f"active_profile is {PROFILE_CHOICES}, "
                               f"not {written(active)}")
         if version == FIRST_VERSION:
             brightness = {V1_KEYBOARD: read_brightness(
@@ -1347,15 +1023,14 @@ class Config:
         overlay = data.get("active_game_profile")
         if overlay is not None:
             expect(overlay, str, "active_game_profile", "a game profile's name or null")
-        leader = data.get("sync_keyboard")
-        if leader is not None:
-            expect(leader, str, "sync_keyboard", f"{KEYBOARD_MODEL} or null")
-            leader = product_key(leader, "sync_keyboard", KEYBOARD_MODEL)
         return cls(
             active=active, brightness=brightness, profiles=profiles, saved_colors=saved,
             active_game_profile=overlay or None,
             mouse_sync_color=flag(data, "mouse_sync_color", False),
-            sync_keyboard=leader,
+            headset_sync_color=flag(data, "headset_sync_color", False),
+            sync_keyboard=product_or_null(data, "sync_keyboard", KEYBOARD_MODEL),
+            follow_leader=by_model(data.get("follow_leader"), "follow_leader", read_switch,
+                                   KEYBOARD_MODEL, "keyboard"),
             lights_off_when_locked=flag(data, "lights_off_when_locked", True),
             never_dim=flag(data, "never_dim", False),
             dpi_notices=flag(data, "dpi_notices", True),
@@ -1364,6 +1039,7 @@ class Config:
             keyboard_link_notices=flag(data, "keyboard_link_notices", True),
             mouse_dpi=mouse_dpi_map(data.get("mouse_dpi")),
             mouse_rate=mouse_rate_map(data.get("mouse_rate")),
+            mouse_selected=product_or_null(data, "mouse_selected", MOUSE_PRODUCT),
             idle_dim_after=idle_seconds(data.get("idle_dim_after", IDLE_DIM_AFTER),
                                         "idle_dim_after"),
             idle_off_after=idle_seconds(data.get("idle_off_after", IDLE_OFF_AFTER),
@@ -1393,18 +1069,16 @@ class Config:
             raise ConfigError(missing_behind(target, place)) from None
 
     def save(self, path: Path | None = None) -> Path:
-        """Write atomically, so a crash mid-write cannot leave a truncated config. A folder
-        behind a link to nothing is a ConfigError, as at load."""
+        """Write atomically, so a crash mid-write cannot leave a truncated config, its folder
+        made and synced first where it is not there (make_folder). A folder behind a link to
+        nothing is a ConfigError, as at load."""
         # The rename command takes any text, and a name that load refuses
         # would hold every profile back at the next start.
         for index, profile in self.profiles.items():
             refuse_name(profile.name, f"profiles.{index}.name")
         target = path or config_path()
-        # mkdir fails a folder behind a link to nothing as "File exists", naming neither
-        # the link nor where it points. config.json's own link is written through.
-        if (place := link_to_nothing(target.parent)) is not None:
-            raise ConfigError(f"{missing_behind(target, place)}; nothing is saved")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        keep_old_version(target, config_backup)
+        # config.json's own link is written through.
+        make_folder(target)
+        keep_old_version(target, config_backup, VERSION)
         write_json(target, self.to_json(), ".config-")
         return target

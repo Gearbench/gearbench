@@ -4,24 +4,34 @@ is the model and sni.TrayExport exports it, through desktop.Desktop."""
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from ..config import PROFILE_IDS, file_stamp, profile_label
+from ..config import PROFILE_IDS, profile_label
 from ..desktop import APP_NAME
-from ..keyboard import CABLED_IDS as KEYBOARD_CABLED, m_profiles_in_menu, name as keyboard_name
-from ..tray import Battery, Model, Snapshot, Stages, TrayMenu, build
-from ..wording import escaped
-from .shared import on_or_off, switch_refusal
+from ..keyboard import (
+    CABLED_IDS as KEYBOARD_CABLED,
+    followed,
+    m_profiles_in_menu,
+    name as keyboard_name,
+)
+from ..settings_files import file_stamp
+from ..tray import NOT_AVAILABLE_ICON, Battery, Model, Snapshot, Stages, TrayMenu, build
+from ..wording import NO_REASON, REFUSED_HEADING, capitalized, escaped
+from .shared import look_due, switch_value
 
 if TYPE_CHECKING:
     from . import Daemon
 
 log = logging.getLogger("gearbench")
 
-#: A refused menu choice's notice: the window's heading for one, and the refusal as the body.
-REFUSED = "That did not work"
-REFUSED_ICON = "dialog-warning-symbolic"
+#: Seconds between comparing the tray's model with what it shows (Tray.tend); a command
+#: compares at once (Tray.changed).
+TRAY_REFRESH = 2.0
+
+#: A refused menu choice's notice: REFUSED_HEADING, the refusal as the body, and this icon.
+REFUSED_ICON = NOT_AVAILABLE_ICON
 
 
 class Tray:
@@ -29,10 +39,14 @@ class Tray:
 
     def __init__(self, daemon: Daemon) -> None:
         self.d = daemon
-        self.menu = TrayMenu(source=self.model, act=self.act, open_app=self.open_app,
-                             opening=self.opening)
+        self.menu = TrayMenu(source=self.model, act=self.act,
+                             open_app=daemon.session.desktop.open_app, opening=self.opening)
         #: Set by start(), from Daemon.run, so a Daemon built and not run shows nothing.
         self._started = False
+        #: When tend next compares the menu's model with what the tray shows, and whether a
+        #: pass came before then, whose change the compare then owes (deadlines).
+        self._refresh_at = 0.0
+        self._owed = False
         #: The game profiles' names, and the directory's files and times they
         #: were read at: read again only when a file changes.
         self._profiles: tuple[str, ...] = ()
@@ -57,6 +71,34 @@ class Tray:
         """A command ran: show what it changed now, not at the next refresh."""
         self.d.session.desktop.refresh_tray()
 
+    def tend(self) -> None:
+        """Once a pass: while the icon is wanted, compare the menu's model with what the tray
+        shows once TRAY_REFRESH has passed since the last time, or in the pass that called
+        due_now, after its looks. What the tray shows changes in the loop's passes, so a pass
+        before the compare is due leaves it owed, a deadline (deadlines): a change shows within
+        TRAY_REFRESH, and an idle loop, whose passes come further apart, wakes for no compare
+        of its own."""
+        now = time.monotonic()
+        if not (self._started and self.d.config.tray):
+            # A compare owed from before the switch went off would be a deadline already
+            # passed, so the loop would never wait.
+            self._owed = False
+            return
+        if not look_due(now, self._refresh_at):
+            self._owed = True
+            return
+        self._refresh_at, self._owed = now + TRAY_REFRESH, False
+        self.d.session.desktop.refresh_tray()
+
+    def deadlines(self) -> list[float]:
+        """The compare a pass left owed (tend)."""
+        return [self._refresh_at] if self._owed else []
+
+    def due_now(self) -> None:
+        """Compare at this pass's end (tend): a device node came or went (Plugs), which the
+        pass's looks act on."""
+        self._refresh_at = 0.0
+
     def status(self) -> dict:
         """`status`'s `tray`: the switch, whether the icon shows, and why not."""
         shown, why = False, None
@@ -70,26 +112,30 @@ class Tray:
         return build(self.snapshot(), APP_NAME)
 
     def snapshot(self) -> Snapshot:
-        """What the daemon knows, from its own state. Only the keyboard's battery may be asked
-        for, as `status` asks (Keyboard.keyboard_battery); the headset's is the loop's last
-        reading."""
+        """What the daemon knows, from its own state. Only each keyboard's battery may be
+        asked for, as `status` asks (Readings.keyboard_battery); each headset's is the loop's
+        last reading, as its controller shows it (tray_battery)."""
         kb, mice, config = self.d.keyboard, self.d.mice, self.d.config
         batteries = []
-        reading = kb.keyboard_battery()
-        # Asked after the read: one that went unanswered marks it, and one that found the
-        # keyboard gone, or on its cable, dropped it.
-        if kb.dev is not None and "battery" in kb.keyboard_able:
-            batteries.append(Battery.of(
-                "keyboard", keyboard_name(kb.keyboard_product), reading,
-                answering=kb.keyboard_answering(),
-                cabled=kb.keyboard_product in KEYBOARD_CABLED))
-        batteries += [Battery.of(f"{m.product:04x}", m.name, m.battery, answering=not m.silent)
+        # Each keyboard driven, the leader's first, as "keyboard" and the others by model.
+        for keyboard in self.d.keyboards.driven():
+            reading = keyboard.readings.keyboard_battery()
+            reading, read_at = keyboard.readings.kept_battery() or (reading, None)
+            # Asked after the read: one that went unanswered marks it, and one that found the
+            # keyboard gone, or on its cable, dropped it.
+            if keyboard.dev is not None and "battery" in keyboard.keyboard_able:
+                batteries.append(Battery.of(
+                    "keyboard" if keyboard is kb else f"keyboard-{keyboard.model()}",
+                    keyboard_name(keyboard.keyboard_product),
+                    reading,
+                    answering=keyboard.keyboard_answering(),
+                    cabled=keyboard.keyboard_product in KEYBOARD_CABLED,
+                    read_at=read_at))
+        batteries += [Battery.of(f"{m.product:04x}", m.name, m.battery, answering=not m.silent,
+                                 read_at=m.battery_at)
                       for m in mice.attached if "battery" in m.mouse.capabilities]
-        headset = self.d.headset
-        # Only while linked: the base's 7C goes stale while the headset is off.
-        if headset.linked and headset.battery is not None:
-            batteries.append(Battery.of("headset", headset.name, headset.battery,
-                                        answering=not headset.silent))
+        batteries += [battery for headset in self.d.headsets
+                      if (battery := headset.tray_battery()) is not None]
         current = mice.current
         stages = None
         if current is not None and not current.silent and "dpi" in current.mouse.capabilities:
@@ -97,11 +143,16 @@ class Tray:
             if in_force:
                 stages = Stages(f"{current.product:04x}", tuple(in_force),
                                 mice.dpi.known_dpi(current))
-        pickable = kb.dev is not None and m_profiles_in_menu(kb.keyboard_able)
+        # Any keyboard driven, the leader or not: the M profile is every keyboard's. Asked
+        # after the battery reads, which may drop one.
+        pickable = any(m_profiles_in_menu(keyboard.keyboard_able)
+                       for keyboard in self.d.keyboards.driven())
         overlay = self.d.games.overlay
+        problems = self.d.problems()
         return Snapshot(
             batteries=tuple(batteries),
-            problems=tuple(p["message"] for p in self.d.problems()),
+            problems=tuple(p["message"] for p in problems),
+            problem_codes=tuple(p["code"] for p in problems),
             stages=stages,
             profiles=self.profile_names(),
             loaded=overlay.name if overlay is not None else None,
@@ -112,6 +163,11 @@ class Tray:
             lock_lights=config.lights_off_when_locked,
             dpi_notices=config.dpi_notices,
             mouse_sync=config.mouse_sync_color if mice.color.mouse_with_lights() else None,
+            # The window's headset page shows its Follow switch on the same condition: the
+            # `g432` reply's `lights`, which only an attached headset's listed zones give.
+            headset_sync=(config.headset_sync_color if self.d.g432.lights.zones is not None
+                          else None),
+            leader=followed(self.d.per_keyboard.leader()),
         )
 
     def profile_names(self) -> tuple[str, ...]:
@@ -137,17 +193,14 @@ class Tray:
         as a notice, since the menu has nowhere to show it."""
         reply = self.run(request)
         if reply is not None and not reply.get("ok"):
-            error = str(reply.get("error", "refused"))
+            error = str(reply.get("error", NO_REASON))
             detail = reply.get("detail")
             # A refusal can quote a file's error, which quotes the file. The notice keeps the
             # sentence alone; the journal, the menu's only record, has the device's words too.
             log.warning("the tray's %s was refused: %s%s", request["command"], escaped(error),
                         f" ({escaped(detail)})" if detail else "")
-            self.d.session.desktop.notify(REFUSED, error, REFUSED_ICON, transient=True)
-
-    def open_app(self) -> None:
-        """The menu's Open item: the window, from the desktop."""
-        self.d.session.desktop.open_app()
+            self.d.session.desktop.notify(REFUSED_HEADING, capitalized(error), REFUSED_ICON,
+                                          transient=True)
 
     def opening(self) -> None:
         """The menu opens: the selected mouse read as the Mouse tab reads it (`mouse`), so its
@@ -165,9 +218,7 @@ class Tray:
 
     def _cmd_tray(self, request: dict) -> dict:
         """The tray icon on or off, saved."""
-        value = on_or_off(request.get("value"))
-        if value is None:
-            return {"ok": False, "error": switch_refusal("tray", request.get("value"))}
+        value = switch_value(request.get("value"), "tray")
         self.d.save_setting(tray=value)
         self.apply()
         return {"ok": True, "tray": self.status()}

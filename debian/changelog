@@ -1,70 +1,101 @@
-gearbench (1.1.0) resolute; urgency=medium
+gearbench (1.2.0) resolute; urgency=medium
 
-  * New keyboards: the G515 TKL, which has run on the hardware, and three
-    trials not yet checked there: the G515 LIGHTSPEED TKL, the G915 TKL
-    (G913 TKL too) and the G815 (G813 too). Each gets per-key lighting, its
-    animations and brightness. The G515 TKL runs Cycle, Wave and Ripple in
-    its own versions, each checked on it. The G915 TKL's F1 to F12 bind to a
-    key or a macro as the G915's G keys do.
-  * New mice: the G502 HERO, tried on a G502 SE HERO, whose DPI stages are
-    written to its onboard profile 1 (checked on it), and seven trials not
-    yet checked on the hardware: the G502 X, G502 X LIGHTSPEED, G502 X PLUS
-    MILLENNIUM FALCON, G502 LIGHTSPEED, PRO X SUPERLIGHT, PRO WIRELESS and
-    G903 LIGHTSPEED HERO. Gearbench reads each and sets its DPI live; in
-    host mode, not yet checked on any of them, it drives their buttons and
-    sets their report rate live. Nothing is written to the seven's onboard
-    memory. Sync with keyboard drives each one with lighting, and a button
-    can be bound to DPI cycle.
-  * The Logitech G432 headset, checked once on the hardware, on a page of
-    its own in the Headset tab: its sidetone; Logitech G432 Equalizer, an
-    output with ten bands and two shelves, three shipped presets and up to
-    16 in all, an A50 preset copied in; noise suppression for its
-    microphone; and spatial sound, which now plays to either headset. The
-    equalizer and noise suppression are off until switched on, and off again
-    after a logout.
-  * The Astro A50 keeps up to 16 EQ presets of your own, apart from the base
-    station's three, and loads one into slot 1, 2 or 3, unsaved until Save.
-    Each of its three presets gets Reset to default. Both were checked on
-    the base station; the Load preset to headset… dialog, built after that
-    check, is not yet checked on the hardware.
-  * gearbench-ctl report prints what each Logitech device on USB says about
-    itself, to paste into the repository's new Device report form, so a
-    model Gearbench does not drive yet can be supported. It sends reads
-    alone, reads no serial number and prints no computer or user name. Each
-    model Gearbench has not yet run on asks for a report in status, the
-    journal and its tab.
-  * While two keyboards are plugged in, a switcher at the top of the
-    Keyboard tab picks the one Gearbench drives and the mouse follows; the
-    Mouse tab picks its mouse with a switcher too. A keyboard switched off
-    is grayed out there, and the other is driven meanwhile. Each keyboard
-    model keeps its own lighting and brightness, and each mouse model its
-    own button bindings. A keyboard is offered only the effects it reports,
-    and Wave runs in six directions on every keyboard.
-  * The app id is now io.github.gearbench.Gearbench and the GNOME Shell
-    extension gearbench-focus@gearbench.github.io, after the gearbench
-    organization on GitHub, which now holds the repository. After the
-    upgrade, set Gearbench's switch in Settings > Notifications again if you
-    had changed it, pin Gearbench to the dock again, log out and back in
-    once, and then turn the extension on with the window's Turn on. Until it
-    runs, game profiles follow only X11 windows.
-  * Spatial sound plays to one output for every headset, Gearbench Spatial
-    (gearbench-spatial), in place of Astro A50 Spatial. Change each game's
-    launch option to PULSE_SINK=gearbench-spatial %command%: a game still on
-    gearbench-a50-spatial plays on the default output in stereo. If spatial
-    sound was on, switch it off and on once after the update.
-  * config.json and the game profiles' files are now version 3: they keep
-    the lighting for each keyboard model, config.json its brightness too,
-    and the button bindings for each mouse model. Settings from an earlier
-    Gearbench load as the G915's and the G502 X PLUS's. Before each file's
-    first save, a copy goes to backup/ in the settings folder; an earlier
-    Gearbench does not read the new files, and copying the backups back
-    returns to it.
-  * Among the fixes: DPI notices no longer stop GNOME Shell from showing any
-    app's notifications until the next login, and a G432 adapter that
-    answers its firmware read short no longer stops the service. Security
-    fixes: the daemon refuses a runtime folder another account could swap,
-    and the G432's equalizer, noise suppression and spatial sound no longer
-    take a sandboxed app's copy of the headset's output or microphone.
+  * New keyboards: the G915 X LIGHTSPEED, which has run on the hardware on
+    its cable and through its receiver, and trials not yet checked there:
+    the G915 X, the G915 X LIGHTSPEED TKL, the G316 X and G316 X 98, the
+    G512 X 75 and G512 X 98, the PRO X TKL LIGHTSPEED and the G213 Prodigy.
+    Each but the G213 Prodigy gets per-key lighting, the animations it
+    reports and brightness, and the LIGHTSPEED models their battery; the
+    G213 Prodigy is lit in five areas, a color each, with its animations
+    and no brightness of its own. The G915 X LIGHTSPEED's G1 to G9 and the
+    PRO X TKL LIGHTSPEED's F1 to F12 bind to a key or a macro; the G915 X's
+    G1 to G9, and F1 to F12 on the G915 X LIGHTSPEED TKL, the G316 X pair
+    and the G512 X pair, bind once tested on each model. The G512 X's
+    analog keys are not set yet.
+  * On the G515 TKL, the G515 LIGHTSPEED TKL and the G915 X, G316 X and
+    G512 X models, FN and the keys it gives a second function turn white
+    while FN is held. For that, Gearbench asks the keyboard for FN at each
+    setup, and until the keyboard loses power its control connection,
+    which the udev rules let any program you run open, carries each press
+    and release of Ctrl, Shift, Alt, Super and FN; Gearbench reads FN
+    alone. Pulsar point, a two-color animation of the keyboard's own, runs
+    on the models that list it, and Remind me of, Neon and Outer space,
+    not yet run on a keyboard, on the G512 X 75 and G512 X 98.
+  * New mice, trials not yet checked on the hardware: the
+    PRO X SUPERLIGHT 2 (the SUPERLIGHT 2 SE too), the PRO X SUPERLIGHT 2
+    DEX and 2c, the PRO X2 SUPERSTRIKE and the G203 LIGHTSYNC (the G102
+    LIGHTSYNC too). Gearbench reads each and sets its DPI and report rate,
+    the PRO X ones' in host mode alone, and shows their battery; in host
+    mode it drives the buttons, and it sets the G203's lighting. Nothing is
+    written to their onboard memory. The PRO X2 SUPERSTRIKE's actuation
+    point, rapid trigger and haptics are not set yet.
+  * A mouse with a battery posts low-battery notices below 30% and again
+    below 15%, as the keyboards and headsets do. Each gearbench-ctl command
+    for one mouse takes --mouse, a model's name or one of its product ids.
+  * New headsets: the Astro A50 X, which has run on the hardware. Gearbench
+    sets its sidetone, volume, Game and Voice balance, noise gate, auto
+    sleep, tones and stream mix, its base station's deep sleep and light
+    brightness, and its two equalizers, the headphones' and the
+    microphone's, each with the three presets the headset holds and
+    presets of your own kept on this computer. GNOME lists its Game and
+    Chat as two outputs. Read only until tested: the Astro A50 Gen 5, the
+    PRO X 2 LIGHTSPEED, the G522 LIGHTSPEED and the G325 LIGHTSPEED, whose
+    battery, sidetone, auto sleep and equalizer Gearbench shows.
+  * Ten more headsets of the G432's family: the G933, which has run on the
+    hardware, and trials not yet checked there: the G431, G433, G533,
+    G535, G633, G635, G733, G935 and PRO X Wireless. Each gets its
+    sidetone and microphone noise suppression, and the wireless ones their
+    battery and low-battery notices. The G933, G935 and G633 get the
+    equalizer in the headset, with presets kept on this computer, and the
+    others the G432's ten-band equalizer on the computer. The G733, G933,
+    G935, G633 and G635 get their lights, and the G933, G935, G633 and
+    G635 their G1 to G3. On the G933 Gearbench also writes the auto
+    shut-off, the lights' startup effect and the lighting the headset
+    shows on its own, and refuses those writes on a model not yet tested.
+  * Gearbench Spatial plays to every new headset, picked in the window or
+    with headset-spatial --headset. Each headset page shows its
+    microphone's volume as GNOME's Sound settings set it. Not yet tested on
+    a headset: Input level, a live meter of the microphone on each headset
+    page, to set a noise gate by, and a headset's lights following the
+    keyboard that leads, as a mouse's do.
+  * Every keyboard plugged in is driven at once, where one was driven at a
+    time. One leads: the others show its lighting at its brightness unless
+    set to keep their own, and the mice follow it. The keyboards dim
+    together, and an M key on any of them switches every keyboard's M
+    profile. The switcher at the top of the Keyboard tab now picks the
+    keyboard the tab shows, and the Lighting group's Leader row the one
+    that leads. The drawn keyboard there shows the animation the keyboard
+    runs, a close likeness of it.
+  * A game profile can give a mouse that follows the keyboard a color of
+    its own, in the Game profiles dialog or with gearbench-ctl
+    profile-mouse-color, and each of the pack's 67 game profiles gives
+    one. Importing the pack again adds it to a pack profile imported
+    before whose lighting is still the pack's.
+  * Each mouse's pointer moves at the DPI Gearbench sets. The package gives
+    each supported mouse a DPI of 1000 in the system's hardware database;
+    the desktop scaled down a mouse that database gives a higher default,
+    so a G502 HERO set to 1800 DPI moved like an unlisted mouse at 750. A
+    mouse plugged in during the install takes the new speed at its next
+    plug-in.
+  * Gearbench sets up a keyboard, or a mouse's cable, as soon as it is
+    plugged in, where it looked every 2 seconds. A keyboard switched off
+    behind its receiver no longer holds up the other keyboard's keys and
+    the mice every 2 seconds.
+  * Gearbench 1.1.0 refuses a config.json or game profile that binds a key
+    under a name new in this version, such as G515-F1, G915X-G1 or
+    G933-G1, and writes nothing over it. To go back to 1.1.0, clear those
+    keys first, as the guide's Settings files section says.
+  * Among the fixes: a G515 TKL keeps the brightness its FN+F8 sets, where
+    Gearbench wrote its own saved level over it, and a keyboard idle on
+    its receiver shows a lighting change within about 2 seconds, where the
+    change could wait 30 seconds or until a key press. Security fixes: the
+    daemon's service makes a missing runtime folder itself before each
+    start, where another account could make it first below a folder others
+    may write in; each folder Gearbench makes in the settings folder is
+    yours alone, whatever the login umask; gearbench-ctl run under sudo
+    talks only to the daemon of the user who ran it; and the About dialog's
+    Debugging Information page writes your home folder as ~, so a report
+    pasted into an issue no longer gives your user name.
 
- -- wmuschetto <113629853+wmuschetto@users.noreply.github.com>  Wed, 21 Oct 2026 16:05:45 +0000
+ -- wmuschetto <113629853+wmuschetto@users.noreply.github.com>  Wed, 28 Oct 2026 03:40:00 +0000
 

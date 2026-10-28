@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gearbench"
-description = "Key remapping, lighting, DPI and macros for Logitech G keyboards and mice, and the settings of the Logitech G432 and Astro A50 headsets"
+description = "Lighting, G keys, DPI and macros for Logitech G keyboards and mice, and headset settings"
 readme = "README.md"
 requires-python = ">=3.14"
 license = "GPL-3.0-or-later"

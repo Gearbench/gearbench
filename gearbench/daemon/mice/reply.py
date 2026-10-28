@@ -1,6 +1,6 @@
-"""The `mouse` command: what the CLI and the window are told about the selected mouse, or
-the device report about another attached one, and the reading kept between two asks, so
-that an idle mouse is not woken at every poll. It reads a mouse and writes nothing to one."""
+"""The `mouse` command: what a client is told about the selected mouse, or about the one a
+request's `device` names, and the reading kept between two asks, so that an idle mouse is not
+woken at every poll. It reads a mouse and writes nothing to one."""
 
 from __future__ import annotations
 
@@ -9,10 +9,19 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from ...config import format_color
-from ...mouse import STAGE_COLOR_NAMES, STAGE_COLORS, buttons_idle_words, model_key
+from ...mouse import (
+    CABLED_IDS,
+    STAGE_COLOR_NAMES,
+    STAGE_COLORS,
+    buttons_idle_words,
+    model_key,
+)
 from ...onboard import entry_job
+from ...profiles import mouse_color_json
 from ...report import untested
-from .attached import MOUSE_POLL_RETRY, AttachedMouse, effect_names, no_mouse
+from ...wording import product_route
+from ..shared import attached_entry
+from .attached import MOUSE_POLL_RETRY, AttachedMouse, effect_names
 
 if TYPE_CHECKING:
     from .. import Daemon
@@ -21,7 +30,7 @@ if TYPE_CHECKING:
 # How long a reading answers `mouse` while nothing is heard: asking an idle mouse wakes it
 # and can outlast the probe, marking it not answering. Anything the mouse says makes the next
 # `mouse` read it again, except a battery report from a mouse already answering
-# (take_battery_report).
+# (MouseBatteries.take_report).
 MOUSE_READING_MAX_AGE = 300.0
 
 #: What `mouse` keeps of a reading. The battery is kept apart, so a reading without it does not
@@ -39,13 +48,20 @@ class MouseReply:
     def commands(self) -> dict[str, Callable[[dict], dict]]:
         return {"mouse": self._cmd_mouse}
 
+    def status_entries(self) -> list[dict]:
+        """`status`'s `mice_attached`: each mouse attached (shared.attached_entry), with its
+        route by its product id."""
+        return [attached_entry(m.name, str(m.dev.path), product_route(m.product, CABLED_IDS),
+                               m.battery, m.battery_at, answering=not m.silent,
+                               battery_found="battery" in m.mouse.capabilities)
+                for m in self.mice.attached]
+
     def _cmd_mouse(self, request: dict) -> dict:
         # Attaches nothing: a probe of a mouse that is off stalls the loop, so the loop's retry
-        # reconnects, pulled forward (poll_for_mouse). Reads the mouse only when due
-        # (reading_due), never with `ask` false, a client's request for the last reading with
-        # nothing sent. `device`, a product id, answers for that attached mouse and leaves the
-        # selection as it is, for the device report; an id no attached mouse has is a
-        # MouseError.
+        # reconnects, pulled forward (poll_for_mouse). `ask` false is a client's request for
+        # the last reading with nothing sent (reading_for). `device` answers for the attached
+        # mouse it names by model or product id (named_in) and leaves the selection as it is;
+        # one naming no attached mouse is a MouseError (asked).
         current = (self.mice.current if request.get("device") is None
                    else self.mice.mouse_for(request, write=False))
         if current is None:
@@ -54,12 +70,12 @@ class MouseReply:
             # tab's button rows follow an M key or a game profile while it is gone.
             selected = self.mice.selected
             away = {} if selected is None else self.model_bindings(selected)
-            return {"ok": False, "error": no_mouse(self.mice.denied_mice()), **away}
-        info, answering = self.reading_for(current, request)
+            return {"ok": False, "error": self.mice.unattached.none_attached(), **away}
+        info = self.reading_for(current, request)
         clusters = current.lighting.clusters if current.lighting else ()
         profile, table = current.mouse.profile, current.mouse.button_table
         info.update({
-            "answering": answering,
+            "answering": not current.silent,
             "read_at": current.read_wall,
             "battery": current.battery,
             "battery_at": current.battery_at,
@@ -68,8 +84,7 @@ class MouseReply:
             "name": current.name,
             "product": f"{current.product:04x}",
             # What this model can do, so a front end renders only the sections it has.
-            "capabilities": current.mouse.capabilities
-                            + (["lighting"] if clusters else []),
+            "capabilities": current.capabilities,
             # Why every write to profile 1 is refused, for the window to say before a click.
             "flash_refused": current.mouse.flash_refusal,
             # Why the enable write is refused, for the front ends to leave it out.
@@ -82,7 +97,10 @@ class MouseReply:
             # one model would collide.
             "devices": [{"product": f"{m.product:04x}", "name": m.name,
                          "device": str(m.dev.path),
-                         "selected": m is self.mice.current}
+                         "selected": m is self.mice.current,
+                         # As this reply's own `answering`: switched off or asleep behind
+                         # its receiver, which keeps it attached.
+                         "answering": not m.silent}
                         for m in self.mice.attached],
             "clusters": [c.name for c in clusters],
             # 0x0013, which effect_names leaves out, changed nothing on the hardware.
@@ -100,6 +118,9 @@ class MouseReply:
             "stage_color_names": [STAGE_COLOR_NAMES.get(c)
                                   for c in STAGE_COLORS.get(current.product, ())],
             "sync_color": self.d.config.mouse_sync_color,
+            # The loaded game profile's mouse color, which a synced mouse shows in place of
+            # the keyboard's (Daemon.synced_color), or None.
+            "profile_mouse_color": mouse_color_json(self.d.profile_color()),
             **self.model_bindings(current.product),
             "buttons_enabled": bool(profile and table and table.all_enabled(profile)),
             "enabled_buttons": table.enabled(profile) if profile and table else [],
@@ -145,44 +166,40 @@ class MouseReply:
                             for slot in table.buttons],
                 "event_node": table.event_node, "idle": idle}
 
-    def reading_for(self, current: AttachedMouse, request: dict) -> tuple[dict, bool]:
-        """The readings `mouse`'s reply starts from, and its `answering`: a fresh reading
-        when `request` does not say `ask` false, one is due (reading_due) and the mouse, not
-        marked silent, answers; else its last (last_reading). A mouse found not answering is
-        marked (mark_silent), and one not answering is rechecked within MOUSE_POLL_RETRY unless
-        its receiver said its link is down (take_link_notice)."""
-        fresh = None
-        if current.silent:
-            answering = False
-        elif request.get("ask", True) is False or not self.reading_due(current):
-            answering = True
-        elif not self.mice.mouse_answers(current):
+    def reading_for(self, current: AttachedMouse, request: dict) -> dict:
+        """The readings `mouse`'s reply starts from: a fresh reading when `request` does not
+        say `ask` false, one is due (reading_due) and the mouse, not marked silent, answers;
+        else its last (last_reading). A mouse found not answering is marked silent
+        (mark_silent), which the reply's `answering` says, and a marked one is rechecked within
+        MOUSE_POLL_RETRY unless its receiver said its link is down (take_link_notice)."""
+        if (not current.silent and request.get("ask", True) is not False
+                and self.reading_due(current)):
+            if self.mice.mouse_answers(current):
+                # Not the battery once the mouse reports it by itself: nothing is sent to an
+                # idle mouse for it, as G HUB sends nothing.
+                fresh = self.mice.mouse_call(
+                    lambda: current.mouse.describe(battery=not current.battery_reports),
+                    target=current)
+                if fresh["answering"]:
+                    self.keep_reading(current, fresh)
+                    return fresh
             self.mice.mark_silent(current)
-            answering = False
-        else:
-            # Not the battery once the mouse reports it by itself: nothing is sent to an idle
-            # mouse for it, as G HUB sends nothing.
-            fresh = self.mice.mouse_call(
-                lambda: current.mouse.describe(battery=not current.battery_reports),
-                target=current)
-            answering = fresh["answering"]
-            if answering:
-                self.keep_reading(current, fresh)
-            else:
-                self.mice.mark_silent(current)
-        if not answering:
+        if current.silent:
             # Someone is watching: the loop's recheck comes within MOUSE_POLL_RETRY, unless the
             # link is down (tend_mice).
             current.recheck_at = min(current.recheck_at,
                                      time.monotonic() + MOUSE_POLL_RETRY)
         # A read the mouse did not answer holds no readings: the last one's go with its read_at.
-        info = fresh if fresh is not None and answering else self.last_reading(current)
-        return info, answering
+        return self.last_reading(current)
 
     def reading_due(self, attached: AttachedMouse) -> bool:
         """Whether `mouse` should read this mouse, not answer from its last reading. A failed
-        write's unknown profile sector (flash_unknown) is settled only by a reading."""
+        write's unknown profile sector (flash_unknown) is settled only by a reading, and one
+        taken in the other mode (`host`) is out of date: the hand-back sends outside
+        mouse_call, so it moves no `heard_at` (Mice.hand_back), and leaves the rate in force
+        unknown (Dpi.out_of_force)."""
         return (attached.reading is None
+                or attached.reading.get("host") != attached.host
                 or attached.heard_at > attached.read_at
                 or time.monotonic() - attached.read_at >= MOUSE_READING_MAX_AGE
                 or attached.mouse.flash_unknown)
@@ -191,10 +208,12 @@ class MouseReply:
         """Keep what one reading of a mouse said, for `mouse` to answer from."""
         attached.reading = {key: fresh.get(key) for key in MOUSE_READINGS}
         attached.reading["mode"] = (fresh.get("onboard") or {}).get("mode")
+        # The mode the daemon counted it in (reading_due).
+        attached.reading["host"] = attached.host
         attached.read_at = time.monotonic()
         attached.read_wall = round(time.time())
         if fresh.get("battery") is not None:
-            attached.battery, attached.battery_at = fresh["battery"], attached.read_wall
+            self.mice.battery.take(attached, fresh["battery"], at=attached.read_wall)
 
     def last_reading(self, attached: AttachedMouse) -> dict:
         """The `mouse` reply's readings with nothing sent: the onboard profile as read at attach

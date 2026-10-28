@@ -1,29 +1,34 @@
 #!/bin/sh
 set -e
 
-# On a remove, and a purge, which removes first, the daemon, spatial unit and G432
-# equalizer watch of each running user manager, a lingering account's included, stop
+# On a remove, and a purge, which removes first, the daemon, spatial unit and equalizer
+# watches of each running user manager, a lingering account's included, stop
 # before their code goes, so none runs on without it and the daemon hands the keyboard and
 # mouse back (the owner's decision of 2026-10-16).
 # An upgrade calls this with "upgrade", and postinst restarts the running daemon on the
 # new code. Each stop is waited for, since the hand-back runs the code dpkg is about to
 # remove, but at most STOP_WAIT seconds an account, so one account's service cannot hold
-# dpkg for long. Needs systemd 249 or later for --machine.
+# dpkg for long. What systemctl prints of a failure comes unescaped from that account's
+# side of the bus, so it stays off the admin's terminal, and a line of the script's own
+# stands in for it. Needs systemd 249 or later for --machine.
 STOP_WAIT=15
 stop_daemons() {
     for unit in $(systemctl --no-legend --plain list-units 'user@*.service' | awk '{print $1}')
     do
         uid=${unit#user@}
         uid=${uid%.service}
-        # The G432 equalizer's watch runs the package's code too. Its name goes as a
+        # Each headset equalizer's watch runs the package's code too. Their names go as a
         # pattern, which matches only units in memory (systemctl(1), "start PATTERN"): the
         # transient unit is unloaded while the equalizer is off, and its plain name would
         # print that it is not loaded. The equalizer's own unit and noise suppression's run
         # PipeWire alone and last to the logout: a stop would skip the equalizer's
-        # switch-off, which gives the G432 its volume back.
+        # switch-off, which gives the headset its volume back.
         timeout "$STOP_WAIT" systemctl --user --machine "$uid@" stop \
-            'gearbench-g432-eq-watch.service*' gearbench-spatial.service gearbench.service \
-            || true
+            'gearbench-*-eq-watch.service' gearbench-spatial.service gearbench.service \
+            2>/dev/null \
+            || echo "gearbench: stopping the Gearbench units of uid $uid failed or took over" \
+                "$STOP_WAIT seconds; run systemctl --user stop gearbench.service as that" \
+                "account to see why" >&2
     done
 }
 

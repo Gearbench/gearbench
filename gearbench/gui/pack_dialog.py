@@ -14,17 +14,18 @@ from typing import TYPE_CHECKING, ClassVar
 from gi.repository import Adw, Gtk
 
 from .. import import_plan, pack
-from ..macros import Macro
+from ..macros import Macro, macro_summary
 from ..profiles import GameProfile
-from ..wording import counted
+from ..wording import LEFT_OUT, counted
 from .import_dialog import (
+    KEEP_MINE,
     NO_MATCH as NO_PROFILE_MATCH,
     Importer,
     Picker,
     read_then_show,
     search_text,
 )
-from .style import left_out_row, plain_row, weakly
+from .style import CHOOSE_WHAT, left_out_row, plain_row
 
 if TYPE_CHECKING:                       # pragma: no cover
     from .window import Window
@@ -34,7 +35,6 @@ GROUPS = {pack.PROFILE: "Game profiles", pack.MACRO: "Macros"}
 NONE = {pack.PROFILE: "No game profiles in the pack", pack.MACRO: "No macros in the pack"}
 NO_MATCH = {pack.PROFILE: NO_PROFILE_MATCH,
             pack.MACRO: "No macro matches the filter"}
-BROKEN = "Broken, never imported"
 #: Both halves of what unticking does, from `pack.make_plan`.
 LOAD_FOR_HINT = "Untick to load it by hand, or to keep your programs if it replaces your profile"
 
@@ -55,8 +55,10 @@ def open_pack(window: Window) -> None:
 class PackDialog(Importer):
     """The two pages: the checklist, then review and import."""
 
-    CLASHES: ClassVar[dict[str, str]] = {import_plan.SKIP: "Keep mine",
+    CLASHES: ClassVar[dict[str, str]] = {import_plan.SKIP: KEEP_MINE,
                                          import_plan.REPLACE: "Use the pack's"}
+    CLASH_HELP = ("Use the pack's replaces your lighting and mouse color, or your macro, and keeps "
+                  "your bindings.")
 
     def __init__(self, window: Window, found: pack.Pack, existing: import_plan.Existing) -> None:
         super().__init__(window, existing, TITLE)
@@ -65,8 +67,7 @@ class PackDialog(Importer):
         self.pickers[pack.MACRO] = Picker(found.macros, search_text)
         for picker in self.pickers.values():
             picker.select_all()
-        self.pickers[pack.PROFILE].with_programs = {p.name for p in found.profiles
-                                                   if p.processes}
+        self.pickers[pack.PROFILE].with_programs = {p.name for p in found.profiles}
         self.nav.add(self._pick_page())
         self._update_count()
 
@@ -86,11 +87,11 @@ class PackDialog(Importer):
             group.add(listbox)
             body.append(group)
         if self.pack.broken:
-            group = Adw.PreferencesGroup(title=BROKEN)
+            group = Adw.PreferencesGroup(title=LEFT_OUT)
             for file, why in self.pack.broken:
                 group.add(left_out_row(file, why))
             body.append(group)
-        return self._page("pick", "Choose what to import", self._counted(
+        return self._page("pick", CHOOSE_WHAT, self._counted(
             len(self.pack.profiles), len(self.pack.macros)), body, self.next)
 
     def _row(self, kind: str, item: GameProfile | Macro) -> Adw.PreferencesRow:
@@ -100,15 +101,12 @@ class PackDialog(Importer):
             subtitle = pack.lighting_text(item)
             detail = self._programs_row(item) if item.processes else None
         else:
-            subtitle = import_plan.macro_text(item.repeat, item.steps)
+            subtitle = macro_summary(len(item.steps), item.repeat)
             detail = plain_row(
                 Adw.ActionRow, "Steps",
                 "\n".join(line.strip() for line in import_plan.step_lines(item.steps)),
                 subtitle_selectable=True)
-        check = Gtk.CheckButton(valign=Gtk.Align.CENTER, active=True)
-        check.update_property([Gtk.AccessibleProperty.LABEL], [f"Import {item.name}"])
-        check.connect("toggled", weakly(self._on_check), kind, item.name)
-        self.checks[kind, item.name] = check
+        check = self._import_check(kind, item.name)
         if note := self.pack.note(kind, item.name):
             subtitle = f"{subtitle}\n{note}"
         # Not markup: a name from the pack is text like any other.

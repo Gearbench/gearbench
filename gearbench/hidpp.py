@@ -8,12 +8,13 @@ there and a receiver answers on 0xFF itself. A receiver's node carries every pai
 device's traffic, so a reply is matched on the device index as well as the feature and
 function. Nothing here knows about lighting or keys. Feature indices are resolved through
 the root feature (0x0000), never hardcoded: an index is what one firmware reports, not a
-contract.
+contract, so one is carried to a later handle only for a device whose firmware the caller
+has read as the same (`Hidpp.know`).
 """
 
 from __future__ import annotations
 
-import enum
+import contextlib
 import errno
 import logging
 import os
@@ -21,17 +22,17 @@ import re
 import select
 import time
 from collections import deque
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import cycle, takewhile
 from pathlib import Path
-from typing import Final, Protocol, Self
+from typing import Protocol, Self
 
-from .wording import counted
+from .wording import counted, reason
 
 log = logging.getLogger("gearbench")
 
-#: Logitech. Which of its products this build knows is keyboard.py's and mouse.py's call.
+#: Logitech's USB vendor id. The device modules choose which of its products this build knows.
 VENDOR_ID = 0x046D
 #: The kernel's BUS_USB. Every device this build drives is on USB, cabled or through a
 #: receiver, and the udev rules grant no other bus.
@@ -65,10 +66,11 @@ DJ_SLOT_MAX = 7
 #
 # The rotation skips the ids other software on the node matches its replies on: 0x01 the
 # kernel's hid-logitech-hidpp, which probes the G502 X PLUS's node at every power-on report,
-# as the daemon writes to it; 0x07 OpenRGB's; 0x0B Solaar's; 0x0F the firmware's own, for
-# enumerating sub-devices on a cable. 0x01 is the kernel's LINUX_KERNEL_SW_ID; Solaar's list
+# as the daemon writes to it; 0x07 OpenRGB's; 0x08 ratbagd's; 0x0B Solaar's; 0x0F the
+# firmware's own, for enumerating sub-devices on a cable. 0x01 is the kernel's
+# LINUX_KERNEL_SW_ID, 0x08 libratbag's DEVICE_SW_ID (src/hidpp20.c); Solaar's list
 # (lib/logitech_receiver/base.py) gives the others and also 0x0A and 0x0D, Windows programs'.
-RESERVED_SOFTWARE_IDS = frozenset({0x01, 0x07, 0x0B, 0x0F})
+RESERVED_SOFTWARE_IDS = frozenset({0x01, 0x07, 0x08, 0x0B, 0x0F})
 SOFTWARE_IDS = tuple(i for i in range(0x01, 0x10) if i not in RESERVED_SOFTWARE_IDS)
 
 ROOT_FEATURE = 0x0000
@@ -93,6 +95,7 @@ ERROR_NAMES = {
     0x08: "busy",
     0x09: "unsupported",
 }
+ERROR_INVALID_FUNCTION = 0x07
 ERROR_BUSY = 0x08
 
 #: HID++ 1.0 error codes, from a HIDPP10_ERROR_REPLY: a receiver's, or a device's for a
@@ -148,20 +151,16 @@ WIRELESS_NOTICES = 0x01
 # from 0x8081 FrameEnd while the previous frame is pending; 0x8071 fn 1 has no busy check.
 BUSY_BACKOFF_MS = (30, 60, 90)
 
-
-class _Busy(enum.Enum):
-    """What Hidpp._answer returns for a BUSY reply, for request() to back off from."""
-
-    BUSY = enum.auto()
-
-
-_BUSY: Final = _Busy.BUSY
-
 #: How many sends (Hidpp.send) a channel keeps a reply for at once, well above what a
 #: mouse's lighting sends before looking for the answers: an effect per cluster and a
 #: frame's two. Past this the oldest are forgotten, so replies nobody collects cannot
 #: pile up.
 AWAITED_MAX = 32
+
+
+def request_name(feature_index: int, function: int) -> str:
+    """How a message names a request: its feature index and function."""
+    return f"feature index 0x{feature_index:02x} fn {function}"
 
 
 class HidppFailure(Exception):
@@ -190,7 +189,7 @@ class HidppError(HidppFailure):
         else:
             name = ERROR_NAMES.get(code, "unnamed")
             detail = f"0x{code:02x}"
-        about = about or f"feature index 0x{feature_index:02x} fn {function}"
+        about = about or request_name(feature_index, function)
         super().__init__(f"{about}: {name} ({detail})")
 
     @property
@@ -199,12 +198,18 @@ class HidppError(HidppFailure):
         out of range or gone to its cable. Callers treat it as a timeout, not a refusal."""
         return self.hidpp10 and self.code in HIDPP10_UNREACHABLE
 
+    @property
+    def invalid_function(self) -> bool:
+        """HID++ 2.0's invalid function id: the feature has no such function. A HID++ 1.0
+        0x07 is busy (HIDPP10_ERROR_NAMES), never this."""
+        return not self.hidpp10 and self.code == ERROR_INVALID_FUNCTION
+
 
 class HidppTimeout(HidppFailure):
     """The device did not reply in time."""
 
 
-def _no_reply(what: str, retries: int) -> HidppTimeout:
+def no_reply(what: str, retries: int) -> HidppTimeout:
     """The timeout of `what`, sent `retries` + 1 times without an answer."""
     return HidppTimeout(f"{what}: no reply after {counted(retries + 1, 'attempt')}")
 
@@ -223,6 +228,20 @@ class DeviceGone(HidppFailure):
     mid-request, most often a wireless mouse asleep while its Hidpp is built, which must
     not reach the top of the daemon.
     """
+
+
+class UnreadableAnswer(HidppFailure):
+    """The device answered with something Gearbench cannot read: a reply too short, or a
+    value outside the range assumed for it."""
+
+
+def node_failure(exc: OSError, what: str) -> HidppFailure:
+    """A hidraw node's failed read or write, `what` "read from" or "write to", as a
+    transport raises it: DeviceGone for an errno of a node gone (GONE_ERRNOS), else a
+    HidppFailure. Each gives the OSError's reason in words (wording.reason)."""
+    if exc.errno in GONE_ERRNOS:
+        return DeviceGone(reason(exc))
+    return HidppFailure(f"{what} the device failed: {reason(exc)}")
 
 
 @dataclass(frozen=True)
@@ -249,21 +268,38 @@ class Event:
     data: bytes
     link: bool = False
 
+    @property
+    def link_down(self) -> bool:
+        """A link notice that says the link went down: LINK_DOWN in its flags byte, the first
+        after the radio protocol, which a short report always has (Hidpp._raw_read)."""
+        return self.link and bool(self.data[0] & LINK_DOWN)
+
 
 @dataclass(frozen=True)
 class Heard:
-    """What `pump` read: any HID++ report (0x10 or 0x11), and any other report, a
-    mouse's motion through its receiver or a keystroke the kernel may forward to the
-    mouse's node from a keyboard paired to the same receiver."""
+    """What `pump` read: any HID++ report (0x10 or 0x11), any other report, a mouse's
+    motion or a key its onboard profile binds to a button through its receiver, or a
+    keystroke the kernel may forward to the mouse's node from a keyboard paired to the same
+    receiver, and a reply from the device on its own
+    index that is no error reply (`reply`): the late answer to a request that gave up, or
+    one a send awaits. A receiver's error for a device it cannot reach is not one."""
 
     hidpp: bool = False
     input: bool = False
+    reply: bool = False
 
 
 #: 0x0003 DeviceInformation's getDeviceInfo, whose byte 0 counts the firmware entities, and
 #: getFwInfo, one entity's (Logitech's x0003 device information v4 specification).
 F_DEVICE_INFO = 0x0003
 FN_DEVICE_INFO, FN_FW_INFO = 0, 1
+#: The x0003 version that added each getDeviceInfo field after the entity count, which v0
+#: returns alone (x0003 v4's changelog): the unit id, the transports and the model ids in
+#: v1, the extended model id in v2, the capabilities in v4.
+MODEL_IDS_SINCE, EXTENDED_MODEL_SINCE, CAPABILITIES_SINCE = 1, 2, 4
+#: getDeviceInfo's unit id, bytes 1 to 4 of its reply from MODEL_IDS_SINCE on: what tells one
+#: unit from another of its model.
+UNIT_ID = slice(1, 5)
 #: getFwInfo's entity types (x0003 v4), the first of them the firmware that runs.
 ENTITY_TYPES = ("main application", "bootloader", "hardware")
 MAIN_APPLICATION = ENTITY_TYPES[0]
@@ -301,6 +337,24 @@ def firmware_entity(reply: bytes) -> Firmware:
         active=bool(reply[8] & 0x01), transport_id=int.from_bytes(reply[9:11], "big"))
 
 
+def running_application(read: Callable[[int], bytes], count: int,
+                        who: str) -> tuple[int, bytes] | None:
+    """The firmware that runs: getFwInfo of each of the first `count` entities, ENTITIES_MAX
+    at most, `read` asking one by its number, up to the active main application, whose number
+    and reply it gives; None where none runs. UnreadableAnswer, naming `who`, for a reply too
+    short to decode."""
+    for entity in range(min(count, ENTITIES_MAX)):
+        reply = read(entity)
+        # A short report's three bytes, from a device that declares one.
+        if len(reply) < FW_INFO_LENGTH:
+            raise UnreadableAnswer(f"{who} answered firmware entry {entity} with "
+                                   f"{counted(len(reply), 'byte')}, not {FW_INFO_LENGTH}")
+        found = firmware_entity(reply)
+        if found.kind == MAIN_APPLICATION and found.active:
+            return entity, reply
+    return None
+
+
 def keep_answer(awaited: dict[tuple[int, int, int], bytes | HidppError | None],
                 key: tuple[int, int, int], answer: bytes | HidppError) -> bool:
     """File a reply's payload, or an error reply's HidppError, under the send `key` names, and
@@ -318,17 +372,6 @@ def keep_answer(awaited: dict[tuple[int, int, int], bytes | HidppError | None],
             if earlier[:2] == key[:2] and awaited[earlier] is None:
                 awaited[earlier] = answer
     return True
-
-
-def usb_product(node: Path) -> int | None:
-    """The idProduct of the USB device the hidraw node hangs off.
-
-    A cabled device's own; for one paired through a receiver, the receiver's, since the
-    paired device's node carries its own HID id under the receiver's USB device.
-    `paired` reads that difference.
-    """
-    found = _usb_device(node)
-    return found[1] if found else None
 
 
 def _usb_device(node: Path) -> tuple[Path, int] | None:
@@ -372,7 +415,8 @@ def attached_index(node: Path, product: int, phys: str) -> int:
     byte 1 of every write to that slot but not the replies, so a wrong slot drops every
     reply as another device's. RECEIVER_INDEX where the name carries no slot.
     """
-    if not paired(product, usb_product(node)):
+    usb = _usb_device(node)
+    if not paired(product, usb[1] if usb else None):
         return DEVICE_INDEX
     _, colon, slot = phys.rpartition(":")
     # Decimal digits only: isdigit() also passes a superscript, which int() refuses.
@@ -409,10 +453,19 @@ RECEIVER_SLOTS = tuple(range(0x01, 0x07))
 #: or third at about 650 ms, and an untouched one up to 1.63 s in G HUB's captures.
 PROBE_TIMEOUT = 0.5
 PROBE_RETRIES = 2
+#: The wait for a reply, and how many times a request is sent again after one does not
+#: come, where the caller gives neither.
+REQUEST_TIMEOUT = 1.0
+REQUEST_RETRIES = 2
+#: The wait for the answer to a write sent once because a resent copy the device also took
+#: would act twice, and whose answer the write needs: past the 1.8 s the G915 X LIGHTSPEED
+#: idle on its receiver took to answer a read (measured 2026-10-24) and the 1.63 s an
+#: untouched G502 X PLUS took in G HUB's captures.
+WRITE_ONCE_TIMEOUT = 3.0
 
-#: Why a hidraw node's open raised PermissionError: the end of every refusal the daemon
-#: reports for one, and of probe's. uaccess gives a node to the account whose session
-#: has the seat, so a rule in place refuses too while the seat is elsewhere.
+#: Why this account may not open a device node one of the udev rules grants, put at the
+#: end of a message that says so. uaccess gives a node to the account whose session has
+#: the seat, so a rule in place refuses too while the seat is elsewhere.
 NO_RULE = ("its udev rule is missing or not applied yet, or another account or a text "
            "console has the seat (see gearbench-ctl(1), FILES)")
 
@@ -455,22 +508,25 @@ def find_index[C: Probed](path: str | os.PathLike[str], witness: int,
     Each index is asked once with `timeout` and `retries`, which cover the first request
     after opening a node, often dropped. A slot silent after an earlier index answered ends
     the scan: the receiver routes, so the device is off or out of range, and each further
-    slot would cost the budget again, while connect() scans every 2 s. A timeout before any
-    answer does not: a hid-logitech-dj node for one paired device rewrites every write to
-    its slot, so the others time out.
+    slot would cost the budget again at each ask the daemon repeats while it stays off. A
+    timeout before any answer does not: a hid-logitech-dj node for one paired device
+    rewrites every write to its slot, so the others time out.
 
     Returns the open device and its index, or None with everything it opened closed; a
-    device gone mid-probe ends it at once. Raises PermissionError for a node the udev rule
-    did not grant, so a caller can say so instead of reporting that nothing answered.
+    device gone mid-probe, or its node gone at an open, ends it at once. Raises the OSError
+    of any other failed open, PermissionError for a node the udev rule did not grant among
+    them, so a caller can say why instead of reporting that nothing answered.
     """
     answered = False
     for index in (prefer, *(i for i in RECEIVER_SLOTS if i != prefer)):
         try:
             dev = opener(path, index)
-        except PermissionError:
+        except OSError as exc:
+            # Gone as the transport reads it (node_failure): an errno that says so, or the
+            # node's file removed.
+            if isinstance(exc, FileNotFoundError) or exc.errno in GONE_ERRNOS:
+                return None
             raise
-        except OSError:
-            return None
         try:
             if dev.feature(witness, timeout=timeout, retries=retries) is not None:
                 return dev, index
@@ -498,14 +554,14 @@ HIDRAW_CLASS = Path("/sys/class/hidraw")
 
 
 def find_attached(
+    *,
     vendor: int = VENDOR_ID,
-    product: int | Iterable[int] = (),
+    product: Iterable[int],
     interface: int | None = None,
 ) -> tuple[Path, int, int] | None:
     """The hidraw node for a vendor HID++ collection: (node, product, index).
 
-    `product` may be several ids, tried in order, for a device with one id cabled and
-    another through a receiver; the product found says which route it came by.
+    `product` is the ids tried in order; the product found says which one matched.
 
     Walks /sys, since /dev/hidrawN numbers move with plug order, and matches what the udev
     rule matches (USB, vid, pid, interface number), so a node found is one the rule grants.
@@ -519,7 +575,7 @@ def find_attached(
     `interface` says.
     """
     nodes = _hid_nodes()
-    for pid in (product,) if isinstance(product, int) else product:
+    for pid in product:
         found = _first_match(nodes, vendor, pid, interface)
         if found is not None:
             return found
@@ -539,13 +595,47 @@ def find_each_attached(interfaces: Mapping[int, int | None]) -> list[tuple[Path,
 HID_NAME = re.compile(r"([0-9A-F]{4}):([0-9A-F]{4}):([0-9A-F]{4})\.[0-9A-F]{4,}")
 
 
+@dataclass
+class _Listing:
+    """What `one_listing` shares: whether a block holds it, and the nodes its first look
+    listed, None until then."""
+
+    held: bool = False
+    nodes: list[tuple[Path, Path]] | None = None
+
+
+#: The listing `one_listing` holds.
+_LISTING = _Listing()
+
+
+@contextlib.contextmanager
+def one_listing() -> Iterator[None]:
+    """Within the block, every look for a node (find_attached, find_each_attached) reads one
+    listing of HIDRAW_CLASS, the first look's. The daemon's loop holds one over the work at
+    the top of each pass, where the keyboards, the mice and the headsets each look for their
+    devices and cables: one walk of sysfs in place of one each. A node that appears after
+    the first look is found at the first look after the block, and one whose number went to
+    another device since is passed over until then."""
+    _LISTING.held = True
+    try:
+        yield
+    finally:
+        _LISTING.held, _LISTING.nodes = False, None
+
+
 def _hid_nodes() -> list[tuple[Path, Path]]:
     """Each hidraw node under HIDRAW_CLASS, in the kernel's numbering order, with the HID
     device its `device` link resolves to, whose parent is the USB interface, which a device
-    paired through a receiver does not have."""
+    paired through a receiver does not have. Within a `one_listing` block, the listing its
+    first look made."""
+    if _LISTING.nodes is not None:
+        return _LISTING.nodes
     # hidraw2 before hidraw10, as the kernel numbers them.
-    return [(node, (node / "device").resolve())
-            for node in sorted(HIDRAW_CLASS.glob("hidraw*"), key=lambda n: (len(n.name), n.name))]
+    nodes = [(node, (node / "device").resolve())
+             for node in sorted(HIDRAW_CLASS.glob("hidraw*"), key=lambda n: (len(n.name), n.name))]
+    if _LISTING.held:
+        _LISTING.nodes = nodes
+    return nodes
 
 
 def _hid_ids(hid: Path) -> tuple[int, int, int] | None:
@@ -564,6 +654,10 @@ def _first_match(nodes: list[tuple[Path, Path]], vendor: int, pid: int, interfac
     for node, hid in nodes:
         if _hid_ids(hid) != (BUS_USB, vendor, pid):
             continue
+        # one_listing's listing dates from the block's first look: a node unplugged since,
+        # its number given to a device plugged in after, is that device's now.
+        if (node / "device").resolve() != hid:
+            continue
         try:
             fields = _uevent(node)
         except OSError:
@@ -577,7 +671,7 @@ def _first_match(nodes: list[tuple[Path, Path]], vendor: int, pid: int, interfac
 
 
 #: The most bytes of a report descriptor the kernel keeps (HID_MAX_DESCRIPTOR_SIZE in
-#: include/linux/hid.h), and so the most `walk_nodes` reads.
+#: include/linux/hid.h), and so the most `walk_nodes` and `descriptor_of` read.
 DESCRIPTOR_MAX = 4096
 
 
@@ -621,11 +715,71 @@ def walk_nodes() -> list[SysfsNode]:
     return found
 
 
+def descriptor_of(node: Path) -> bytes:
+    """The report descriptor sysfs gives for the hidraw node `node`, a /dev path, at most
+    DESCRIPTOR_MAX bytes; opens nothing there. Raises OSError."""
+    return (HIDRAW_CLASS / node.name / "device" / "report_descriptor").read_bytes()[:DESCRIPTOR_MAX]
+
+
+def still_there(node: SysfsNode) -> bool:
+    """Whether sysfs still names, at `node`'s hidraw name, the device walk_nodes found there:
+    the same bus, vendor and product in its HID device's name, and the same report
+    descriptor. The kernel gives a new device the lowest free hidraw minor (hidraw.c's
+    hidraw_connect), so a name listed before an unplug can name another device by its open."""
+    try:
+        descriptor = descriptor_of(Path(node.name))
+    except OSError:
+        return False
+    hid = (HIDRAW_CLASS / node.name / "device").resolve()
+    return _hid_ids(hid) == (BUS_USB, VENDOR_ID, node.product) and descriptor == node.descriptor
+
+
 class HidrawNode:
-    """An open hidraw node the channel owns: closed once, and read against a
-    deadline through the subclass's `_raw_read`."""
+    """An open hidraw node the channel owns: opened read-write and non-blocking, closed once,
+    read and written through `_fetch` and `_send_packet`, and read against a deadline
+    through `_raw_read`. A failed read or write raises what `_failure` makes of its OSError,
+    and an empty read what `_closed` makes: hidpp's own (node_failure, DeviceGone) unless the
+    subclass says otherwise."""
 
     _fd: int
+    #: The most bytes one read takes: a HID++ long report and more. A subclass whose frames
+    #: are of one size reads that size.
+    _read_size = 64
+
+    @staticmethod
+    def _opened(path: str | os.PathLike[str]) -> int:
+        """`path` opened as every channel opens its node. Raises OSError."""
+        return os.open(path, os.O_RDWR | os.O_NONBLOCK)
+
+    def _failure(self, exc: OSError, what: str) -> Exception:
+        """The error a read or write that failed with `exc` raises, `what` "read from" or
+        "write to"."""
+        return node_failure(exc, what)
+
+    def _closed(self) -> Exception:
+        """The error an empty read raises."""
+        return DeviceGone("the node closed")
+
+    def _send_packet(self, packet: bytes) -> None:
+        try:
+            os.write(self._fd, packet)
+        except OSError as exc:
+            raise self._failure(exc, "write to") from exc
+
+    def _fetch(self) -> bytes | None:
+        """One report as the node hands it over, or None when nothing is waiting. With
+        `_send_packet`, the only place an OSError, or an empty read, becomes an error of the
+        channel's, which every caller's guard relies on."""
+        try:
+            report = os.read(self._fd, self._read_size)
+        except BlockingIOError:
+            return None
+        except OSError as exc:
+            raise self._failure(exc, "read from") from exc
+        if not report:
+            # hidraw never reads empty; a descriptor whose far end closed does (from_fd).
+            raise self._closed()
+        return report
 
     def close(self) -> None:
         if self._fd >= 0:
@@ -645,8 +799,9 @@ class HidrawNode:
         return self._fd
 
     def _raw_read(self) -> bytes | None:
-        """One buffered report, or None when nothing is waiting: each node's own."""
-        raise NotImplementedError
+        """One buffered report, or None when nothing is waiting: `_fetch`'s, where the
+        subclass drops none."""
+        return self._fetch()
 
     def _read(self, deadline: float) -> bytes | None:
         """One report, or None once `deadline` passes."""
@@ -674,8 +829,7 @@ class Hidpp(HidrawNode):
 
     def __init__(self, path: str | os.PathLike[str], device_index: int, *,
                  long_only: bool = False) -> None:
-        self._setup(Path(path), os.open(path, os.O_RDWR | os.O_NONBLOCK), device_index,
-                    long_only)
+        self._setup(Path(path), self._opened(path), device_index, long_only)
 
     @classmethod
     def from_fd(cls, fd: int, device_index: int = DEVICE_INDEX, *,
@@ -723,40 +877,18 @@ class Hidpp(HidrawNode):
             self.pump()
         software_id = next(self._software_ids)
         body = bytes([report_id, self.device_index, feature_index, (function << 4) | software_id])
-        self._put((body + params).ljust(REPORT_LENGTH[report_id], b"\x00"))
+        self._send_packet((body + params).ljust(REPORT_LENGTH[report_id], b"\x00"))
         return software_id
 
-    def _put(self, packet: bytes) -> None:
-        try:
-            os.write(self._fd, packet)
-        except OSError as exc:
-            if exc.errno in GONE_ERRNOS:
-                raise DeviceGone(str(exc)) from exc
-            raise HidppFailure(f"write to the device failed: {exc}") from exc
-
     def _raw_read(self) -> bytes | None:
-        """One buffered report, or None when nothing is waiting.
-
-        With _put, the only place an OSError, or an empty read, becomes DeviceGone or
-        another HidppFailure, which every caller's guard relies on. A HID++ report shorter
-        than its id's REPORT_LENGTH is dropped, so later code can index a whole report: the
-        kernel hands hidraw a short report at the length it came in.
-        """
-        while True:
-            try:
-                report = os.read(self._fd, 64)
-            except BlockingIOError:
-                return None
-            except OSError as exc:
-                if exc.errno in GONE_ERRNOS:
-                    raise DeviceGone(str(exc)) from exc
-                raise HidppFailure(f"read from the device failed: {exc}") from exc
-            if not report:
-                # hidraw never reads empty; a descriptor whose far end closed does (from_fd).
-                raise DeviceGone("the node closed")
+        """One buffered report, or None when nothing is waiting. A HID++ report shorter than
+        its id's REPORT_LENGTH is dropped, so later code can index a whole report: the kernel
+        hands hidraw a short report at the length it came in."""
+        while (report := self._fetch()) is not None:
             if len(report) >= REPORT_LENGTH.get(report[0], 0):
                 return report
             log.debug("dropped truncated report %s", report.hex(" "))
+        return None
 
     def pump(self) -> Heard:
         """Read whatever is buffered, without sending or waiting, and say what kinds of
@@ -767,35 +899,36 @@ class Hidpp(HidrawNode):
         is nobody's, typically the late answer to a call that gave up, and is dropped so it
         cannot pass for the next call's answer.
         """
-        hidpp = other = False
+        hidpp = other = replied = False
         while (report := self._raw_read()) is not None:
             if report[0] in REPORT_LENGTH:
                 hidpp = True
             else:
                 other = True
-            self._file_or_drop(report)
-        return Heard(hidpp, other)
+            replied = self._file_or_drop(report) or replied
+        return Heard(hidpp, other, replied)
 
     def _file_or_drop(self, report: bytes,
-                      waiting: tuple[int, int, list[int]] | None = None) -> None:
+                      waiting: tuple[int, int, list[int]] | None = None) -> bool:
         """Queue a notification, keep the reply to a send, and drop the rest, another
         device's reports included. `waiting` is a waiting request's feature index, function
-        and software ids, for the line that logs a reply dropped as stale."""
+        and software ids, for the line that logs a reply dropped as stale. True for a reply
+        from the device that is no error reply, kept or dropped (Heard.reply)."""
         if report[0] not in REPORT_LENGTH or report[1] != self.device_index:
-            return
+            return False
         if report[2] not in ERROR_REPLIES:
             link = self._is_link_notice(report)
             if link or self._is_event(report):
                 self._events.append(Event(feature_index=report[2], address=report[3],
                                           data=report[4:], link=link))
-                return
+                return False
         index, function, software_id, answer = self._decoded(report)
-        if keep_answer(self._awaited, (index, function, software_id), answer):
-            return
-        if waiting is not None:
-            self._log_stale(report, *waiting)
-        else:
-            log.debug("dropped unsolicited reply %s", report.hex(" "))
+        if not keep_answer(self._awaited, (index, function, software_id), answer):
+            if waiting is not None:
+                self._log_stale(report, software_id, *waiting)
+            else:
+                log.debug("dropped unsolicited reply %s", report.hex(" "))
+        return not isinstance(answer, HidppError)
 
     @staticmethod
     def _addressed(report: bytes) -> bytes:
@@ -904,9 +1037,9 @@ class Hidpp(HidrawNode):
         function: int,
         params: bytes = b"",
         *,
-        timeout: float = 1.0,
+        timeout: float = REQUEST_TIMEOUT,
         long: bool = False,
-        retries: int = 2,
+        retries: int = REQUEST_RETRIES,
         reply: bool = True,
     ) -> bytes:
         """Call one feature function and return its reply payload, without the 4-byte header.
@@ -914,10 +1047,8 @@ class Hidpp(HidrawNode):
         Raises HidppError on a device error, HidppTimeout if nothing comes back, DeviceGone
         if the node went away.
 
-        reply=False sends once and returns b"" without waiting, as Lighting.set_effect does
-        for a color preview synced to the mouse (0x8071 fn 1 setEffectByIndex); the mouse does
-        answer it, and an error in that answer goes unseen. A reply that arrives is drained
-        before the next write.
+        reply=False sends once and returns b"" without waiting: the device's answer, an
+        error included, goes unseen, drained before the next write.
 
         Every write, retries and BUSY resends included, takes a fresh software id, and a
         reply echoing any id this call sent is its answer: the attempts are one request, so
@@ -946,19 +1077,20 @@ class Hidpp(HidrawNode):
                                       time.monotonic() + timeout)
             if answer is None:
                 attempt += 1  # timed out; resend
-            elif answer is _BUSY:
+            elif isinstance(answer, HidppError):
                 if busy_attempt == len(BUSY_BACKOFF_MS):
-                    raise HidppError(feature_index, function, ERROR_BUSY)
+                    raise answer
                 time.sleep(BUSY_BACKOFF_MS[busy_attempt] / 1000.0)
                 busy_attempt += 1
             else:
                 return answer
 
-        raise _no_reply(f"feature index 0x{feature_index:02x} fn {function}", retries)
+        raise no_reply(request_name(feature_index, function), retries)
 
     def _answer(self, feature_index: int, function: int, sent: list[int],
-                deadline: float | None) -> bytes | _Busy | None:
-        """This call's answer: its payload, _BUSY, or None once `deadline` passes.
+                deadline: float | None) -> bytes | HidppError | None:
+        """This call's answer: its payload, a HID++ 2.0 BUSY's HidppError, or None once
+        `deadline` passes.
 
         `sent` is every software id the call has written with. `deadline` None reads only
         what is buffered, as a resend does before it goes out. An error reply other than a
@@ -983,27 +1115,28 @@ class Hidpp(HidrawNode):
                     # A 1.0 error is never taken for BUSY: its 0x08 is an unknown
                     # device, which the kernel reads as one that is not connected.
                     if not answer.hidpp10 and answer.code == ERROR_BUSY:
-                        return _BUSY
+                        return answer
                     raise answer
             self._file_or_drop(report, (feature_index, function, sent))
 
     @staticmethod
-    def _log_stale(report: bytes, feature_index: int, function: int, sent: list[int]) -> None:
-        function_byte = Hidpp._addressed(report)[1]
+    def _log_stale(report: bytes, software_id: int, feature_index: int, function: int,
+                   sent: list[int]) -> None:
         log.debug(
-            "dropped stale reply with software id 0x%x while feature index 0x%02x fn %d "
-            "waited for %s: %s", function_byte & 0x0F, feature_index, function,
+            "dropped stale reply with software id 0x%x while %s waited for %s: %s",
+            software_id, request_name(feature_index, function),
             ", ".join(f"0x{i:x}" for i in sent), report.hex(" "),
         )
 
     # -- HID++ 1.0 registers --------------------------------------------
 
-    def read_register(self, register: int, *, timeout: float = 1.0, retries: int = 2) -> bytes:
+    def read_register(self, register: int, *, timeout: float = REQUEST_TIMEOUT,
+                      retries: int = REQUEST_RETRIES) -> bytes:
         """A short register's three bytes (GET_REGISTER)."""
         return self._register(GET_REGISTER, register, bytes(3), timeout, retries)
 
-    def write_register(self, register: int, value: bytes, *, timeout: float = 1.0,
-                       retries: int = 2) -> None:
+    def write_register(self, register: int, value: bytes, *, timeout: float = REQUEST_TIMEOUT,
+                       retries: int = REQUEST_RETRIES) -> None:
         """Write a short register's three bytes (SET_REGISTER), returning once it is answered."""
         if len(value) != 3:
             raise ValueError(f"a short register takes 3 bytes, not {len(value)}")
@@ -1021,7 +1154,7 @@ class Hidpp(HidrawNode):
         what = f"register 0x{register:02x} {'write' if sub_id == SET_REGISTER else 'read'}"
         self.pump()
         for _attempt in range(retries + 1):
-            self._put(bytes([REPORT_SHORT, DEVICE_INDEX, sub_id, register]) + value)
+            self._send_packet(bytes([REPORT_SHORT, DEVICE_INDEX, sub_id, register]) + value)
             deadline = time.monotonic() + timeout
             while (report := self._read(deadline)) is not None:
                 if report[0] == REPORT_SHORT and report[1] == DEVICE_INDEX:
@@ -1030,12 +1163,12 @@ class Hidpp(HidrawNode):
                     if report[2:5] == bytes([HIDPP10_ERROR_REPLY, sub_id, register]):
                         raise HidppError(sub_id, register, report[5], hidpp10=True, about=what)
                 self._file_or_drop(report)
-        raise _no_reply(what, retries)
+        raise no_reply(what, retries)
 
     # -- feature discovery ----------------------------------------------
 
-    def feature(self, feature_id: int, *, timeout: float = 1.0,
-                retries: int = 2) -> Feature | None:
+    def feature(self, feature_id: int, *, timeout: float = REQUEST_TIMEOUT,
+                retries: int = REQUEST_RETRIES) -> Feature | None:
         """Resolve a feature id to its index on this device, or None if absent.
 
         `timeout` and `retries` are request()'s, for a lookup that is a probe.
@@ -1045,12 +1178,24 @@ class Hidpp(HidrawNode):
                                                      retries=retries)
         return self._features[feature_id]
 
-    def lookup(self, feature_id: int, *, timeout: float = 1.0,
-               retries: int = 2) -> Feature | None:
+    def lookup(self, feature_id: int, *, timeout: float = REQUEST_TIMEOUT,
+               retries: int = REQUEST_RETRIES) -> Feature | None:
         """A feature id's index, or None if absent, asked of the device each time, for a
         probe that must reach it; `feature` caches the answer."""
         return feature_of(self.request(ROOT_FEATURE, 0, feature_id.to_bytes(2, "big"),
                                        timeout=timeout, retries=retries))
+
+    def known_features(self) -> dict[int, Feature | None]:
+        """Each feature id `feature` has resolved on this handle, and what it found, for
+        `know` on a later handle of the same device."""
+        return dict(self._features)
+
+    def know(self, features: Mapping[int, Feature | None]) -> None:
+        """Take `features`, resolved on an earlier handle of this device, as resolved here,
+        so `feature` answers them without asking; one resolved here already is kept. The
+        caller vouches for the firmware being the same: an index is that firmware's."""
+        for feature_id, found in features.items():
+            self._features.setdefault(feature_id, found)
 
     def require(self, feature_id: int, name: str) -> Feature:
         found = self.feature(feature_id)

@@ -15,12 +15,20 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from ...mouse import Mouse, MouseError, enable_note, fallback_note, written_note
+from ...mouse import (
+    MouseError,
+    enable_note,
+    fallback_note,
+    runs_another_profile,
+    written_note,
+)
+from ...mouse_device import Mouse
 from ...onboard import stage_dpi
 from ..shared import MOUSE_PROBE, whole_number
 from .attached import (
     TUNING_HOST_ONLY,
     AttachedMouse,
+    aimed,
     follow_shift,
     own_stages,
     same_place,
@@ -33,8 +41,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("gearbench")
 
-#: The error for a mouse that went away after its profile 1 write was made.
-GONE_AFTER_WRITE = "The mouse went away after the profile 1 write."
+#: The error for a mouse that went away after its profile 1 write was made, by its name.
+GONE_AFTER_WRITE = "the {} went away after the profile 1 write"
 
 #: The sentences a HOST-mode write's note adds for a report rate not sent or not taken live.
 RATE_NOT_ANSWERED = " The mouse is not answering, so the report rate is sent once it answers."
@@ -42,9 +50,9 @@ RATE_NOT_TAKEN = (" The mouse did not take the report rate (see the journal), wh
                   "again at its next setup.")
 
 #: What a failed profile 1 write adds when its sector could not be read back (`flash_unknown`).
-SECTOR_UNKNOWN = ("Profile 1 may have changed and could not be read back. Leave the mouse on: "
+SECTOR_UNKNOWN = ("profile 1 may have changed and could not be read back; leave the mouse on: "
                   "`gearbench-ctl mouse` reads it again once the mouse answers (see RECOVERY "
-                  "in gearbench-ctl(1)).")
+                  "in gearbench-ctl(1))")
 
 
 class ProfileWrites:
@@ -65,6 +73,11 @@ class ProfileWrites:
 
     def _cmd_mouse_rate(self, request: dict) -> dict:
         target = self.mice.mouse_for(request)
+        return aimed(target, self.set_rate(target, request))
+
+    def set_rate(self, target: AttachedMouse, request: dict) -> dict:
+        """mouse_rate's reply for `target`: a loaded game profile's own rate, a rate set live
+        alone, or the rate in profile 1, also sent live in HOST mode."""
         overlay = self.mice.dpi.edits_tuning(target)
         if overlay is not None:
             return self.mice.dpi.tune_rate(target, overlay, request)
@@ -82,16 +95,17 @@ class ProfileWrites:
             sent = self.mice.mouse_answering(target) and self.mice.dpi.send_rate(target)
             if target not in self.mice.attached:
                 # Torn down at the send: profile 1 holds the rate, as mouse_restore says.
-                raise MouseError(GONE_AFTER_WRITE)
+                raise MouseError(GONE_AFTER_WRITE.format(target.name))
             if not sent:
                 live = self.rate_owed(target)
             where = "onboard"
         else:
             where = self.flash_write(target, target.mouse.set_report_rate, hz)
         # What `mouse` answers from until the next reading: in effect from the write's commit,
-        # which in HOST mode puts the mouse on the stored rate too (flash_write).
-        if target.reading is not None:
-            target.reading["report_rate"] = hz
+        # which in HOST mode puts the mouse on the stored rate too (flash_write), unless the
+        # mouse runs another profile, whose rate stays in force (written_note).
+        if where == "live" or self.in_effect(target):
+            target.on_rate(hz)
         reply = {"ok": True, "report_rate": hz, "written": where}
         if where == "onboard":
             reply["note"] = self.flash_note(target) + live
@@ -118,6 +132,12 @@ class ProfileWrites:
         goes unanswered marks the mouse too, the rate sent."""
         return "" if self.mice.mouse_answering(target) else RATE_NOT_ANSWERED
 
+    @staticmethod
+    def in_effect(target: AttachedMouse) -> bool:
+        """Whether a profile 1 write is in effect at its commit: in HOST mode, or on a mouse
+        not last read running another profile (written_note)."""
+        return target.host or not runs_another_profile(target.mouse.running_profile)
+
     def flash_note(self, target: AttachedMouse) -> str:
         """written_note, plus where a loaded game profile's own stages and rate stand."""
         note = written_note(target.name, target.host, target.mouse.running_profile)
@@ -129,13 +149,11 @@ class ProfileWrites:
         if self.mice.dpi.tuning_for(target) is None:
             return note
         if target.host:
-            # written_note's, but the game profile's own stages or rate stay in force over
-            # profile 1's (send_rate, stages_in_force).
-            return (f"Written to onboard profile 1 on the {target.name}. In host mode, "
-                    f"Gearbench uses its stages and rate at once, except {overlay.name}'s own "
-                    f"while it is loaded; the mouse runs profile 1 when Gearbench stops.")
+            # The game profile's own stages or rate stay in force over profile 1's (send_rate,
+            # stages_in_force).
+            return written_note(target.name, True, own=overlay.name)
         # A mouse whose arm did not take runs profile 1 (in_force), as tuning_note says.
-        return (f"{note} {overlay.name}'s own stages or rate are in force once the mouse is in "
+        return (f"{note} {overlay.name}'s own stages or rate are in effect once the mouse is in "
                 f"host mode.")
 
     def flash_write[T](self, target: AttachedMouse, what: Callable[..., T],
@@ -148,14 +166,18 @@ class ProfileWrites:
         profile 1's default stage and stored report rate (measured on the G502 X PLUS,
         2026-10-02), so the DPI is read first and put back after, with the rate in force unless
         the caller sends its own (`rate` False): put_back_after_write. A mouse gone or not
-        answering at that read is not written to. A failed write can still have changed the
-        sector: Mouse reads it again and counts a sector that reads back as written as a
-        success, and when that read fails too the sector is unknown (`flash_unknown`) until
-        `mouse` reads it, as the error says.
+        answering at that read is not written to. Before the put-back, in either mode, the DPIs
+        kept ahead of the remembered one follow a stage list the write changed
+        (Dpi.follow_kept), unless a game profile's own stages are in force. A model whose
+        writes are not tested (Mouse.flash_refusal) is read nothing first: its write is refused
+        with nothing sent, where an unanswered read would answer that the mouse is asleep. A
+        failed write can still have changed the sector: Mouse reads it again and counts a
+        sector that reads back as written as a success, and when that read fails too the sector
+        is unknown (`flash_unknown`) until `mouse` reads it, as the error says.
         """
         dpi = None
         target.dpi_not_put_back = False
-        if target.host:
+        if target.host and target.mouse.flash_refusal is None:
             # On the write's own budget, not the probe's: a mouse asleep wakes at a request
             # and answers 0.42 to 1.63 s after it (hand_back).
             try:
@@ -165,6 +187,7 @@ class ProfileWrites:
                     raise           # gone, or not answering: the write would not be taken
                 log.info("%s: no DPI read before the profile 1 write: %s", target.name, exc)
         started, written, gone = target.mouse.sector_writes, False, None
+        before = target.mouse.dpi_stages
         try:
             result = self.mice.mouse_call(what, *args, target=target)
             written = True
@@ -174,6 +197,11 @@ class ProfileWrites:
                 raise MouseError(SECTOR_UNKNOWN) from exc
             raise
         finally:
+            if (target.mouse.sector_writes != started
+                    and own_stages(self.mice.dpi.in_force(target)) is None):
+                # Before the put-back, whose requests can tear the mouse down: its next attach
+                # takes them as they are then (KeptMouse).
+                self.mice.dpi.follow_kept(target, before, target.mouse.dpi_stages)
             if target.host and target.mouse.sector_writes != started:
                 # A caller that sends its own rate does not after a write that raised.
                 gone = self.put_back_after_write(target, dpi, rate or not written)
@@ -192,8 +220,8 @@ class ProfileWrites:
         mouse. On the probe's budget: the mouse has just answered the write. Raises nothing, the
         write's outcome being the command's; returns a MouseError when the mouse went away, else
         None."""
-        done = dpi is not None and self.mice.mouse_answering(target)
-        if done and dpi is not None:
+        done = False
+        if dpi is not None and self.mice.mouse_answering(target):
             try:
                 now = self.mice.mouse_call(lambda: target.mouse.get_dpi(**MOUSE_PROBE),
                                            target=target)
@@ -203,10 +231,10 @@ class ProfileWrites:
                                          target=target)
                     log.info("%s back on %s DPI after the profile 1 write, which moved it to %s",
                              target.name, dpi, now)
+                done = True
             except MouseError as exc:
                 log.info("%s: could not put the DPI back after the profile 1 write: %s",
                          target.name, exc)
-                done = False
         target.dpi_not_put_back = not done
         if rate:
             if self.mice.mouse_answering(target):
@@ -216,7 +244,7 @@ class ProfileWrites:
                 done = False
         if target not in self.mice.attached:
             # Gone at the put-back's read or rate send alike: the write was made.
-            return MouseError(GONE_AFTER_WRITE)
+            return MouseError(GONE_AFTER_WRITE.format(target.name))
         if not done:
             target.cookie_set, target.cut_short = False, True
         return None
@@ -225,19 +253,22 @@ class ProfileWrites:
                    after: list[int]) -> int | None:
         """After a write that changed the stage list, read the DPI the mouse is on and store it
         in place of a remembered DPI (remember_dpi), so restore_dpi does not put back an edited
-        stage's old value. In HOST mode, where flash_write put back the DPI from before the
-        write, a mouse on an old stage is moved to the same place in the new list, as retune
-        does; in ONBOARD mode the write is in effect at its commit.
+        stage's old value. The DPIs desktop_dpi puts back first followed the edit at the write
+        (flash_write). In HOST mode, where flash_write put back the DPI from before the
+        write, a mouse on an old stage stays on its DPI while the new list holds it, else goes
+        to the stage at the same place (same_place), as retune does; in ONBOARD mode the write
+        is in effect at its commit.
 
         Under a held DPI shift the DPI read is the shift's, which is no choice: the DPI under
-        the shift moves to its place in the new list, is remembered instead, and is put back at
-        the release.
+        the shift follows the edit (same_place), is remembered instead, and is put back at the
+        release.
 
         With none remembered nothing is stored: a stored value would go stale at a stage change
         the daemon does not hear of. A DPI that cannot be read or moved is forgotten on both
         routes, since it may be the edited stage's old value, and so is the DPI of a mouse
-        marked not answering, which is not read (the owner's decision of 2026-10-11). The DPI
-        the mouse is on, or None.
+        marked not answering, which is not read (the owner's decision of 2026-10-11). So is the
+        one kept when the mouse answers a DPI outside DPI_LOWEST to DPI_HIGHEST, as 0
+        (remember_dpi). The DPI the mouse is on, or None.
         """
         if after == before or own_stages(self.mice.dpi.in_force(target)) is not None:
             # Under a game profile's own stages, profile 1's list is not the one in force.
@@ -263,9 +294,7 @@ class ProfileWrites:
             return None
         if self.mice.dpi.remembered_dpi(target) is not None:
             self.mice.dpi.remember_dpi(dpi if held is None else held, target)
-        # What `mouse` answers from until the next reading.
-        if target.reading is not None:
-            target.reading["dpi"] = dpi
+        target.on_dpi(dpi)
         return dpi
 
     def gone_after_write(self, target: AttachedMouse, before: list[int]) -> None:
@@ -278,9 +307,19 @@ class ProfileWrites:
 
     def _cmd_mouse_dpi_stages(self, request: dict) -> dict:
         target = self.mice.mouse_for(request)
-        if request.get("factory"):
+        return aimed(target, self.set_stages(target, request))
+
+    def set_stages(self, target: AttachedMouse, request: dict) -> dict:
+        """mouse_dpi_stages' reply for `target`: the stages listed, or with `factory` those of
+        its factory profile, as a loaded game profile's own or in profile 1."""
+        overlay = self.mice.dpi.edits_tuning(target)
+        if request.get("factory") is True:
             if request.get("reset") or request.get("value") is not None:
                 return {"ok": False, "error": "factory takes no stages and no reset"}
+            if overlay is None and (refused := target.mouse.write_refusal("stages")) is not None:
+                # Before the ROM read, as flash_write refuses before its DPI read: one asleep
+                # would get "did not answer" in place of the refusal.
+                raise MouseError(refused)
             factory = self.mice.mouse_call(target.mouse.factory_profile, target=target)
             stages = factory.dpi_stages
             if not stages:
@@ -289,7 +328,6 @@ class ProfileWrites:
             request = {**request, "value": stages,
                        "default": stage_dpi(stages, factory.default_dpi_index),
                        "shift": stage_dpi(stages, factory.shift_dpi_index)}
-        overlay = self.mice.dpi.edits_tuning(target)
         if overlay is not None:
             return self.mice.dpi.tune_stages(target, overlay, request)
         if request.get("reset"):
@@ -311,28 +349,29 @@ class ProfileWrites:
         return reply
 
     @staticmethod
-    def no_button_table(mouse: Mouse, what: str) -> dict:
+    def no_button_table(mouse: Mouse) -> dict:
         """The refusal of a write to the buttons in `mouse`'s onboard profile, whose model has
         no table this build knows (MouseModel.button_table)."""
         return {"ok": False,
-                "error": f"{mouse.name} has no button table this build knows, so {what} is "
-                         f"refused; nothing was written"}
+                "error": f"the {mouse.name} has no button table this build knows, so nothing "
+                         f"was written"}
 
     def _cmd_mouse_enable_buttons(self, request: dict) -> dict:
         target = self.mice.mouse_for(request)
         mouse = target.mouse
         table = mouse.button_table
         if table is None:
-            return self.no_button_table(mouse, "enabling the extra buttons")
+            return self.no_button_table(mouse)
         if target.enable_refused is not None:
             # Before flash_write, which in host mode reads the DPI first: nothing is sent.
             return {"ok": False, "error": target.enable_refused}
         image = self.flash_write(target, mouse.enable_buttons)
-        return {"ok": True, "buttons_enabled": table.all_enabled(image),
-                "enabled_buttons": table.enabled(image),
-                "buttons": mouse.button_words(image),
-                "note": (enable_note(target.name, target.host, mouse.running_profile)
-                         + self.rate_unsent(target))}
+        return aimed(target, {"ok": True, "buttons_enabled": table.all_enabled(image),
+                              "enabled_buttons": table.enabled(image),
+                              "buttons": mouse.button_words(image),
+                              "note": (enable_note(target.name, target.host,
+                                                   mouse.running_profile)
+                                       + self.rate_unsent(target))})
 
     def _cmd_mouse_fallback_buttons(self, request: dict) -> dict:
         """G4 to G9 in profile 1 as the mouse is to run them without Gearbench, through the
@@ -341,12 +380,18 @@ class ProfileWrites:
         mouse = target.mouse
         table = mouse.button_table
         if table is None:
-            return self.no_button_table(mouse, "writing the fallback buttons")
+            return self.no_button_table(mouse)
         image = self.flash_write(target, mouse.write_fallback_buttons)
-        return {"ok": True, "buttons_fallback": table.holds_fallback(image),
-                "buttons": mouse.button_words(image),
-                "note": (fallback_note(target.name, target.host, mouse.running_profile)
-                         + self.rate_unsent(target))}
+        # One stuck in HOST mode runs no profile and its spy is stopped: G4 to G9 keep no
+        # binding, and the fallback waits for profile 1 to run, as outside HOST mode. Not
+        # stuck_in_host_mode, which a put-back that went unanswered (put_back_after_write)
+        # turns false: that leaves the mouse stuck all the same.
+        driven = self.mice.runs_host(target) and not target.host_error
+        return aimed(target, {"ok": True, "buttons_fallback": table.holds_fallback(image),
+                              "buttons": mouse.button_words(image),
+                              "note": (fallback_note(target.name, driven,
+                                                     mouse.running_profile)
+                                       + self.rate_unsent(target))})
 
     def _cmd_mouse_restore(self, request: dict) -> dict:
         target = self.mice.mouse_for(request)
@@ -357,11 +402,10 @@ class ProfileWrites:
             self.gone_after_write(target, before)
             raise
         note = self.flash_note(target)
-        if target.reading is not None and image.report_rate is not None:
-            # What `mouse` answers from: in effect from the write's commit, which in HOST mode
-            # puts the mouse on the stored rate too (flash_write), as mouse_rate's. A rate
+        if image.report_rate is not None and self.in_effect(target):
+            # What `mouse` answers from until the next reading, as mouse_rate's; a rate
             # send_rate gets taken below replaces it.
-            target.reading["report_rate"] = image.report_rate
+            target.on_rate(image.report_rate)
         if target.host:
             # No profile runs in HOST mode: the rate in force goes live (send_rate), as at an
             # arm. Not to a mouse the put-back found not answering (put_back_after_write).
@@ -369,7 +413,7 @@ class ProfileWrites:
             if target not in self.mice.attached:
                 # Torn down at the send: follow_dpi would ask the closed node.
                 self.gone_after_write(target, before)
-                raise MouseError(GONE_AFTER_WRITE)
+                raise MouseError(GONE_AFTER_WRITE.format(target.name))
             if not sent:
                 note += self.rate_owed(target)
         table = target.mouse.button_table
@@ -379,4 +423,4 @@ class ProfileWrites:
         dpi = self.follow_dpi(target, before, image.dpi_stages)
         if dpi is not None:
             reply["dpi"] = dpi
-        return reply
+        return aimed(target, reply)

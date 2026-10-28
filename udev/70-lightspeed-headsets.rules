@@ -1,0 +1,29 @@
+# The headsets Gearbench reaches through their LIGHTSPEED receiver's bridge,
+# and the G522 on its cable: each one's control interface -> uaccess for the
+# seat user.
+#
+# Not read off one: each receiver's interface 03 is taken to hold the
+# control collection, a vendor page, 0xFFA0, with report 0x51 on the PRO X 2
+# LIGHTSPEED's (046d:0af7; HeadsetControl's driver for it, and Solaar's,
+# which a PRO X 2 ran) and report 0x50 on the G522 LIGHTSPEED's (046d:0b18;
+# HeadsetControl's driver for it) and the G325 LIGHTSPEED's (046d:0b21). The
+# G522 on its cable (046d:0b19) is taken to have it there too: Solaar ran
+# one, and no source gives its interface. The G325's owner listed that
+# interface's collections in HeadsetControl issue 581, on a G325: consumer
+# control, which the headset's volume and mute keys send, and two vendor
+# pages, 0xFF13 and 0xFFA0. Granting it gives the seat user those reports
+# and the headset's control on that one node; they carry no keystrokes, and
+# each model's first connect reads its descriptor. The audio interfaces are
+# the sound subsystem, which systemd's 70-uaccess.rules already grants the
+# seat user; this rule adds nothing there.
+#
+# Matched on properties, as 70-g915.rules is, for the reason it gives.
+#
+# install.sh puts this in /usr/local/lib/udev/rules.d/; the .deb puts it in
+# /usr/lib/udev/rules.d/. Either way, reload with:
+#   sudo udevadm control --reload
+#   sudo udevadm trigger --subsystem-match=hidraw --action=add
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0af7", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0b18", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0b19", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0b21", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"

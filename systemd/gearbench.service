@@ -23,18 +23,28 @@ WorkingDirectory=@CHECKOUT@
 #
 # The settings folder first, which ReadWritePaths= below needs. The + runs it
 # outside the sandbox, as the same user: ProtectHome=read-only would stop it
-# creating a folder in ~/.config. A folder the window or the CLI made under the
-# login umask is tightened to 0700 too: install -d -m sets
+# creating a folder in ~/.config. A folder an older version's window or CLI
+# made under the login umask is tightened to 0700 too: install -d -m sets
 # the mode of one that is there, as GNU coreutils 9.7 and uutils 0.10.0 both did
 # (measured 2026-09-29).
 ExecStartPre=+/usr/bin/install -d -m 0700 %E/gearbench
+# Then the runtime folder's rule, which the daemon keeps too, outside the
+# sandbox: under PrivateUsers=yes below, root's files and every other
+# account's show as one overflow id, so the daemon cannot tell another
+# account's folder or link on the way to XDG_RUNTIME_DIR from root's. A missing
+# folder is made here too: left to the daemon, another account could make it
+# first in a folder others may write in, as /tmp, and the daemon would take it
+# for root's. The + keeps Environment= and leaves out the user namespace
+# (systemd 259, exec-invoke.c: setup_private_users runs only where the command is
+# sandboxed; read from the source, not yet checked on a machine).
+ExecStartPre=+/usr/bin/python3 -s -P -m gearbench.runtime_folder
 ExecStart=/usr/bin/python3 -P -m gearbench daemon
 # The keyboard may not be present at login, or may be unplugged later. The
 # daemon reconnects on its own, so a restart here is for a real crash.
 Restart=on-failure
 RestartSec=2
-# The journal names the process python3 otherwise, and `journalctl
-# -t gearbench` would find nothing.
+# The journal names the process after its executable otherwise, and
+# `journalctl -t gearbench` would find nothing.
 SyslogIdentifier=gearbench
 # It used about 23 MB on 2026-09-28. Past the cap the kernel kills it and
 # Restart= starts it again, where a leak would go on to take the session's
@@ -43,9 +53,8 @@ SyslogIdentifier=gearbench
 MemoryMax=256M
 MemorySwapMax=0
 
-# It needs the keyboard's, each mouse's and each headset's hidraw node (the
-# A50 base station's, the G432 adapter's), the G502 X PLUS's event node and
-# /dev/uinput, and nothing else.
+# It needs each keyboard's, mouse's and headset's hidraw node, the
+# G502 X PLUS's event node and /dev/uinput, and nothing else.
 #
 # On Ubuntu with its default AppArmor restriction on unprivileged user
 # namespaces (kernel.apparmor_restrict_unprivileged_userns=1) the six
@@ -71,7 +80,7 @@ ProtectHome=read-only
 # can differ; it compares it with GEARBENCH_SETTINGS_GRANT and logs an error
 # at start. With no "-" in front, a missing folder fails the start with
 # 226/NAMESPACE where the mounts apply (systemd.exec(5)); with one, the daemon
-# would start unable to save. The ExecStartPre above creates the folder, so a
+# would start unable to save. The first ExecStartPre above creates the folder, so a
 # missing one is a real fault.
 Environment="GEARBENCH_SETTINGS_GRANT=%E/gearbench"
 ReadWritePaths=%E/gearbench

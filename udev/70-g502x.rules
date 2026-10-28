@@ -3,15 +3,16 @@
 #
 # Matched by the mouse's HID device name rather than by udev properties.
 # The mouse is paired through a receiver, and its hidraw node inherits the
-# receiver's properties verbatim: /dev/hidraw9 and the receiver's own
-# interface 2 both report ID_MODEL_ID=c547 and ID_USB_INTERFACE_NUM=02, so a
+# receiver's properties verbatim: it and the receiver's own interface 2
+# both report ID_MODEL_ID=c547 and ID_USB_INTERFACE_NUM=02, so a
 # property match cannot tell them apart and would grant access to the
 # receiver's raw interfaces as well.
 #
 # That distinction is the point. A Lightspeed receiver can have a keyboard
 # paired to it too, and its interfaces carry the input reports of everything
-# paired. The device node below carries only this mouse's reports, its motion
-# and buttons as well as its HID++ traffic, but for the exception below.
+# paired. The device node below carries only this mouse's reports, its motion,
+# its buttons, the keystrokes of a button its onboard profile binds to a key
+# and its HID++ traffic, but for the exception below.
 #
 # Pair nothing else to this mouse's receiver. Read from the kernel's
 # hid-logitech-dj.c on 2026-09-27 and not checked on hardware: the driver
@@ -23,6 +24,17 @@
 # the daemon warns in the journal once each time the mouse attaches, and
 # `gearbench-ctl status`, the tray and the Mouse tab show the warning until
 # the mouse detaches.
+#
+# The mouse's own keystrokes arrive the same way. A button its onboard profile
+# binds to a key or a macro, whenever that profile runs (host mode off or not
+# taken, or the daemon stopped), types on this node and the event node below,
+# the mouse being the first device taking keyboard reports while it is paired
+# alone. This node's report descriptor in sysfs opens with a keyboard
+# collection, report 1 (read 2026-10-25); a bound key arriving here is not
+# checked on hardware. Like /dev/uinput's, this grant crosses accounts: on a
+# machine several people use, the group grant 70-gearbench-uinput.rules'
+# comment gives, in a copy of this file in /etc/udev/rules.d/, limits it to
+# the group's accounts, whose programs then open it from any session.
 #
 # KERNELS matches a parent's kernel name, which for the paired device is
 # bus:vendor:product.instance -> 0003:046D:4099.<n>.
@@ -53,7 +65,8 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0003:046D:4099.*", TAG+="uacce
 #
 # What this does and does not expose: the node carries what this mouse emits,
 # its motion and buttons, with G4 to G9 as buttons 11-16 after
-# mouse-enable-buttons. It does not carry the G915's keystrokes, which come on
+# mouse-enable-buttons, and the keystrokes of a button its onboard profile
+# binds to a key (above). It does not carry the G915's keystrokes, which come on
 # the G915's own interfaces that no rule here grants; a keyboard paired to
 # this mouse's receiver is the exception above. ID_INPUT_MOUSE bounds it to
 # pointer-capable nodes, so a second node the mouse might expose is not swept
@@ -71,8 +84,9 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0003:046D:4099.*", TAG+="uacce
 # and none can write events to it. The evdev ioctls do not check the open
 # mode, though: a member's program holding it open, read-only, can still grab
 # it (EVIOCGRAB, which takes the mouse from the session until it lets go) or
-# remap its buttons (EVIOCSKEYCODE) until a replug (read from the kernel's
-# source on 2026-09-28, not checked on hardware). The
+# remap its buttons (EVIOCSKEYCODE), so a click types a key, until a replug
+# (read from the kernel's source on 2026-09-28; the remap measured on a G502
+# X PLUS on 2026-10-25, the replug not). The
 # input group, which udev's default rules give
 # every event node, loses it; the compositor opens it through logind and
 # keeps it. udev looks the group up when it reads this file and drops the
@@ -83,15 +97,11 @@ SUBSYSTEM=="input", KERNELS=="0003:046D:4099.*", KERNEL=="event*", ENV{ID_INPUT_
 # The same mouse, cabled (046d:c095).
 #
 # Read off the hardware on 2026-09-22: cabled it has a USB identity of its
-# own and three interfaces, exactly like the keyboard. 00 is the pointer
-# (usage page 0x01, usage 0x02), 01 is a keyboard collection (usage 0x06),
-# and 02 is the vendor HID++ collection (usage page 0xFF00). So the property
-# match that cannot work through the receiver works here, and it is scoped
-# the same way the keyboard's is.
-#
-# Interface 01 is deliberately absent. This mouse has a keyboard collection
-# of its own, so the reasoning that keeps the daemon off the keyboard's
-# interfaces 00 and 01 applies to the mouse just as much.
+# own and three interfaces, as the keyboard has. 00 is the pointer (usage
+# page 0x01, usage 0x02), 01 is a keyboard collection (usage 0x06), and 02
+# is the vendor HID++ collection (usage page 0xFF00). So the property match
+# that cannot work through the receiver works here, scoped as the
+# keyboard's is: the keyboard collection on 01 gets nothing.
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c095", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"
 
 # The pointer's event node, for the extra buttons -- interface 00 only, for

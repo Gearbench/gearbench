@@ -14,5 +14,7 @@ A security problem is anything that lets another program or another account:
 - have Gearbench write a file or run a command it would not otherwise;
 - have Gearbench send a device something it would not send otherwise.
 
+Supported versions: the latest release.
+
 Say which version you run (`gearbench-ctl --version`), what you did and what
 happened. The fix comes in a new release.

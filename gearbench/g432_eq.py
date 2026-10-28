@@ -1,5 +1,6 @@
-"""The Logitech G432's equalizer: a PipeWire filter chain, its presets and their gains, the
-transient user unit that runs it, and what PipeWire says of it.
+"""The equalizer of the Logitech G432, and of each headset of its family with none of its own
+(EQ_MODELS): a PipeWire filter chain that plays the active preset of gearbench.g432_presets,
+the transient user unit that runs it, and what PipeWire says of it.
 
 Logitech G432 Equalizer is a stereo sink whose output plays to the G432's own output and
 no other: a bass shelf, ten peaking filters at G HUB's bands and a treble shelf, PipeWire's
@@ -7,283 +8,135 @@ own builtin filters, with no preamp, so a boost is a boost on top of the volume.
 the active one of its presets, each a name and its gains, kept in g432-eq.json. Off by
 default. On is `gearbench-g432-eq.service` running: a transient unit that `systemd-run
 --user` makes for `render`'s conf, so it is off again after a logout, and off
-stops it, which removes the sink. While it runs the G432's own output is held at 0 dB, so
-the equalizer's volume is the one that applies: on gives the equalizer the G432's volume
-and off gives the G432 the equalizer's, each as loud as the other was. While it runs, a
-second transient unit, `gearbench-g432-eq-watch.service`, runs `python3 -m
-gearbench.g432_eq watch`, which follows PipeWire and holds a G432 plugged back in at 0 dB
-again. On while the G432's own output is the default makes the equalizer the default; off
-while it is the default output makes the G432's own output the default, and with the G432
-unplugged then, the next on makes the equalizer the default again. A gain change while it
-runs is set live with `pw-cli`. Gearbench Spatial, while it plays to the G432, goes
-through the equalizer while its sink is in PipeWire (gearbench.spatial_unit), so on waits
-for it to move there before the hold. Standard library only, never run in the daemon; every
-outside program goes through a `run` argument and `spatial.run_program`, but for the watch's
-pw-dump, which goes through `main`'s `spawn`, and a failure is a `spatial.SpatialError` in
-words.
+stops it, which removes the sink. While it runs the G432's own output is held at 0 dB and
+unmuted, so the equalizer's volume and mute are the ones that apply: on gives the equalizer
+the G432's volume and mute and off gives the G432 the equalizer's, each as loud as the other
+was. While it runs, a second transient unit, `gearbench-g432-eq-watch.service`, runs
+`python3 -m gearbench.g432_eq watch`, which follows PipeWire and holds a G432 plugged back
+in at 0 dB and unmuted again. On while the G432's own output is the default makes the equalizer the
+default; off while it is the default output makes the G432's own output the default, and
+with that output gone then (the G432 unplugged, or its card on a profile with no output),
+the next on makes the equalizer the default again. A gain
+change while it runs is set live with `pw-cli`. Gearbench Spatial, while it plays to the
+G432, goes through the equalizer while the sink its unit's process made is in PipeWire
+(gearbench.spatial_unit), so on waits for it to move there before the hold, and for
+anything else that plays straight to the G432's own output to leave it: a stream with an
+output of its own that stays leaves the G432 unheld. So does a volume the sink did not take,
+or a failed pick of the sink as the default while the G432's own output is it, with no wait.
+
+Another model's equalizer is the G432's under the model's own names and sentences, from its
+key and its name (gearbench.g432_eq_words): Logitech G733 Equalizer,
+`gearbench-g733-eq.service`, g733-eq.json. The functions take the model as `model`, the G432
+by default for a caller outside this module (the ones only this module calls require it), and
+the module's constants are the G432's. Standard library only, never run in the daemon; every
+outside program goes through a `run` argument and `pipewire_client.run_program`, but for the
+watch's pw-dump, which goes through `main`'s `spawn`, and a failure is a
+`pipewire_client.StepError` in words.
 """
 
 from __future__ import annotations
 
 import json
-import math
 import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from itertools import pairwise
 from pathlib import Path
 from typing import IO, cast
 
-from . import config, eq_presets, pipewire_unit, spatial, wording
-from .eq_presets import PRESETS_FULL, PRESETS_MAX, preset_name
+from . import (
+    eq_presets,
+    pipewire_client,
+    pipewire_unit,
+    runtime_folder,
+    settings_files,
+    spatial,
+    wording,
+)
+from .g432 import G432_MODEL, HeadsetModel
+from .g432_eq_words import EQ_KEYED, WORDS
+from .g432_presets import (
+    BAND_FREQS,
+    BAND_Q,
+    BASS_FREQ,
+    SHELF_Q,
+    TREBLE_FREQ,
+    Gains,
+    Presets,
+    checked,
+    edit,
+    load_gains,
+    load_presets,
+    presets_file_name,
+)
+from .wording import hertz, numbered, signed
 
-UNIT = "gearbench-g432-eq.service"
-#: The name in the journal of the unit that watches for the G432's return while UNIT runs.
-WATCH_NAME = "gearbench-g432-eq-watch"
-WATCH_UNIT = f"{WATCH_NAME}.service"
-SINK = "gearbench-g432-eq"
-OUTPUT = "gearbench-g432-eq.output"
-DESCRIPTION = "Logitech G432 Equalizer"
-CONF_NAME = "gearbench-g432-eq.conf"
-#: Beside the conf, what switch_on and switch_off keep between them (Record). The runtime
-#: folder goes at a logout, and so does the hold: it is set unsaved, so WirePlumber gives
-#: the G432 the level it saved at its next start or plug-in. A PipeWire restart ends the
-#: hold and keeps the file, so its level counts only while the G432 is held (is_held).
-RECORD_NAME = "gearbench-g432-eq.json"
+#: The G432's words, the default model's, under the module's own names.
+G432_WORDS = WORDS[G432_MODEL.key]
+UNIT = G432_WORDS.unit
+WATCH_NAME = G432_WORDS.watch_name
+SINK = G432_WORDS.sink
+OUTPUT = G432_WORDS.output
+DESCRIPTION = G432_WORDS.description
+CONF_NAME = G432_WORDS.conf_name
+RECORD_NAME = G432_WORDS.record_name
 #: The sink's channels, FL and FR in the template.
 CHANNELS = 2
 #: The most switch_on gives the sink, its 100 %: above it the sink adds gain of its own,
 #: which clips a loud passage before the G432 under it, where the G432's own volume above
 #: 0 dB was the adapter's.
 CARRY_MAX = 1.0
-#: G HUB's headset bands, an octave apart (its app.min.js), and its slider, in whole dB.
-BAND_FREQS = (32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)
-DB_RANGE = (-12, 12)
-#: Assumed, since no source gives them: a one-octave peak's Q, the square root of 2, and
-#: the shelves' corners and Q, one over the square root of 2, a slope with no bump. G
-#: HUB's bass and treble give no frequency.
-BAND_Q = round(math.sqrt(2), 2)
-SHELF_Q = round(1 / math.sqrt(2), 2)
-BASS_FREQ = 100
-TREBLE_FREQ = 8000
-#: PipeWire's default clock.rate, which the chain runs at: a filter's frequency is below
-#: half of it, the highest a biquad at that rate has.
-RATE = 48000
-
-NO_G432 = (f"No Logitech G432 output in PipeWire: plug in the headset's USB adapter, then "
-           f"switch {DESCRIPTION} on again.")
-#: The G432's card in PipeWire on a profile with no output: its input alone, or off. Not yet
-#: checked on a G432.
-NO_OUTPUT = ("The Logitech G432's sound profile has no output: pick one with its output in the "
-             f"sound settings, then switch {DESCRIPTION} on again.")
-NO_RUNTIME = f"XDG_RUNTIME_DIR is not set, so {DESCRIPTION}'s files have nowhere to go."
-#: switch_on's note when the sink could not take the G432's volume, with the cause; the
-#: G432 is then not held, so the sink's first volume, 1.0, is never over a G432 at 0 dB.
-NOT_CARRIED = ("The G432's own volume stayed where it was. Setting "
-               f"{DESCRIPTION}'s volume to match it failed ({{}}), so both volumes apply.")
-#: Why there was no sink to set: the unit's process made none in time.
-NO_SINK = f"{DESCRIPTION} did not show in PipeWire within {spatial.SETTLE:g} s"
-#: switch_on's refusal when the unit stopped as it started, before any pick or hold.
-STOPPED = pipewire_unit.STOPPED.format(DESCRIPTION, UNIT)
-#: switch_on's note when the G432's own output could not be held, with the cause.
-NOT_HELD = ("The G432's own volume stayed where it was. Setting it to 0 dB failed ({}), so "
-            f"{DESCRIPTION}'s volume and the G432's both apply.")
-#: switch_off's note when the G432's own volume could not be put back: the cause, then the
-#: level in GNOME's percent.
-NOT_PUT_BACK = ("The G432's own volume is still at 0 dB. Putting it back failed ({}); set it "
-                "to {}% in GNOME's Sound settings.")
-#: Why there is nothing to hold: the G432's card gives no route of the shape find_route reads.
-NO_ROUTE = "PipeWire gives no volume for the G432's output"
-#: The notes for the default output: switch_off's when the equalizer was it, and switch_on's
-#: when the equalizer was it before it went off with the G432 unplugged or the G432's own
-#: output is it.
-MOVED = "The G432's own output is the default output now."
-NOT_MOVED = ("The default output did not move to the G432's own output. Picking it failed "
-             "({}); pick an output in GNOME's Sound settings.")
-MOVED_NOWHERE = (f"{DESCRIPTION} was the default output. With the G432 unplugged, PipeWire "
-                 "picks another.")
-RESELECTED = f"{DESCRIPTION} is the default output again."
+NO_G432 = G432_WORDS.no_headset
+NO_OUTPUT = G432_WORDS.no_output
+NOT_CARRIED = G432_WORDS.not_carried
+NO_SINK = G432_WORDS.no_sink
+STOPPED = G432_WORDS.stopped
+NOT_HELD = G432_WORDS.not_held
+NOT_PUT_BACK = G432_WORDS.not_put_back
+NOT_PUT_BACK_MUTED = G432_WORDS.not_put_back_muted
+NO_ROUTE = G432_WORDS.no_route
+MOVED = G432_WORDS.moved
+NOT_MOVED = G432_WORDS.not_moved
+MOVED_NOWHERE = G432_WORDS.moved_nowhere
+RESELECTED = G432_WORDS.reselected
 #: Why a pick of the default output did not go: WirePlumber keeps the "default" metadata.
 NO_METADATA = "pw-metadata found no default metadata, which WirePlumber keeps"
-NOT_RESELECTED = (f"{DESCRIPTION} did not become the default output again. Picking it failed "
-                  "({}); pick it in GNOME's Sound settings.")
-SELECTED = f"{DESCRIPTION} is the default output now."
-#: switch_on's note when the G432's own output is the default and stays so: the G432 is
-#: then not held, so what plays there is never louder.
-NOT_SELECTED = (f"{DESCRIPTION} did not become the default output. Picking it failed ({{}}), "
-                f"so the G432 keeps its own volume; switch {DESCRIPTION} off and on again to "
-                "try once more.")
-#: switch_on's note when Gearbench Spatial plays to the G432 and did not move to the
-#: equalizer within spatial.SETTLE: the G432 is then not held, so spatial sound, still
-#: played straight to it, is never louder.
-SPATIAL_NOT_MOVED = (f"{spatial.DESCRIPTION} did not move to {DESCRIPTION} within "
-                     f"{spatial.SETTLE:g} s. The G432's own volume stayed where it was; "
-                     f"switch {DESCRIPTION} off and on again to try once more.")
-#: switch_on's note when the watch for the G432's return did not start, with the cause.
-NO_WATCH = ("Gearbench is not watching for the G432's return. Starting the watch failed "
-            "({}): if the G432 is unplugged and plugged back in, switch "
-            f"{DESCRIPTION} off and on again to hold it at 0 dB.")
-#: After the G432 returns, how long the watch holds its route again each time it shows
-#: another volume, in seconds: WirePlumber 0.5.13 sets a returning card's routes more than
-#: once, from the levels it stored (select-routes.lua, state-routes.lua). Assumed, not
-#: timed on the G432.
+#: Why a pick that went did not show: WirePlumber did not make it the default in time.
+NOT_SHOWN = f"WirePlumber did not make it the default within {pipewire_client.SETTLE:g} s"
+NOT_RESELECTED = G432_WORDS.not_reselected
+SELECTED = G432_WORDS.selected
+NOT_SELECTED = G432_WORDS.not_selected
+SPATIAL_NOT_MOVED = G432_WORDS.spatial_not_moved
+SPATIAL_UNREAD = G432_WORDS.spatial_unread
+PLAYED_STRAIGHT = G432_WORDS.played_straight
+STRAIGHT_UNREAD = G432_WORDS.straight_unread
+NO_WATCH = G432_WORDS.no_watch
+#: After the headset returns, how long the watch holds its route again each time it shows
+#: another volume or a mute, in seconds: WirePlumber 0.5.13 sets a returning card's routes more
+#: than once, from the levels and mute it stored (select-routes.lua, state-routes.lua).
+#: Assumed, not timed on the G432.
 RETURN_WINDOW = 5.0
 #: How near volumeBase a channel counts as held: pw-cli sets six places, which PipeWire
 #: keeps as a 32-bit float.
 HELD_TOLERANCE = 1e-5
-#: The watch's journal lines.
-WATCH_HELD = f"{WATCH_NAME}: the G432 is back; its own output is at 0 dB again"
-WATCH_UNREAD = spatial.UNREAD.format(WATCH_NAME)
-WATCH_ENDED = (f"{WATCH_NAME}: pw-dump --monitor ended ({{}}), so a G432 plugged back in "
-               "stays at its own volume")
-#: update's failure after its save, with the cause: said as saved, so a retry does not make
-#: the change again, as a second --save-as would save a second preset.
-NOT_SET_LIVE = (f"The change is saved, but was not set on {DESCRIPTION} ({{}}); "
-                "it applies at its next start.")
+WATCH_HELD = G432_WORDS.watch_held
+WATCH_UNREAD = G432_WORDS.watch_unread
+WATCH_ENDED = G432_WORDS.watch_ended
+WATCH_NO_CHAIN = G432_WORDS.watch_no_chain
+NOT_SET_LIVE = G432_WORDS.not_set_live
+#: The watch's command line: the G432's alone, or another model's by its key.
+USAGE = (f"usage: python3 -m gearbench.g432_eq watch "
+         f"[{'|'.join(key for key in EQ_KEYED if key != G432_MODEL.key)}]")
 
 
-class EqError(spatial.SpatialError):
-    """A step that failed, or gains or a filter the chain cannot take, in words."""
+class EqError(pipewire_client.StepError):
+    """A step that failed, in words."""
 
 
 class NotSetLive(EqError):
-    """update's failure after its save, NOT_SET_LIVE's sentence: the change is kept."""
-
-
-@dataclass(frozen=True)
-class Gains:
-    """Each band's gain in dB, in BAND_FREQS' order, and the shelves'."""
-
-    bands: tuple[int, ...] = (0,) * len(BAND_FREQS)
-    bass: int = 0
-    treble: int = 0
-
-    def all(self) -> tuple[int, ...]:
-        """Every gain, in the order the sound goes through the filters."""
-        return (self.bass, *self.bands, self.treble)
-
-
-@dataclass(frozen=True)
-class Preset:
-    """One preset: its name and its gains."""
-
-    name: str
-    gains: Gains
-
-
-#: The shipped presets' defaults, which Reset to default puts back: the three aims of
-#: the A50's presets, designed for the G432 against Harman over-ear 2018 from RTINGS' and
-#: Gadgetry Tech's published measurements of it, then each gain times 2.5, rounded half
-#: away from zero, since the gains as designed were too subtle on a G432 by ear (the
-#: owner's decision of 2026-10-18). There is no preamp, so near full volume a boost can
-#: clip.
-DEFAULT_PRESETS = (
-    Preset("Rock and Alt", Gains(bands=(0, 5, -5, -5, -3, 0, 3, 8, 3, 0), bass=8, treble=5)),
-    Preset("FPS Spatial", Gains(bands=(0, 3, -5, -3, 0, 0, 8, 10, 0, 0), bass=-5, treble=3)),
-    Preset("Everyday", Gains(bands=(0, 3, -3, -3, 0, 0, 5, 8, 3, 0), bass=5, treble=3)),
-)
-#: The shipped presets' numbers, as the tab and the CLI give them; a preset saved as new
-#: takes the next number after the last.
-SHIPPED = tuple(range(1, len(DEFAULT_PRESETS) + 1))
-#: The preset played with no file: Everyday, the daily one, in place of a flat one.
-DEFAULT_ACTIVE = 3
-#: g432-eq.json's version since the presets; a file with no version is version 1's
-#: gains alone.
-PRESETS_VERSION = 2
-#: The name a version 1 file's gains take as preset 1, unless they are all 0 dB.
-CUSTOM = "Custom"
-#: Where a version 1 file's bytes are kept, in the settings folder's backups, before its
-#: first save as version 2.
-BACKUP_NAME = "g432-eq.v1.json"
-
-
-#: Why a preset saved as new has no Reset to default, and why a shipped one is not deleted.
-NO_DEFAULT = "Preset {} was saved as new, so it has no default to go back to."
-NO_DELETE = "Preset {} ships with Gearbench and stays; a reset puts its default back."
-#: Why a g432-eq.json that does not read takes no change: the presets in it are the user's
-#: own, so it is never written over. The file's path, then the cause.
-UNREAD = ("{} could not be read ({}), so the equalizer plays the shipped presets and "
-          "Gearbench leaves the file as it is: fix it, or move it away to start from them.")
-
-
-class PresetsRefused(config.ConfigError):
-    """A change to g432-eq.json while it does not read or was read in part (Presets.whole):
-    UNREAD's sentence or eq_presets.PARTIAL's."""
-
-
-@dataclass(frozen=True)
-class Presets:
-    """The presets, preset 1 first: the shipped ones, then those saved as new, the number
-    of the active one, which the chain plays, and `refused`, UNREAD's sentence for a file
-    that does not read, which plays the defaults, or eq_presets.PARTIAL's for one read with
-    presets left out; empty for a file read whole or presets made here."""
-
-    active: int = DEFAULT_ACTIVE
-    presets: tuple[Preset, ...] = DEFAULT_PRESETS
-    refused: str = ""
-
-    @property
-    def numbers(self) -> tuple[int, ...]:
-        return tuple(range(1, len(self.presets) + 1))
-
-    def number(self, value: object) -> int:
-        """`value` if it is one of these presets' numbers, else ValueError in words."""
-        if not wording.whole(value) or value not in self.numbers:
-            raise ValueError(f"A preset is a number from 1 to {len(self.presets)}, not "
-                             f"{wording.written(value)}.")
-        return value
-
-    def get(self, number: int) -> Preset:
-        return self.presets[number - 1]
-
-    def whole(self) -> Presets:
-        """These presets, or PresetsRefused while the file did not read or left some out
-        (`refused`): a save would write over what it holds."""
-        if self.refused:
-            raise PresetsRefused(self.refused)
-        return self
-
-    @property
-    def current(self) -> Preset:
-        return self.get(self.active)
-
-    def put(self, number: int, preset: Preset) -> Presets:
-        """These presets with `preset` in `number`'s place."""
-        presets = list(self.presets)
-        presets[number - 1] = preset
-        return replace(self, presets=tuple(presets))
-
-    def with_gains(self, number: int, gains: Gains) -> Presets:
-        return self.put(number, replace(self.get(number), gains=gains))
-
-    def named(self, number: int, name: str) -> Presets:
-        return self.put(number, replace(self.get(number), name=name))
-
-    def reset(self, number: int) -> Presets:
-        """These presets with `number`, a shipped one, back to its default, its name and
-        its gains; ValueError for one saved as new, which has none."""
-        if number not in SHIPPED:
-            raise ValueError(NO_DEFAULT.format(number))
-        return self.put(number, DEFAULT_PRESETS[number - 1])
-
-    def deleted(self, number: int) -> Presets:
-        """These presets without `number`, one saved as new, those after it a number lower;
-        the active one plays on, or, for `number` itself, the preset before it.
-        ValueError for a shipped one, which a reset puts back to its default."""
-        if number in SHIPPED:
-            raise ValueError(NO_DELETE.format(number))
-        active = self.active - 1 if self.active >= self.number(number) else self.active
-        return Presets(active, self.presets[:number - 1] + self.presets[number:])
-
-    def saved_as(self, name: str) -> Presets:
-        """These presets with the active one's gains saved as a new preset, `name`, after
-        the last, which becomes the active one; ValueError at PRESETS_MAX."""
-        if len(self.presets) >= PRESETS_MAX:
-            raise ValueError(PRESETS_FULL)
-        return Presets(len(self.presets) + 1,
-                       (*self.presets, Preset(preset_name(name), self.current.gains)))
+    """update's failure after its save, Words.not_set_live's sentence: the change is kept."""
 
 
 @dataclass(frozen=True)
@@ -299,36 +152,23 @@ class Filter:
 
 
 @dataclass(frozen=True)
-class Route:
-    """The G432's output as its card's Route param gives it: the card Device's id, the
-    route's index and device, each channel's volume, and volumeBase, the volume at which
-    the adapter's own is at 0 dB: PipeWire's ACP sets the hardware volume to the volume
-    over volumeBase, which it takes from the mixer path's highest dB (acp.c's
-    mixer_volume_init and set_volume, read 2026-10-17)."""
-
-    card: int
-    index: int
-    device: int
-    volumes: tuple[float, ...]
-    base: float
-
-
-@dataclass(frozen=True)
 class Record:
-    """What switch_on and switch_off keep in RECORD_NAME between them: the G432's own
-    volume from before the hold, each channel's, which marks a hold switch_off has to undo
-    and is what it puts back when the equalizer's volume cannot be read, while the G432's
-    route is at volumeBase (is_held; stale_record_dropped forgets it), and whether the
-    equalizer was the default output when it went off with the G432 unplugged, for
-    switch_on to make it the default again."""
+    """What switch_on and switch_off keep in Words.record_name between them: the headset's
+    own volume from before the hold, each channel's, which marks a hold switch_off has to
+    undo and is what it puts back when the equalizer's volume cannot be read, while the
+    headset's route is at volumeBase (is_held; stale_record_dropped forgets it); whether the
+    headset's own output was muted then, which the hold clears and which goes with that
+    volume; and whether the equalizer was the default output when it went off with the
+    headset's own output gone, for switch_on to make it the default again."""
 
     volumes: tuple[float, ...] | None = None
+    muted: bool = False
     reselect: bool = False
 
 
 @dataclass(frozen=True)
 class Seen:
-    """What the watch saw at pw-dump's last print: whether the G432's route was there,
+    """What the watch saw at pw-dump's last print: whether the headset's route was there,
     until when, after the print that showed it again, the watch holds it again, and whether
     it said that return's hold."""
 
@@ -340,143 +180,9 @@ class Seen:
 @dataclass(frozen=True)
 class State(pipewire_unit.UnitState):
     sink_id: int | None = None        # the chain's sink, made by the unit's process
-    target: str | None = None         # the G432's output's node name, None while unplugged
+    target: str | None = None         # the headset's output's node name, None while it has none
     linked: bool = False              # a link from the chain's output to that output
-    presets: Presets = Presets()
-
-
-def hertz(freq: int) -> str:
-    """A frequency as the tab and the CLI give it: 500 Hz, 2 kHz."""
-    return f"{freq // 1000} kHz" if freq >= 1000 else f"{freq} Hz"
-
-
-def signed(gain: int) -> str:
-    return f"{gain:+d} dB"
-
-
-def checked(gains: Gains) -> Gains:
-    """`gains`, or ValueError naming the first that is not a whole dB in DB_RANGE."""
-    low, high = DB_RANGE
-    if len(gains.bands) != len(BAND_FREQS):
-        raise ValueError(f"The equalizer has {len(BAND_FREQS)} bands, not {len(gains.bands)}.")
-    names = ("bass", *(hertz(freq) for freq in BAND_FREQS), "treble")
-    for name, gain in zip(names, gains.all(), strict=True):
-        if not wording.whole(gain) or not low <= gain <= high:
-            raise ValueError(f"The {name} gain is a whole number of dB from {low} to "
-                             f"{high}, not {wording.written(gain)}.")
-    return gains
-
-
-def gains_path() -> Path:
-    return config.config_dir() / "g432-eq.json"
-
-
-def _gain(value: object) -> int:
-    """A saved gain, 0 for one that is not a whole dB in DB_RANGE."""
-    low, high = DB_RANGE
-    return value if wording.whole(value) and low <= value <= high else 0
-
-
-def _gains_of(data: dict) -> Gains:
-    """The gains a saved preset holds, each 0 where it lacks one or holds one out of range,
-    and every band 0 for a list of bands of another length."""
-    bands = data.get("bands")
-    return Gains(bands=tuple(map(_gain, bands)) if isinstance(bands, list)
-                 and len(bands) == len(BAND_FREQS) else Gains().bands,
-                 bass=_gain(data.get("bass")), treble=_gain(data.get("treble")))
-
-
-def _preset_of(entry: object, default: Preset) -> Preset:
-    """A saved preset: `default` for one that is not an object, its name for a name
-    eq_presets.is_name refuses."""
-    if not isinstance(entry, dict):
-        return default
-    name = entry["name"] if eq_presets.is_name(entry.get("name")) else default.name
-    return Preset(name, _gains_of(entry))
-
-
-def _added(data: object, saved: list) -> tuple[list[tuple[int, Preset]], list[str]]:
-    """The presets saved as new in a version 2 file's `data`, `saved` its entries, past the
-    shipped ones, each with its number in the file, and what was left out
-    (eq_presets.read_each): a `presets` that is neither a list nor null, each preset that is
-    not an object or has a name preset_name refuses, and those past PRESETS_MAX."""
-    added, left_out = eq_presets.read_each(
-        data, saved, lambda entry: Preset(preset_name(entry.get("name")), _gains_of(entry)),
-        len(SHIPPED))
-    if (past := len(SHIPPED) + len(added) - PRESETS_MAX) > 0:
-        left_out.append(f"{wording.counted(past, 'preset')} past the {PRESETS_MAX}th")
-    return added[:PRESETS_MAX - len(SHIPPED)], left_out
-
-
-def presets_of(data: object, path: Path) -> Presets:
-    """The presets in `data`, g432-eq.json's at `path`. Version 1's gains are preset 1,
-    CUSTOM, the active one, unless they are all 0 dB, which are the defaults. In version 2
-    each shipped preset is read on its own (_preset_of), a list too short for them keeps
-    the defaults past its end, each saved as new after them is kept if it reads (_added),
-    up to PRESETS_MAX in all, and the active one is the preset the file's `active`
-    numbered, DEFAULT_ACTIVE when that one was left out or is no preset. Presets that are
-    neither a list nor null, and each preset left out, give eq_presets.PARTIAL's sentence
-    (`refused`); data of another shape or version is the defaults, with UNREAD's."""
-    if isinstance(data, dict) and "version" not in data:
-        gains = _gains_of(data)
-        return (Presets() if gains == Gains()
-                else replace(Presets().put(1, Preset(CUSTOM, gains)), active=1))
-    saved = eq_presets.entries(data, PRESETS_VERSION)
-    if saved is None:
-        why = eq_presets.unread_why(data, PRESETS_VERSION)
-        return Presets(refused=eq_presets.sentence(UNREAD, path, why))
-    presets = tuple(_preset_of(saved[index] if index < len(saved) else None, default)
-                    for index, default in enumerate(DEFAULT_PRESETS))
-    # Past the shipped ones a preset saved as new has no default: one that does not read
-    # is left out, and the active one is found by its number in the file.
-    added, left_out = _added(data, saved)
-    numbers = [*SHIPPED, *(number for number, _preset in added)]
-    active = cast("dict", data).get("active")
-    return Presets(numbers.index(active) + 1 if wording.whole(active) and active in numbers
-                   else DEFAULT_ACTIVE,
-                   (*presets, *(preset for _number, preset in added)),
-                   eq_presets.sentence(eq_presets.PARTIAL, path, "; ".join(left_out))
-                   if left_out else "")
-
-
-def load_presets() -> Presets:
-    """The saved presets, the defaults with no file. A file that does not read gives the
-    defaults, and one read in part the presets it held that read, each refusing a change
-    (Presets.refused)."""
-    target = gains_path()
-    try:
-        data = config.read_json(target)
-    except FileNotFoundError:
-        return Presets()
-    except (OSError, config.ConfigError) as exc:
-        why = config.unprefixed(wording.reason(exc), target)
-        return Presets(refused=eq_presets.sentence(UNREAD, target, why))
-    return presets_of(data, target)
-
-
-def load_gains() -> Gains:
-    """The active preset's gains, which the chain plays."""
-    return load_presets().current.gains
-
-
-def save_presets(presets: Presets) -> None:
-    """The presets to g432-eq.json, atomically, each checked first. A version 1 file's
-    bytes go to the backups first (config.keep_old_version), once."""
-    if not len(SHIPPED) <= len(presets.presets) <= PRESETS_MAX:
-        raise ValueError(f"g432-eq.json holds {len(SHIPPED)} to {PRESETS_MAX} presets, not "
-                         f"{len(presets.presets)}.")
-    for preset in presets.presets:
-        checked(preset.gains)
-        preset_name(preset.name)
-    presets.number(presets.active)
-    target = gains_path()
-    # Version 1 is the only one before PRESETS_VERSION, so BACKUP_NAME's.
-    config.keep_old_version(target, lambda _version: config.backup_dir() / BACKUP_NAME,
-                            PRESETS_VERSION)
-    eq_presets.write(target, PRESETS_VERSION, {"active": presets.active},
-                     [{"name": preset.name, "bands": preset.gains.bands,
-                       "bass": preset.gains.bass, "treble": preset.gains.treble}
-                      for preset in presets.presets], ".g432-eq-")
+    presets: Presets = field(default_factory=Presets)
 
 
 def filters(gains: Gains) -> list[Filter]:
@@ -501,26 +207,28 @@ def graph_lines(gains: Gains) -> tuple[list[str], list[str], str, str]:
     return nodes, links, f"{chain[0].name}:In", f"{chain[-1].name}:Out"
 
 
-def render(gains: Gains, target: str) -> str:
-    """The chain's conf for `gains`, its output aimed at `target`, the G432's output."""
+def render(gains: Gains, target: str, *, model: HeadsetModel = G432_MODEL) -> str:
+    """The chain's conf for `gains`, its output aimed at `target`, the headset's output."""
     checked(gains)
-    if not target or spatial.NOT_IN_CONF.search(target):
-        raise EqError(f"the G432's output, {wording.escaped(target)}, cannot be named in "
-                      "the chain's conf")
+    named = WORDS[model.key]
+    if not target or pipewire_client.NOT_IN_CONF.search(target):
+        raise EqError(named.not_named.format(wording.escaped(target)))
     nodes, links, first, last = graph_lines(gains)
     indent = " " * 20
     return TEMPLATE.format(nodes="\n".join(indent + line for line in nodes),
                            links="\n".join(indent + line for line in links),
                            first=first, last=last, channels=CHANNELS,
-                           description=DESCRIPTION, sink=SINK, output=OUTPUT, target=target,
-                           client_context=spatial.CLIENT_CONTEXT,
-                           client_modules=spatial.CLIENT_MODULES)
+                           description=named.description, sink=named.sink,
+                           output=named.output, target=target,
+                           presets_name=presets_file_name(model), unit=named.unit,
+                           short=model.short, client_context=pipewire_client.CLIENT_CONTEXT,
+                           client_modules=pipewire_client.CLIENT_MODULES)
 
 
 TEMPLATE = """\
 # Gearbench: {description}. Gearbench writes this file from the active
-# preset's gains in its g432-eq.json at each switch-on, and a transient
-# user unit, gearbench-g432-eq.service, runs it: pipewire -c <this file>.
+# preset's gains in its {presets_name} at each switch-on, and a transient
+# user unit, {unit}, runs it: pipewire -c <this file>.
 #
 # A bass shelf, ten peaking filters an octave apart and a treble shelf:
 # PipeWire's builtin biquads, with no preamp, so a boost is a boost on top of
@@ -551,7 +259,7 @@ context.modules = [
             capture.props = {{
                 node.name   = "{sink}"
                 media.class = Audio/Sink
-                # Gearbench sets its volume at each switch-on, to the G432's
+                # Gearbench sets its volume at each switch-on, to the {short}'s
                 # own: WirePlumber 0.5.13 neither restores a volume it saved
                 # nor saves one for a node with this (state-stream.lua).
                 state.restore-props = false
@@ -560,7 +268,7 @@ context.modules = [
                 node.name          = "{output}"
                 node.passive       = true
                 target.object      = "{target}"
-                # It plays on the G432 or nowhere, never on another output.
+                # It plays on the {short} or nowhere, never on another output.
                 node.dont-fallback = true
                 node.linger        = true
             }}
@@ -570,153 +278,127 @@ context.modules = [
 """
 
 
-def conf_path() -> Path:
-    """CONF_NAME in the runtime folder, RECORD_NAME's too: config.private_runtime's, refused
-    as EqError while XDG_RUNTIME_DIR is unset or names a folder another account owns or may
-    write in."""
-    return config.private_runtime(EqError, NO_RUNTIME, DESCRIPTION) / CONF_NAME
+def conf_path(*, model: HeadsetModel) -> Path:
+    """The model's conf in the runtime folder, its record's too: runtime_folder.private_runtime's,
+    refused as EqError while XDG_RUNTIME_DIR is unset or relative (runtime_folder.runtime_home)
+    or names a folder another account could swap for its own (runtime_folder.open_to_others)."""
+    named = WORDS[model.key]
+    return (runtime_folder.private_runtime(EqError, named.no_runtime, named.description)
+            / named.conf_name)
 
 
-def levels(value: object) -> tuple[float, ...] | None:
-    """`value` as volumes, one a channel, if it is a list of numbers of 0 or more, at least
-    one; else None."""
-    if not (isinstance(value, list) and value
-            and all(wording.number(v) and v >= 0 for v in value)):
-        return None
-    return tuple(float(v) for v in value)
+def output_node(objects: Sequence[object], pid: int, *, model: HeadsetModel) -> dict | None:
+    """The props of the headset's output in pw-dump's objects (pipewire_unit.g432_node): the
+    one the chain of process `pid`, the unit's MainPID, plays to while its output is in
+    PipeWire, the card switch_on rendered it for; else, as at switch_on, the one Gearbench
+    Spatial plays to. None while there is none; `pid` 0 for no chain."""
+    aimed = pipewire_unit.aimed_at(objects, pid, WORDS[model.key].output)
+    return pipewire_unit.g432_node(objects, model=model, aimed=aimed)
 
 
-def _props(info: dict) -> dict:
-    props = info.get("props")
-    return props if isinstance(props, dict) else {}
-
-
-def g432_cards(objects: Sequence[object]) -> set[int]:
-    """The ids of the G432's card Devices in pw-dump's objects, on any profile
-    (spatial.card_nodes)."""
-    return set(spatial.card_nodes(objects, spatial.G432.card)[0])
-
-
-def g432_node(objects: Sequence[object], media_class: str = "Audio/Sink") -> dict | None:
-    """The props of the G432's output, or of its node of `media_class`, in pw-dump's objects:
-    the first of its card's nodes (spatial.card_nodes) with a name, None while there is
-    none."""
-    _cards, nodes = spatial.card_nodes(objects, spatial.G432.card)
-    return next((props for props in nodes if props.get("media.class") == media_class
-                 and isinstance(props.get("node.name"), str)), None)
-
-
-def node_id(objects: Sequence[object], props: dict | None) -> int | None:
-    """The id of the Node in pw-dump's objects whose props are `props`, as g432_node gives
-    them: by those props, not their node.name, which any client can give a node of its
-    own; None for None."""
-    return next((node for node, _info, found in spatial.of_type(objects, "Node")
-                 if found is props), None)
-
-
-def find_target(objects: Sequence[object]) -> str | None:
-    """The G432's output's node name in pw-dump's objects, None while there is none."""
-    props = g432_node(objects)
+def find_target(objects: Sequence[object], *, model: HeadsetModel = G432_MODEL,
+                pid: int = 0) -> str | None:
+    """The headset's output's node name in pw-dump's objects (output_node), None while there
+    is none."""
+    props = output_node(objects, pid, model=model)
     return None if props is None else props["node.name"]
 
 
-def _route(route: object, card: int, device: object) -> Route | None:
-    """`route`, one of the card's Route params, as a Route if it is the output's: its
-    direction Output, its device the node's card.profile.device, a whole index, and a
-    volume of 0 or more for each channel and a volumeBase above 0 in its props."""
-    if not isinstance(route, dict) or route.get("direction") != "Output":
-        return None
-    values = _props(route)
-    volumes, base = levels(values.get("channelVolumes")), values.get("volumeBase")
-    if (not wording.whole(device) or route.get("device") != device
-            or not wording.whole(route.get("index")) or volumes is None
-            or not wording.number(base) or not base > 0):
-        return None
-    return Route(card, route["index"], device, volumes, float(base))
+def find_route(objects: Sequence[object], *, model: HeadsetModel = G432_MODEL,
+               pid: int = 0) -> pipewire_unit.Route | None:
+    """The headset's output's route (output_node) in pw-dump's objects
+    (pipewire_unit.route_of), None while that output is not in PipeWire."""
+    props = output_node(objects, pid, model=model)
+    return None if props is None else pipewire_unit.route_of(objects, props)
 
 
-def find_route(objects: Sequence[object]) -> Route | None:
-    """The G432's output's route in pw-dump's objects, None while the G432 is not in
-    PipeWire or its card gives no route of the shape _route reads."""
-    props = g432_node(objects)
-    if props is None:
-        return None
-    card = props["device.id"]
-    for card_id, info, _card in spatial.of_type(objects, "Device"):
-        params = info.get("params") if card_id == card else None
-        routes = params.get("Route") if isinstance(params, dict) else None
-        for route in routes if isinstance(routes, list) else ():
-            if (found := _route(route, card, props.get("card.profile.device"))) is not None:
-                return found
-    return None
+def sink_volumes(objects: Sequence[object], pid: int, *, model: HeadsetModel = G432_MODEL
+                 ) -> tuple[tuple[float, ...] | None, bool]:
+    """The chain's sink's volume on each channel in pw-dump's objects and whether it is
+    muted (pipewire_unit.props_volumes), from the sink of the client whose process is
+    `pid` (pipewire_client.node_pids), as graph takes it; (None, False) while there is no
+    such sink."""
+    sink = WORDS[model.key].sink
+    for _node, info, props, made_by in pipewire_client.node_pids(objects):
+        if props.get("node.name") == sink and made_by == pid:
+            return pipewire_unit.props_volumes(info)
+    return None, False
 
 
-def sink_volumes(objects: Sequence[object], pid: int) -> tuple[float, ...] | None:
-    """The chain's sink's volume on each channel in pw-dump's objects, the channelVolumes of
-    its Props, from the sink of the client whose process is `pid`, as graph takes it; None
-    while there is none, or its Props give none."""
-    owned = pipewire_unit.clients_of(objects, pid)
-    for _node, info, props in spatial.of_type(objects, "Node"):
-        if props.get("node.name") == SINK and props.get("client.id") in owned:
-            params = info.get("params")
-            entries = params.get("Props") if isinstance(params, dict) else None
-            found = (levels(entry.get("channelVolumes")) for entry in entries
-                     if isinstance(entry, dict)) if isinstance(entries, list) else ()
-            return next((volumes for volumes in found if volumes is not None), None)
-    return None
-
-
-def graph(objects: Sequence[object], pid: int) -> dict:
+def graph(objects: Sequence[object], pid: int, *, model: HeadsetModel = G432_MODEL) -> dict:
     """State's PipeWire fields from pw-dump's objects. The chain's sink and output are the
     nodes of those names made by the client whose process is `pid`, the unit's MainPID, by
-    the pid PipeWire took from its socket, since any client can name a node
-    gearbench-g432-eq; the G432's output is its card's own node (g432_node)."""
+    the pid PipeWire took from its socket, since any client can give a node those names;
+    the headset's output is its card's own node, the one the chain aims at (output_node)."""
+    named = WORDS[model.key]
     nodes = pipewire_unit.owned_nodes(objects, pid)
-    found = g432_node(objects)
-    return {"sink_id": nodes.get(SINK), "target": None if found is None else found["node.name"],
-            "linked": pipewire_unit.linked(objects, nodes.get(OUTPUT), node_id(objects, found))}
+    found = output_node(objects, pid, model=model)
+    return {"sink_id": nodes.get(named.sink),
+            "target": None if found is None else found["node.name"],
+            "linked": pipewire_unit.linked(objects, nodes.get(named.output),
+                                           pipewire_unit.node_id(objects, found))}
 
 
-def dumped_graph(run: spatial.Run, pid: int) -> dict:
-    """graph of a fresh pw-dump (spatial.dumped)."""
-    return spatial.dumped(run, lambda objects: graph(objects, pid))
+def dumped_graph(run: pipewire_client.Run, pid: int, *, model: HeadsetModel) -> dict:
+    """graph of a fresh pw-dump (pipewire_client.dumped)."""
+    return pipewire_client.dumped(run, lambda objects: graph(objects, pid, model=model))
 
 
-def read_state(run: spatial.Run = subprocess.run) -> State:
+def straight_nodes(objects: Sequence[object], pid: int, *, model: HeadsetModel) -> set[int]:
+    """The ids of the nodes that play straight into the headset's output (output_node) in
+    pw-dump's objects (pipewire_unit.feeding), but for the chain's output, the node of that
+    name process `pid` made."""
+    into = pipewire_unit.node_id(objects, output_node(objects, pid, model=model))
+    own = pipewire_unit.owned_nodes(objects, pid).get(WORDS[model.key].output)
+    return pipewire_unit.feeding(objects, into) - {own}
+
+
+def dumped_straight(run: pipewire_client.Run, pid: int, *, model: HeadsetModel) -> set[int]:
+    """straight_nodes of a fresh pw-dump (pipewire_client.dumped)."""
+    return pipewire_client.dumped(run, lambda objects: straight_nodes(objects, pid, model=model))
+
+
+def read_state(run: pipewire_client.Run = subprocess.run, *,
+               model: HeadsetModel = G432_MODEL) -> State:
     """What systemd and PipeWire say now, and the saved presets. Never raises."""
-    return State(presets=load_presets(), **pipewire_unit.read_fields(run, UNIT, graph))
+    return State(presets=load_presets(model=model), **pipewire_unit.read_fields(
+        run, WORDS[model.key].unit, lambda objects, pid: graph(objects, pid, model=model)))
 
 
-def summary(state: State) -> tuple[str, str]:
+def summary(state: State, *, model: HeadsetModel = G432_MODEL) -> tuple[str, str]:
     """(kind, words) for `state`: the unit's own (pipewire_unit.unit_summary), else the
     first condition below that holds."""
     if (unit := pipewire_unit.unit_summary(state)) is not None:
         return unit
+    named = WORDS[model.key]
     if state.sink_id is None:
         return "starting", "starting"
     if state.target is None:
-        return "waiting", "on; it plays nothing until the G432 is plugged in"
+        return "waiting", named.waiting
     if not state.linked:
-        return "unlinked", "on, but not linked to the G432"
-    return "ready", "on, playing to the G432"
+        return "unlinked", named.unlinked
+    return "ready", named.ready
 
 
 def preset_words(presets: Presets, number: int) -> str:
-    """A preset as the CLI names it: its number and its name."""
-    return f"{number}, {presets.get(number).name}"
+    """A preset as the CLI names it: its number and its name (numbered)."""
+    return numbered(number, presets.get(number).name)
 
 
-def describe(state: State, number: int | None = None) -> list[tuple[str, str]]:
+def describe(state: State, number: int | None = None, *,
+             model: HeadsetModel = G432_MODEL) -> list[tuple[str, str]]:
     """(label, value) rows for the CLI: the state, the output, the presets, and the gains
-    of preset `number`, the active one when None, which a row says it is not."""
+    of preset `number`, its row naming the active one if that is another; the active one's
+    when None, or when `number` was read off presets another program has deleted it from since."""
+    named = WORDS[model.key]
     presets = state.presets
-    shown = presets.active if number is None else number
+    shown = number if number in presets.numbers else presets.active
     gains = presets.get(shown).gains
     active = "" if shown == presets.active else (
         f" (not the active one, {preset_words(presets, presets.active)})")
     return [
-        ("equalizer", summary(state)[1]),
-        ("output", f"{DESCRIPTION} ({SINK})"),
+        ("equalizer", summary(state, model=model)[1]),
+        ("output", f"{named.description} ({named.sink})"),
         ("presets", "; ".join(preset_words(presets, n) for n in presets.numbers)),
         ("preset", preset_words(presets, shown) + active),
         ("bass", f"{signed(gains.bass)}, a shelf at {hertz(BASS_FREQ)}"),
@@ -731,68 +413,48 @@ def props(gains: Gains) -> str:
     return f"{{ params = [ {' '.join(pairs)} ] }}"
 
 
-def record_path() -> Path:
-    return conf_path().with_name(RECORD_NAME)
+def record_path(*, model: HeadsetModel) -> Path:
+    return conf_path(model=model).with_name(WORDS[model.key].record_name)
 
 
-def switch_folder() -> Path:
-    """The runtime folder, where a switch's OSError comes from, the equalizer's or the noise
-    suppression's: the folder's stat, the conf's write or the equalizer's record. Named
-    without conf_path, whose second stat could raise again; XDG_RUNTIME_DIR is set, since
-    conf_path refuses it unset before anything is written."""
-    return cast("Path", config.runtime_home())
-
-
-def load_record() -> Record:
+def load_record(*, model: HeadsetModel = G432_MODEL) -> Record:
     """The record, an empty one with no runtime folder, which switch_on refuses to run
-    without, or no file. `volumes` is none for a value that is not a list of 1 to 8 numbers
-    of 0 or more, and `reselect` true only for true. EqError for a runtime folder another
-    account owns or may write in (conf_path): a record there may be that account's, and
-    put_back would give the G432 its volume, saved."""
-    if config.runtime_home() is None:
+    without, or no file that reads as a JSON object. `volumes` is none for a value that is
+    not a list of 1 to 8 finite numbers of 0 or more, and `muted` and `reselect` each true
+    only for true.
+    EqError for a runtime folder conf_path refuses: a record there may be another account's,
+    and put_back would give the headset its volume, saved."""
+    if runtime_folder.runtime_home() is None:
         return Record()
     try:
-        data = config.read_json(record_path())
-    except (OSError, config.ConfigError):
+        data = settings_files.read_json(record_path(model=model))
+    except (OSError, settings_files.ConfigError):
         return Record()
     if not isinstance(data, dict):
         return Record()
-    volumes = levels(data.get("volumes"))
+    volumes = pipewire_unit.levels(data.get("volumes"))
     return Record(volumes if volumes is not None and len(volumes) <= 8 else None,
-                  data.get("reselect") is True)
+                  data.get("muted") is True, data.get("reselect") is True)
 
 
-def save_record(record: Record) -> None:
+def save_record(record: Record, *, model: HeadsetModel = G432_MODEL) -> None:
     """The record, atomically and the user's alone (write_json's mkstemp), or for an empty
     one no file."""
-    path = record_path()
+    path = record_path(model=model)
     if record == Record():
         path.unlink(missing_ok=True)
     else:
-        config.write_json(path, {"volumes": record.volumes, "reselect": record.reselect},
-                          f".{RECORD_NAME}-")
+        settings_files.write_json(path, {"volumes": record.volumes, "muted": record.muted,
+                                         "reselect": record.reselect}, f".{path.name}-")
 
 
-def route_argv(route: Route, volumes: Sequence[float], save: bool) -> list[str]:
-    """pw-cli's set-param of the G432's output's route to `volumes`, as WirePlumber 0.5.13's
-    apply-routes.lua sets a route: its index and device, the volumes in its props, and
-    save, which decides whether WirePlumber keeps the level (state-routes.lua)."""
-    shown = " ".join(f"{volume:.6f}" for volume in volumes)
-    param = (f"{{ index: {route.index}, device: {route.device}, props: {{ channelVolumes: "
-             f"[ {shown} ] }}, save: {'true' if save else 'false'} }}")
-    return ["pw-cli", "set-param", str(route.card), "Route", param]
-
-
-def _pw_cli(run: spatial.Run, argv: list[str]) -> str | None:
-    """Run a `pw-cli set-param`: None when it went through, else why not, in words.
-    pw-cli 1.6 exits 0 when its command fails (spatial.set_room): its words decide."""
+def _pw_cli(run: pipewire_client.Run, argv: list[str]) -> str | None:
+    """Run a `pw-cli set-param` (pipewire_client.pw_cli): None when it went through, else
+    why not, in words."""
     try:
-        done = spatial.run_program(run, argv, check_exit=False)
-    except spatial.SpatialError as err:
+        return pipewire_client.pw_cli(run, argv) or None
+    except pipewire_client.StepError as err:
         return str(err)
-    if done.returncode or "Error:" in done.stderr:
-        return spatial.program_words(done, "pw-cli")
-    return None
 
 
 def spread(volumes: Sequence[float], count: int) -> list[float]:
@@ -801,118 +463,129 @@ def spread(volumes: Sequence[float], count: int) -> list[float]:
 
 
 def carried_on(volumes: Sequence[float], base: float) -> list[float]:
-    """The sink's volume for the G432's own `volumes`, as loud through a G432 held at 0 dB:
-    ACP plays a route's volume v at v / volumeBase on the adapter's PCM (acp.c's
+    """The sink's volume for the headset's own `volumes`, as loud through a headset held at
+    0 dB: ACP plays a route's volume v at v / volumeBase on the adapter's PCM (acp.c's
     set_volume, PipeWire 1.6.2, read 2026-10-17), so the sink takes v / volumeBase, at most
     CARRY_MAX. Not yet heard on the G432."""
     return [min(volume / base, CARRY_MAX) for volume in spread(volumes, CHANNELS)]
 
 
-def carried_off(volumes: Sequence[float], route: Route) -> list[float]:
-    """The G432's own volume for the sink's `volumes`, as loud with the hold gone: each times
-    volumeBase, carried_on the other way, with no cap."""
-    return [volume * route.base for volume in spread(volumes, len(route.volumes))]
+def carried_off(volumes: Sequence[float], route: pipewire_unit.Route) -> list[float]:
+    """The headset's own volume for the sink's `volumes`, as loud with the chain gone as
+    through it: each times the route's own volume on its channel, volumeBase while held,
+    which the chain played under, so a hold that failed or a level set since is no jump
+    either; carried_on the other way, with no cap."""
+    return [volume * own for volume, own
+            in zip(spread(volumes, len(route.volumes)), route.volumes, strict=True)]
 
 
-def sink_argv(sink_id: int, volumes: Sequence[float]) -> list[str]:
-    """pw-cli's set-param of the sink's Props to `volumes`, as GNOME's slider sets them."""
-    shown = " ".join(f"{volume:.6f}" for volume in volumes)
-    return ["pw-cli", "set-param", str(sink_id), "Props", f"{{ channelVolumes: [ {shown} ] }}"]
-
-
-def gnome_percent(volume: float) -> int:
-    """A route's volume as GNOME's Sound settings shows it: the cube root, in percent, as
-    WirePlumber's 0.064 shows as 40 %."""
-    return round(volume ** (1 / 3) * 100)
-
-
-def watch_argv() -> list[str]:
-    """systemd-run's command line for the transient unit that watches for the G432's
-    return: bound to UNIT, so it stops when UNIT does (BindsTo= in systemd.unit(5)), and
-    given the package's folder on PYTHONPATH, where the window and the CLI found it."""
-    return ["systemd-run", "--user", f"--unit={WATCH_UNIT}",
-            f"--description={DESCRIPTION}, watching for the G432", "--collect", "--quiet",
-            "--slice=session.slice", f"--property=BindsTo={UNIT}", f"--property=After={UNIT}",
-            *(f"--property={setting}" for setting in pipewire_unit.HARDENING),
+def watch_argv(*, model: HeadsetModel) -> list[str]:
+    """systemd-run's command line for the transient unit that watches for the headset's
+    return: bound to its equalizer's unit, so it stops when that does (BindsTo= in
+    systemd.unit(5); pipewire_unit.transient_argv), and given the package's folder on
+    PYTHONPATH, where the window and the CLI found it. `watch` alone watches the G432, and
+    `watch KEY` another model."""
+    named = WORDS[model.key]
+    return [*pipewire_unit.transient_argv(named.watch_unit, named.watching, named.unit,
+                                          after=named.unit),
             f"--setenv=PYTHONPATH={Path(__file__).resolve().parent.parent}",
-            "/usr/bin/python3", "-s", "-P", "-m", "gearbench.g432_eq", "watch"]
+            "/usr/bin/python3", "-s", "-P", "-m", "gearbench.g432_eq", "watch",
+            *(() if model is G432_MODEL else (model.key,))]
 
 
-def held_and_watched(run: spatial.Run, route: Route | None) -> str | None:
-    """hold, then, once the hold went through, the watch for the G432's return: the note
+def held_and_watched(run: pipewire_client.Run, route: pipewire_unit.Route | None, *,
+                     model: HeadsetModel) -> str | None:
+    """hold, then, once the hold went through, the watch for the headset's return: the note
     to say, else None."""
-    if (note := hold(run, route)) is not None:
+    if (note := hold(run, route, model=model)) is not None:
         return note
     try:
-        spatial.run_program(run, watch_argv())
-    except spatial.SpatialError as err:
-        return NO_WATCH.format(err)
+        pipewire_client.run_program(run, watch_argv(model=model))
+    except pipewire_client.StepError as err:
+        return WORDS[model.key].no_watch.format(err)
     return None
 
 
-def carry(run: spatial.Run, route: Route, record: Record) -> str | None:
-    """Give the sink, once the unit's process has made it, the G432's own volume as
+def carry(run: pipewire_client.Run, route: pipewire_unit.Route, record: Record, *,
+          model: HeadsetModel) -> str | None:
+    """Give the sink, once the unit's process has made it, the headset's own volume as
     carried_on has it: the record's, a hold's whose put-back never ran and which still
-    holds the G432 (switch_on drops one that does not first), else the route's, read
-    before the hold. NOT_CARRIED's note when it could not, else None."""
-    own = route.volumes if record.volumes is None else record.volumes
+    holds the headset (switch_on drops one that does not first), else the route's, read
+    before the hold; and muted where the route is, which the hold then clears, or with the
+    record's volume where the record keeps the mute that hold cleared. Words.not_carried's
+    note when it could not, else None."""
+    named = WORDS[model.key]
+    own, muted = ((route.volumes, route.mute) if record.volumes is None
+                  else (record.volumes, route.mute or record.muted))
     try:
-        sink_id = _running_sink(run)
-    except spatial.SpatialError as err:
-        return NOT_CARRIED.format(err)
+        sink_id = _running_sink(run, model=model)
+    except pipewire_client.StepError as err:
+        return named.not_carried.format(err)
     if sink_id is None:
-        return NOT_CARRIED.format(NO_SINK)
-    failed = _pw_cli(run, sink_argv(sink_id, carried_on(own, route.base)))
-    return None if failed is None else NOT_CARRIED.format(failed)
+        return named.not_carried.format(named.no_sink)
+    failed = _pw_cli(run, pipewire_unit.sink_argv(sink_id, carried_on(own, route.base), muted))
+    return None if failed is None else named.not_carried.format(failed)
 
 
-def hold(run: spatial.Run, route: Route | None) -> str | None:
-    """Set the G432's own output to 0 dB, unsaved, keeping the volume it had in the record
-    first; a record already there is a hold whose put-back never ran, whose level it keeps:
-    the watch's, or one switch_on found still holding the G432 (stale_record_dropped).
-    NOT_HELD's note when it could not be held, else None."""
+def hold(run: pipewire_client.Run, route: pipewire_unit.Route | None, *,
+         model: HeadsetModel) -> str | None:
+    """Set the headset's own output to 0 dB, and unmuted where it is muted, unsaved, so the
+    sink's mute is the one that applies, keeping the volume and mute it had in the record
+    first; a record already there is a hold whose put-back never ran, whose level and mute it
+    keeps: the watch's, or one switch_on found still holding the headset
+    (stale_record_dropped). Words.not_held's note when it could not be held, else None."""
+    named = WORDS[model.key]
     if route is None:
-        return NOT_HELD.format(NO_ROUTE)
-    record = load_record()
+        return named.not_held.format(named.no_route)
+    record = load_record(model=model)
     if record.volumes is None:
-        save_record(replace(record, volumes=route.volumes))
-    failed = _pw_cli(run, route_argv(route, [route.base] * len(route.volumes), save=False))
-    return None if failed is None else NOT_HELD.format(failed)
+        save_record(replace(record, volumes=route.volumes, muted=route.mute), model=model)
+    failed = _pw_cli(run, pipewire_unit.route_argv(
+        route, [route.base] * len(route.volumes), save=False,
+        mute=False if route.mute else None))
+    return None if failed is None else named.not_held.format(failed)
 
 
-def put_back(run: spatial.Run, route: Route | None,
-             volumes: tuple[float, ...] | None) -> str | None:
-    """With a hold in the record, give the G432's own output, saved, the sink's `volumes` as
-    carried_off has them, or with none read the volume the record keeps while the G432 is
-    still held (is_held), and forget the hold. With no route there is none to set, as while
-    the G432 is unplugged, and WirePlumber gives it the level it saved, which the hold never
-    was; with no volumes and a route off volumeBase, the G432 has its own level again, and
-    nothing is set either. NOT_PUT_BACK's note when the write failed, which keeps the
-    record for the next switch_off."""
-    record = load_record()
+def put_back(run: pipewire_client.Run, route: pipewire_unit.Route | None,
+             volumes: tuple[float, ...] | None, muted: bool, *,
+             model: HeadsetModel) -> str | None:
+    """With a hold in the record, give the headset's own output, saved, the sink's `volumes`
+    times the route's own volume (carried_off), or with none read the volume the record
+    keeps while the headset is still held (is_held), muted when the sink is (`muted`) or,
+    with none read, when the record keeps a mute, and forget the hold. With no route there
+    is none to set, as while the headset is unplugged,
+    and WirePlumber gives it the level it saved, which the hold never was; with no volumes
+    and a route off volumeBase, the headset has its own level again, and nothing is set
+    either. Words.not_put_back's note when the write failed, not_put_back_muted's when it
+    carried the mute too; the record then stays for the next switch_off."""
+    record = load_record(model=model)
     if record.volumes is None:
         return None
+    muted = muted or (volumes is None and record.muted)
     if route is not None:
         level = (carried_off(volumes, route) if volumes is not None
                  else record.volumes if is_held(route) else None)
-        if level is not None and (failed := _pw_cli(run, route_argv(route, level, True))):
-            return NOT_PUT_BACK.format(failed, gnome_percent(max(level)))
-    save_record(replace(record, volumes=None))
+        if level is not None and (failed := _pw_cli(run, pipewire_unit.route_argv(
+                route, level, True, mute=True if muted else None))):
+            named = WORDS[model.key]
+            return (named.not_put_back_muted if muted else named.not_put_back).format(
+                failed, pipewire_unit.gnome_percent(max(level)))
+    save_record(replace(record, volumes=None, muted=False), model=model)
     return None
 
 
-def is_held(route: Route) -> bool:
+def is_held(route: pipewire_unit.Route) -> bool:
     """Whether each channel of `route` is at volumeBase, as a hold leaves it."""
     return all(abs(volume - route.base) <= HELD_TOLERANCE for volume in route.volumes)
 
 
-def stale_record_dropped(route: Route | None) -> None:
-    """Forget the record's level when `route` shows the G432 is not held: a PipeWire stop
-    stops the unit with no switch_off, and WirePlumber's next start gives the G432 the
-    level it saved, which the user may have changed since."""
-    record = load_record()
+def stale_record_dropped(route: pipewire_unit.Route | None, *, model: HeadsetModel) -> None:
+    """Forget the record's level and mute when `route` shows the headset is not held: a
+    PipeWire stop stops the unit with no switch_off, and WirePlumber's next start gives the
+    headset the level and mute it saved, which the user may have changed since."""
+    record = load_record(model=model)
     if record.volumes is not None and route is not None and not is_held(route):
-        save_record(replace(record, volumes=None))
+        save_record(replace(record, volumes=None, muted=False), model=model)
 
 
 def default_sink(objects: Sequence[object]) -> str | None:
@@ -940,252 +613,311 @@ def default_argv(name: str) -> list[str]:
             json.dumps({"name": name}), "Spa:String:JSON"]
 
 
-def _pick(run: spatial.Run, name: str) -> str | None:
-    """Make `name` the default output and wait up to spatial.SETTLE for WirePlumber to pick
-    it, which moves the streams that follow the default with it: None, else why the write
-    failed, in words. A pick that has not shown by then is waited for no longer."""
+def _pick(run: pipewire_client.Run, name: str) -> str | None:
+    """Make `name` the default output and wait up to pipewire_client.SETTLE for WirePlumber to
+    pick it, which moves the streams that follow the default with it: None once WirePlumber
+    shows the pick, else why not, in words. A pick not seen is not known to have gone, so the
+    music may still play where it did."""
     try:
-        done = spatial.run_program(run, default_argv(name), check_exit=False)
-    except spatial.SpatialError as err:
+        done = pipewire_client.run_program(run, default_argv(name))
+    except pipewire_client.StepError as err:
         return str(err)
-    if done.returncode:
-        return spatial.program_words(done, "pw-metadata")
     # pw-metadata 1.6.2 says "set property:" for a write that went, and exits 0 saying
     # nothing for a metadata it does not find (measured 2026-10-17).
     if "set property:" not in done.stdout:
         return NO_METADATA
-    deadline = time.monotonic() + spatial.SETTLE
-    while time.monotonic() < deadline:
+    deadline = time.monotonic() + pipewire_client.SETTLE
+    while True:
         try:
-            if spatial.dumped(run, default_sink) == name:
-                break
-        except spatial.SpatialError:
-            # Only a wait: the write went through, and nothing here depends on seeing it.
-            break
-        time.sleep(spatial.SETTLE_STEP)
-    return None
+            if pipewire_client.dumped(run, default_sink) == name:
+                return None
+        except pipewire_client.StepError as err:
+            return str(err)
+        if time.monotonic() >= deadline:
+            return NOT_SHOWN
+        time.sleep(pipewire_client.SETTLE_STEP)
 
 
-def give_back_default(run: spatial.Run, target: str | None) -> str:
-    """With the equalizer the default output, make the G432's own output, `target`, the
-    default before the sink goes, so the streams that follow the default move to the G432
+def give_back_default(run: pipewire_client.Run, target: str | None, *,
+                      model: HeadsetModel) -> str:
+    """With the equalizer the default output, make the headset's own output, `target`, the
+    default before the sink goes, so the streams that follow the default move to the headset
     first: WirePlumber 0.5.13 pauses the MPRIS players of the streams playing to a sink that
-    goes (linking/mpris-pause.lua). With the G432 unplugged, keep that the equalizer was
-    the default, for the next switch_on; with it there, the next switch_on finds its
-    output the default, unless the user picked another, which it leaves. The note to
+    goes (linking/mpris-pause.lua). With the headset's own output gone, keep that the
+    equalizer was the default, for the next switch_on; with it there, the next switch_on
+    finds it the default, unless the user picked another, which it leaves. The note to
     say."""
+    named = WORDS[model.key]
     if target is None:
-        save_record(replace(load_record(), reselect=True))
-        return MOVED_NOWHERE
+        save_record(replace(load_record(model=model), reselect=True), model=model)
+        return named.moved_nowhere
     failed = _pick(run, target)
-    return MOVED if failed is None else NOT_MOVED.format(failed)
+    return named.moved if failed is None else named.not_moved.format(failed)
 
 
-def spatial_moved(run: spatial.Run) -> str | None:
-    """Wait up to spatial.SETTLE, while Gearbench Spatial's chain plays to the G432 aimed at
-    another node than the equalizer's sink, for its unit's process to aim it there, which
-    it does once the sink is in PipeWire: SPATIAL_NOT_MOVED's note when it did not, else
-    None. A chain on the A50, none, or one not read waits for nothing: with no chain on the
-    G432's own output, a hold makes nothing louder."""
-    deadline = time.monotonic() + spatial.SETTLE
+def spatial_moved(run: pipewire_client.Run, *, model: HeadsetModel) -> str | None:
+    """Wait up to pipewire_client.SETTLE, while Gearbench Spatial's chain plays to the headset
+    aimed at another node than the equalizer's sink, for its unit's process to aim it there,
+    which it does once the sink is in PipeWire, and while its unit or PipeWire cannot be read,
+    since its chain may then still play to the headset: Words.spatial_not_moved's note when
+    it did not move, Words.spatial_unread's with the cause when it was still not read, else
+    None. A chain on another headset, or none, waits for nothing here; straight_gone then
+    waits for whatever else plays straight to the headset's own output."""
+    named = WORDS[model.key]
+    deadline = time.monotonic() + pipewire_client.SETTLE
     while True:
         state = spatial.read_state(run)
-        if state.headset != spatial.G432.key or state.target == SINK:
+        unread = state.systemd or state.pipewire
+        if unread is None and (state.headset != model.key or state.target == named.sink):
             return None
         if time.monotonic() >= deadline:
-            return SPATIAL_NOT_MOVED
-        time.sleep(spatial.SETTLE_STEP)
+            return (named.spatial_not_moved if unread is None
+                    else named.spatial_unread.format(unread))
+        time.sleep(pipewire_client.SETTLE_STEP)
 
 
-def switch_on(run: spatial.Run = subprocess.run) -> list[str]:
-    """Write the conf for the active preset's gains, aimed at the G432's output, start the
-    unit, give its sink the G432's volume, make it the default output if the G432's own
-    output is the default or it was the default when it went off with the G432 unplugged,
-    wait for Gearbench Spatial on the G432 to move to it, and then hold the G432 at 0 dB, so
-    a stream that moves to the equalizer leaves the G432 before the G432 is at 0 dB, and is
-    never louder on the way, and start the watch for the G432's return; nothing while it
-    runs or starts. A sink that did not take the volume, a pick that failed while the
-    G432's own output is the default, or a Gearbench Spatial that did not move, leaves the
-    G432 unheld and unwatched. EqError while the G432's output is not in PipeWire, NO_OUTPUT
-    while its card is, for a runtime folder conf_path refuses, and STOPPED when the unit
-    stopped as it started, looked for once it has settled (pipewire_unit.settle_start),
-    before any pick or hold. The notes to say, in words."""
-    if pipewire_unit.running(run, UNIT):
+def straight_gone(run: pipewire_client.Run, *, model: HeadsetModel) -> str | None:
+    """Wait up to pipewire_client.SETTLE for every node but the chain's output that plays
+    straight to the headset's own output (straight_nodes) to leave it, as a stream that
+    follows the default does once the equalizer is the default, and while the unit or
+    PipeWire cannot be read: Words.played_straight's note when one still plays there, as a
+    stream with an output of its own picked in its app or moved there by hand does, which a
+    hold would make louder; Words.straight_unread's with the cause when it was still not
+    read; else None."""
+    named = WORDS[model.key]
+    deadline = time.monotonic() + pipewire_client.SETTLE
+    while True:
+        try:
+            pid = pipewire_client.main_pid(pipewire_unit.unit_of(run, named.unit))
+            if not dumped_straight(run, pid, model=model):
+                return None
+            note = named.played_straight
+        except pipewire_client.StepError as err:
+            note = named.straight_unread.format(err)
+        if time.monotonic() >= deadline:
+            return note
+        time.sleep(pipewire_client.SETTLE_STEP)
+
+
+def switch_on(run: pipewire_client.Run = subprocess.run, *,
+              model: HeadsetModel = G432_MODEL) -> list[str]:
+    """Write the conf for the active preset's gains, aimed at the headset's output, start the
+    unit, give its sink the headset's volume and mute, make it the default output if the
+    headset's own output is the default or it was the default when it went off with the
+    headset's own output gone, wait for Gearbench Spatial on the headset to move to it and for
+    anything else that plays straight to the headset's own output to leave it, and then hold
+    the headset at 0 dB and unmuted, so a stream that moves to the equalizer leaves the
+    headset before the headset is at 0 dB, and is never louder on the way, and start the
+    watch for the headset's return; nothing while it runs or starts. A sink that did not take
+    the volume and mute, or a pick that failed or did not show (_pick) while the headset's
+    own output is the default, leaves the headset unheld and unwatched, with no wait; a
+    Gearbench Spatial that did not move or could not be read, or sound still straight on the
+    headset's own output, or a look for it that could not be read (straight_gone), leaves it
+    unheld and unwatched too.
+    EqError while the headset's output is not in PipeWire, Words.no_output while its card
+    is, for a runtime folder conf_path refuses, and Words.stopped when the unit stopped as it
+    started, looked for once it has settled (pipewire_unit.settle_start), before any pick or
+    hold. The notes to say, in words."""
+    named = WORDS[model.key]
+    if pipewire_unit.running(run, named.unit):
         return []
-    objects = spatial.dump_objects(run)
-    target = spatial.shaped(find_target, objects)
-    default = spatial.shaped(default_sink, objects)
+    objects = pipewire_client.dump_objects(run)
+    target = pipewire_client.shaped(lambda found: find_target(found, model=model), objects)
+    default = pipewire_client.shaped(default_sink, objects)
     if target is None:
-        raise EqError(NO_OUTPUT if g432_cards(objects) else NO_G432)
-    conf = conf_path()
-    # Mode 0600 (replace_file's mkstemp), and replaced whole, so PipeWire never reads half.
-    config.replace_file(conf, render(load_gains(), target).encode("utf-8"), f".{CONF_NAME}-", "")
-    spatial.run_program(run, pipewire_unit.pipewire_argv(UNIT, DESCRIPTION, conf))
-    route = spatial.shaped(find_route, objects)
-    stale_record_dropped(route)
-    carried = None if route is None else carry(run, route, load_record())
-    pipewire_unit.settle_start(run, UNIT, lambda: read_state(run=run), summary,
-                               EqError(STOPPED))
+        raise EqError(named.no_output if pipewire_unit.g432_cards(objects, model=model)
+                      else named.no_headset)
+    conf = conf_path(model=model)
+    spatial.replace_conf(conf, render(load_gains(model=model), target, model=model))
+    pipewire_client.run_program(
+        run, pipewire_unit.pipewire_argv(named.unit, named.description, conf))
+    route = pipewire_client.shaped(lambda found: find_route(found, model=model), objects)
+    stale_record_dropped(route, model=model)
+    record = load_record(model=model)
+    carried = None if route is None else carry(run, route, record, model=model)
+    pipewire_unit.settle_start(run, named.unit, lambda: read_state(run=run, model=model),
+                               lambda state: summary(state, model=model),
+                               EqError(named.stopped))
     notes = [] if carried is None else [carried]
-    record = load_record()
     failed = None
     if record.reselect or default == target:
-        failed = _pick(run, SINK)
+        failed = _pick(run, named.sink)
         if failed is None:
-            notes.append(RESELECTED if record.reselect else SELECTED)
+            notes.append(named.reselected if record.reselect else named.selected)
         else:
-            notes.append((NOT_SELECTED if default == target else NOT_RESELECTED).format(failed))
-        save_record(replace(record, reselect=False))
-    if (unmoved := spatial_moved(run)) is not None:
-        notes.append(unmoved)
-    # The music, or spatial sound, stays on the G432's own output, which a hold would make
-    # louder.
-    stayed = (failed is not None and default == target) or unmoved is not None
-    if carried is None and not stayed and (note := held_and_watched(run, route)) is not None:
+            notes.append((named.not_selected if default == target
+                          else named.not_reselected).format(failed))
+        save_record(replace(record, reselect=False), model=model)
+    # The music, spatial sound or a stream with an output of its own may still be on the
+    # headset's own output, which a hold would make louder.
+    if carried is None and not (failed is not None and default == target) and (
+            note := (spatial_moved(run, model=model) or straight_gone(run, model=model)
+                     or held_and_watched(run, route, model=model))):
         notes.append(note)
     return notes
 
 
-def switch_off(run: spatial.Run = subprocess.run) -> list[str]:
-    """Stop the watch, give the G432's own output the equalizer's volume in place of the
-    hold, make the G432's own output the default if the equalizer was it, then stop the
-    unit, which removes the sink; a unit not loaded is off already. A put-back or a pick
-    that fails is a note; a failed stop of the watch, or read of systemd or PipeWire after
-    it, puts nothing back and is a note only with a hold in the record. The unit stops all
-    the same. EqError, with nothing written or stopped, for a runtime folder another account
-    owns or may write in (load_record): a hold the record there cannot vouch for then stays
-    under the equalizer's volume, never louder. The notes to say, in words."""
-    held = load_record().volumes
+def switch_off(run: pipewire_client.Run = subprocess.run, *,
+               model: HeadsetModel = G432_MODEL) -> list[str]:
+    """Stop the watch, give the headset's own output the equalizer's volume and mute in place
+    of the hold, make the headset's own output the default if the equalizer was it, then stop
+    the unit, which removes the sink; a unit not loaded is off already. A put-back that fails,
+    or a pick that fails or does not show (_pick), is a note; a failed stop of the watch, or
+    read of systemd or PipeWire after it, puts nothing back and is a note only with a hold in
+    the record. The unit stops all the same, after a record's save that raises OSError too,
+    which is then raised. EqError,
+    with nothing written or stopped, for a runtime folder conf_path refuses (load_record): a
+    hold the record there cannot vouch for then stays under the equalizer's volume, never
+    louder. The notes to say, in words."""
+    named = WORDS[model.key]
+    held = load_record(model=model).volumes
     try:
-        # First: a watch still running holds the G432 again at the put-back's own print,
-        # since the record keeps the hold until put_back drops it.
-        pipewire_unit.stop(run, WATCH_UNIT)
-        pid = spatial.main_pid(pipewire_unit.unit_of(run, UNIT))
-        objects = spatial.dump_objects(run)
-        route, target, default = (spatial.shaped(find_route, objects),
-                                  spatial.shaped(find_target, objects),
-                                  spatial.shaped(default_sink, objects))
-        volumes = spatial.shaped(lambda found: sink_volumes(found, pid), objects)
-    except spatial.SpatialError as err:
-        notes = [] if held is None else [NOT_PUT_BACK.format(err, gnome_percent(max(held)))]
+        # First: a watch still running holds the headset again at the put-back's own
+        # print, since the record keeps the hold until put_back drops it.
+        pipewire_unit.stop(run, named.watch_unit)
+        pid = pipewire_client.main_pid(pipewire_unit.unit_of(run, named.unit))
+        route, target, default, (volumes, muted) = pipewire_client.dumped(run, lambda found: (
+            find_route(found, model=model, pid=pid),
+            find_target(found, model=model, pid=pid),
+            default_sink(found), sink_volumes(found, pid, model=model)))
+    except pipewire_client.StepError as err:
+        notes = [] if held is None else [
+            named.not_put_back.format(err, pipewire_unit.gnome_percent(max(held)))]
     else:
-        notes = [note] if (note := put_back(run, route, volumes)) else []
-        if default == SINK:
-            notes.append(give_back_default(run, target))
-    pipewire_unit.stop(run, UNIT)
+        notes = [note] if (note := put_back(run, route, volumes, muted, model=model)) else []
+        if default == named.sink:
+            notes.append(give_back_default(run, target, model=model))
+    finally:
+        # A record that could not be saved, an OSError, stops it too: else no off would.
+        pipewire_unit.stop(run, named.unit)
     return notes
 
 
-def _running_sink(run: spatial.Run) -> int | None:
-    """The running chain's sink, waiting up to spatial.SETTLE for the sink of a unit that is
-    starting, whose conf may hold the gains from before a save. EqError, NO_SINK's words,
-    for a unit that runs or starts with no sink by then; None with no unit running."""
-    deadline = time.monotonic() + spatial.SETTLE
+def _running_sink(run: pipewire_client.Run, *, model: HeadsetModel) -> int | None:
+    """The running chain's sink, waiting up to pipewire_client.SETTLE for the sink of a unit
+    that is starting, whose conf may hold the gains from before a save. EqError,
+    Words.no_sink's words, for a unit that runs or starts with no sink by then; None with no
+    unit running."""
+    named = WORDS[model.key]
+    deadline = time.monotonic() + pipewire_client.SETTLE
     while True:
-        unit = pipewire_unit.unit_of(run, UNIT)
-        pid = spatial.main_pid(unit)
-        sink_id = dumped_graph(run, pid)["sink_id"] if pid else None
-        if sink_id is not None or unit.get("ActiveState") not in ("active", "activating"):
+        unit = pipewire_unit.unit_of(run, named.unit)
+        pid = pipewire_client.main_pid(unit)
+        sink_id = dumped_graph(run, pid, model=model)["sink_id"] if pid else None
+        if sink_id is not None or unit.get("ActiveState") not in pipewire_unit.RUNS_OR_STARTS:
             return sink_id
         if time.monotonic() >= deadline:
-            raise EqError(NO_SINK)
-        time.sleep(spatial.SETTLE_STEP)
+            raise EqError(named.no_sink)
+        time.sleep(pipewire_client.SETTLE_STEP)
 
 
-def edit(change: Callable[[Presets], Presets]) -> Presets:
-    """Save what `change` makes of the saved presets, and set nothing on the chain: for a
-    name, or gains that apply at the next start. The presets saved. PresetsRefused for a
-    file that does not read or was read in part (Presets.whole), left as it is."""
-    presets = change(load_presets().whole())
-    save_presets(presets)
-    return presets
-
-
-def update(change: Callable[[Presets], Presets], run: spatial.Run = subprocess.run) -> bool:
+def update(change: Callable[[Presets], Presets], run: pipewire_client.Run = subprocess.run, *,
+           model: HeadsetModel = G432_MODEL) -> bool:
     """edit, then set the active preset's gains on the running chain, which a set before
     that failed may have left on others. False when it does not run, so they apply at its
     next start; NotSetLive when the unit or the sink could not be read, the sink of a unit
-    that runs or starts did not show within spatial.SETTLE, or the set failed."""
-    gains = edit(change).current.gains
+    that runs or starts did not show within pipewire_client.SETTLE, or the set failed."""
+    gains = edit(change, model=model).current.gains
+    not_set_live = WORDS[model.key].not_set_live
     try:
-        sink_id = _running_sink(run)
-    except spatial.SpatialError as err:
-        raise NotSetLive(NOT_SET_LIVE.format(err)) from None
+        sink_id = _running_sink(run, model=model)
+    except pipewire_client.StepError as err:
+        raise NotSetLive(not_set_live.format(err)) from None
     if sink_id is None:
         return False
     failed = _pw_cli(run, ["pw-cli", "set-param", str(sink_id), "Props", props(gains)])
     if failed is not None:
-        raise NotSetLive(NOT_SET_LIVE.format(failed))
+        raise NotSetLive(not_set_live.format(failed))
     return True
 
 
-def set_gains(gains: Gains, number: int, name: str, run: spatial.Run = subprocess.run) -> bool:
+def set_gains(gains: Gains, number: int, name: str,
+              run: pipewire_client.Run = subprocess.run, *,
+              model: HeadsetModel = G432_MODEL) -> bool:
     """`gains` to the preset `name`, which `number` held when a page read the file, where
     the file holds it now (eq_presets.number_named), through update: another program, or a
     pick still running, can make another preset active after that read."""
     return update(lambda presets: presets.with_gains(
-        eq_presets.number_named(presets.presets, number, name), gains), run)
+        eq_presets.number_named(presets.presets, number, name), gains), run, model=model)
 
 
-def returned(seen: Seen, route: Route | None, now: float) -> tuple[Seen, bool]:
-    """The watch's next Seen for the G432's `route` at `now`, and whether to hold it at 0
-    dB now: while RETURN_WINDOW runs from the print that showed the route again, each
-    time a channel is off volumeBase. The first print counts as a return, since the G432
-    can come back between the switch-on's hold and the watch's start."""
+def returned(seen: Seen, route: pipewire_unit.Route | None, now: float) -> tuple[Seen, bool]:
+    """The watch's next Seen for the headset's `route` at `now`, and whether to hold it at
+    0 dB and unmuted now: while RETURN_WINDOW runs from the print that showed the route
+    again, each time a channel is off volumeBase or the route is muted, as WirePlumber gives
+    back a mute it saved at any level, volumeBase included. The first print counts as a
+    return, since the headset can come back between the switch-on's hold and the watch's
+    start."""
     if route is None:
         return Seen(), False
     if not seen.present:
         seen = Seen(True, now + RETURN_WINDOW)
-    return seen, not is_held(route) and now < seen.until
+    return seen, (route.mute or not is_held(route)) and now < seen.until
 
 
-def watch(lines: Iterable[str], run: spatial.Run = subprocess.run,
-          clock: Callable[[], float] = time.monotonic) -> None:
-    """Follow pw-dump --monitor's `lines` and, while a hold is in the record, hold the G432
-    at 0 dB again each time `returned` says to: after a replug WirePlumber gives it the
-    level it saved, which the hold never was. Says on stderr, which the unit's journal
-    keeps, the first hold of each return, however many follow it, each hold that failed,
-    and each print not read. A runtime folder conf_path refuses ends it, as load_record
-    raises EqError there."""
+def watch(lines: Iterable[str], run: pipewire_client.Run = subprocess.run,
+          clock: Callable[[], float] = time.monotonic, *,
+          model: HeadsetModel = G432_MODEL) -> None:
+    """Follow pw-dump --monitor's `lines` and, while a hold is in the record, hold the
+    headset at 0 dB again each time `returned` says to: after a replug WirePlumber gives it
+    the level and mute it saved, which the hold never was. Says on stderr, which the unit's journal
+    keeps, a unit not read at the start, the first hold of each return, however many follow
+    it, each hold that failed, and each print not read. The headset is output_node's for
+    the unit's MainPID, read at the start, 0 when the unit has none or was not read. A
+    runtime folder conf_path refuses ends it, as load_record raises EqError there."""
+    named = WORDS[model.key]
     objects: dict[int, dict] = {}
     seen = Seen()
-    for found in spatial.printed(lines):
+    try:
+        pid = pipewire_client.main_pid(pipewire_unit.unit_of(run, named.unit))
+    except pipewire_client.StepError as err:
+        print(named.watch_no_chain.format(err), file=sys.stderr, flush=True)
+        pid = 0
+    for found in pipewire_client.printed(lines):
         if found is None:
-            print(WATCH_UNREAD.format(spatial.NOT_A_PRINT), file=sys.stderr, flush=True)
+            print(named.watch_unread.format(pipewire_client.NOT_A_PRINT), file=sys.stderr,
+                  flush=True)
             continue
-        spatial.merge(objects, found)
+        pipewire_client.merge(objects, found)
         try:
-            route = spatial.shaped(find_route, list(objects.values()))
-        except spatial.SpatialError as err:
-            print(WATCH_UNREAD.format(err), file=sys.stderr, flush=True)
+            route = pipewire_client.shaped(
+                lambda known: find_route(known, model=model, pid=pid), list(objects.values()))
+        except pipewire_client.StepError as err:
+            print(named.watch_unread.format(err), file=sys.stderr, flush=True)
             continue
         seen, due = returned(seen, route, clock())
-        if due and load_record().volumes is not None:
-            note = hold(run, route)
+        if due and load_record(model=model).volumes is not None:
+            note = hold(run, route, model=model)
             if note is not None:
-                print(f"{WATCH_NAME}: the G432 is back. {note}", file=sys.stderr, flush=True)
+                print(named.watch_back.format(note), file=sys.stderr, flush=True)
             elif not seen.said:
-                print(WATCH_HELD, file=sys.stderr, flush=True)
+                print(named.watch_held, file=sys.stderr, flush=True)
                 seen = replace(seen, said=True)
 
 
 def main(argv: Sequence[str] | None = None,
          spawn: Callable[..., subprocess.Popen] = subprocess.Popen,
-         run: spatial.Run = subprocess.run) -> int:
-    """`python3 -m gearbench.g432_eq watch`, the watch unit's process: watch until pw-dump
-    --monitor ends, as at PipeWire's stop, which ends the unit as failed."""
-    args = sys.argv[1:] if argv is None else list(argv)
-    if args != ["watch"]:
-        print("usage: python3 -m gearbench.g432_eq watch", file=sys.stderr)
-        return 2
+         run: pipewire_client.Run = subprocess.run) -> int:
+    """`python3 -m gearbench.g432_eq watch [KEY]`, the watch unit's process: watch the G432,
+    or the model of EQ_MODELS KEY names, until pw-dump --monitor ends, as at PipeWire's
+    stop, which ends the unit as failed."""
+    match sys.argv[1:] if argv is None else list(argv):
+        case ["watch"]:
+            model = G432_MODEL
+        case ["watch", key] if key in EQ_KEYED:
+            model = EQ_KEYED[key]
+        case _:
+            print(USAGE, file=sys.stderr)
+            return 2
     try:
-        with spawn(spatial.MONITOR, stdout=subprocess.PIPE, encoding="utf-8",
+        with spawn(pipewire_client.MONITOR, stdout=subprocess.PIPE, encoding="utf-8",
                    errors="replace") as monitor:
-            watch(cast("IO[str]", monitor.stdout), run=run)
+            watch(cast("IO[str]", monitor.stdout), run=run, model=model)
     except OSError as err:
-        print(WATCH_ENDED.format(f"pw-dump did not run: {wording.reason(err)}"), file=sys.stderr)
-        return 1
-    print(WATCH_ENDED.format(wording.ended("pw-dump", monitor.returncode)), file=sys.stderr)
+        why = str(pipewire_client.not_run("pw-dump", err))
+    else:
+        why = wording.ended("pw-dump", monitor.returncode)
+    print(WORDS[model.key].watch_ended.format(why), file=sys.stderr)
     return 1
 
 

@@ -2,7 +2,7 @@
 
 This part owns the banner, what it shows and the one-second watch that counts it down and
 asks whether the macro still runs. Its window builds it, places the banner, hands it each
-`status` reply and removes the watch at the close; the Macros tab hands it Play's
+`status` reply and removes the watch at the close; the Macros tab hands it Run's
 `macro_run` reply.
 """
 
@@ -15,19 +15,15 @@ from typing import TYPE_CHECKING
 
 from gi.repository import Adw, GLib
 
+from ..macros import MACRO_RUNNING as RUNNING, MACRO_STARTS, REPEAT_WORDS, countdown_seconds
 from ..wording import number
-from .macro_page import REPEAT_CHOICES, REPEAT_LABELS
 
 if TYPE_CHECKING:                       # pragma: no cover
     from .worker import Call
 
 #: The macro banner, up while a macro runs or counts down. Stop sends `macro_stop`.
-MACRO_STARTS = "Macro {name} starts in {seconds} s. Click into the window it is for."
-MACRO_RUNNING = "Macro {name} is running ({mode})"
+MACRO_RUNNING = f"{RUNNING} ({{mode}})"
 STOP_LABEL = "Stop"
-#: The repeat modes as the banner names them, the editor's labels in lower case.
-MACRO_MODES = dict(zip(REPEAT_CHOICES, (label.lower() for label in REPEAT_LABELS),
-                       strict=True))
 #: How often the banner counts down and asks whether the macro still runs.
 MACRO_WATCH_MS = 1000
 
@@ -80,33 +76,38 @@ class MacroBanner:
         self.show()
 
     def show(self) -> None:
-        """Put `running` on the macro banner, and keep the watch
-        running while it is up."""
+        """Put `running` on the macro banner and, while it is up, look again in
+        MACRO_WATCH_MS, or during a countdown when the count drops: a macro that has begun
+        is never still a second away."""
+        self.close()
         if self.running is None:
             self.banner.set_revealed(False)
             return
         name, repeat, due = self.running
-        left = math.ceil(due - time.monotonic()) if due is not None else 0
-        self.banner.set_title(
-            MACRO_STARTS.format(name=name, seconds=left) if left > 0
-            else MACRO_RUNNING.format(name=name, mode=MACRO_MODES.get(repeat, repeat)))
+        now = time.monotonic()
+        if due is not None and (left := countdown_seconds(due - now)) > 0:
+            self.banner.set_title(MACRO_STARTS.format(name=name, seconds=left))
+            # The count drops once `due - now` falls to `left - 1`: 1 to 1000 ms from now.
+            wait = math.ceil((due - now - (left - 1)) * 1000)
+        else:
+            self.banner.set_title(
+                MACRO_RUNNING.format(name=name, mode=REPEAT_WORDS.get(repeat, repeat)))
+            wait = MACRO_WATCH_MS
         self.banner.set_revealed(True)
-        if self._watch is None:
-            self._watch = GLib.timeout_add(MACRO_WATCH_MS, self._on_watch)
+        self._watch = GLib.timeout_add(wait, self._on_watch)
 
     def _on_watch(self) -> bool:
-        """Every second the banner is up, count it down and ask whether the macro still runs.
+        """Count the banner down and ask whether the macro still runs, once: show() adds
+        the next watch.
 
-        Active or not, since Play's countdown is for clicking into another window; not while
+        Active or not, since Run's countdown is for clicking into another window; not while
         suspended, where nobody sees it, and coming back reads once.
         """
-        if self.running is None:
-            self._watch = None
-            return False
+        self._watch = None
         self.show()
         if not self._suspended():
             self._tick()
-        return True
+        return False
 
     def _on_stop(self, _banner: Adw.Banner) -> None:
         """The banner's Stop: whatever macro runs, however it started."""

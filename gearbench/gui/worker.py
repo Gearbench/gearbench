@@ -4,11 +4,15 @@ round trip's reply.
 `DaemonWorker` is the one thread that talks to the daemon and does the window's
 file reads. `LoadingGuard` keeps a row the program sets from being read back as
 the user's change, and sets a row's value only when that changes it. `Settle`
-sends once after a run of changes stops. `daemon_down` and `unreachable` read a
+sends once after a run of changes stops, and `Pace` sends during one, at most
+once an interval; SETTLE_MS and LIVE_MS are the A50 X's page's and the volume
+rows' waits. `take_typed` takes a number typed in a spin row that the cursor
+may still be in. `named_layer` is the `layer` a request names. `daemon_down` and `unreachable` read a
 failed round trip through the daemon client's `failure`, as the CLI does, and
 `preview_reply` a preview's reply, the same way for every tab and dialog.
-`daemon_listening` says whether a daemon accepts on the socket. Nothing here builds a
-widget, so all of it is testable without a display.
+`daemon_listening` says whether a daemon accepts on the socket, and `unusable_socket`
+names one that could not be used, and why. Nothing here builds a widget, so all of it is
+testable without a display.
 """
 
 from __future__ import annotations
@@ -17,12 +21,23 @@ import queue
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Never, Protocol, Self
+from typing import TYPE_CHECKING, Never, Protocol, Self, cast
 
 from gi.repository import GLib
 
-from ..daemon import BUSY, DOWN, UNREAD, failure, listening, send_command, socket_path
-from ..wording import reason
+from ..daemon import (
+    BUSY,
+    DOWN,
+    NOT_REACHED,
+    NOT_RUNNING,
+    REPLY_UNREAD,
+    UNREAD,
+    failure,
+    listening,
+    send_command,
+    socket_path,
+)
+from ..wording import NO_REASON, escaped, reason
 
 if TYPE_CHECKING:                       # pragma: no cover
     from gi.repository import Adw, Gio, Gtk
@@ -36,6 +51,9 @@ Result = object | Exception
 ResultCallback = Callable[[Result], None]
 #: A callback taking the daemon's reply, or None once the failure was shown.
 Done = Callable[[dict | None], None]
+#: How long a round trip waits for the daemon's reply, in seconds; a request that can wait
+#: out a device's own timeouts passes longer.
+REPLY_WAIT = 3.0
 
 
 class Call(Protocol):
@@ -45,7 +63,7 @@ class Call(Protocol):
 
     def __call__(self, request: dict, callback: Done | None = None,
                  unanswered: Callable[[Exception], None] | None = None, /, *,
-                 timeout: float = 3.0) -> None: ...
+                 timeout: float = REPLY_WAIT) -> None: ...
 
 
 class SetStatus(Protocol):
@@ -56,10 +74,15 @@ class SetStatus(Protocol):
                  poll: bool = False) -> None: ...
 
 
-#: What `unreachable` says for UNREAD, BUSY and DOWN.
-NOT_READ = "the daemon's reply could not be read"
+#: The waits of the A50 X's sliders, which the volume rows share: a slider moved by its keys
+#: sends SETTLE_MS after the last change, so a run of arrow keys is one send (Settle); one the
+#: pointer drags sends at most once each LIVE_MS (Pace), five a second, about the pace the
+#: A50 X's own volume wheel sends at, six steps in about 2 s in its test (the owner's
+#: decision of 2026-10-22). The headset keeps each value it is sent.
+SETTLE_MS = 300
+LIVE_MS = 200
+#: What `unreachable` says for BUSY; for DOWN it says the client's NOT_RUNNING.
 NOT_IN_TIME = "the daemon did not answer in time; it may be busy"
-NOT_RUNNING = "the daemon is not running"
 
 
 def daemon_down(error: BaseException | None) -> bool:
@@ -81,12 +104,19 @@ def unreachable(error: BaseException) -> str:
     """
     kind = failure(error)
     if kind == UNREAD:
-        return NOT_READ
+        return REPLY_UNREAD
     if kind == BUSY:
         return NOT_IN_TIME
     if kind == DOWN:
         return NOT_RUNNING
-    return f"the daemon could not be reached at {socket_path()}: {reason(error)}"
+    return f"{NOT_REACHED} at {unusable_socket(error)}"
+
+
+def unusable_socket(error: BaseException) -> str:
+    """The socket's path and `error`'s words, for a socket `failure` calls UNKNOWN. Escaped:
+    a runtime folder whose name is not UTF-8 gives a lone surrogate, on which PyGObject
+    raises."""
+    return f"{escaped(socket_path())}: {reason(error)}"
 
 
 def preview_reply(reply: Reply, last: str | None,
@@ -100,7 +130,7 @@ def preview_reply(reply: Reply, last: str | None,
         return last
     if reply.get("ok"):
         return None
-    message = str(reply.get("error", "the preview was refused"))
+    message = str(reply.get("error", NO_REASON))
     if message != last:
         refused({**reply, "error": message})
     return message
@@ -115,9 +145,11 @@ class Job:
     #: Takes the reply, or with `work` what it returned or raised. `call`, `preview` and
     #: `run` each check their callback against what it gets; the two kinds share the queue,
     #: so the type says nothing of the argument.
-    callback: Callable[[Never], None] | None
+    callback: Callable[[Never], None]
     timeout: float
     work: Callable[[], object] | None = None
+    #: The daemon's reply, or what `work` returned or raised, set on the worker thread.
+    reply: Reply | Result = None
 
 
 class LoadingGuard:
@@ -148,7 +180,7 @@ class LoadingGuard:
 
     # The guard only for a change: every poll comes through these, and a click landing
     # while it is held is dropped.
-    def put_active(self, row: Adw.SwitchRow, value: bool) -> None:
+    def put_active(self, row: Adw.SwitchRow | Gtk.ToggleButton, value: bool) -> None:
         if row.get_active() != value:
             with self:
                 row.set_active(value)
@@ -211,16 +243,87 @@ class Settle:
         return GLib.SOURCE_REMOVE
 
 
+class Pace:
+    """Sends during a run of changes at most once an interval, `ms` long: the first change
+    at once, and a change in an interval at its end, so a slider follows a drag live at a
+    rate the device takes. The interval is a GLib timeout, so `send` runs on the main
+    loop."""
+
+    def __init__(self, send: Callable[[], None], ms: int) -> None:
+        self._send = send
+        self._ms = ms
+        #: The interval's GLib source id while one runs, and whether a change came in it.
+        self._source: int | None = None
+        self._owed = False
+
+    @property
+    def pending(self) -> bool:
+        """A change waits for the interval's end."""
+        return self._owed
+
+    def changed(self) -> None:
+        """A change: sent now and an interval started, or, in one, sent at its end."""
+        if self._source is not None:
+            self._owed = True
+            return
+        self._send()
+        self._source = GLib.timeout_add(self._ms, self._tick)
+
+    def cancel(self) -> None:
+        """Drop the change that waits and end the interval."""
+        if self._source is not None:
+            GLib.source_remove(self._source)
+            self._source = None
+        self._owed = False
+
+    def flush(self) -> bool:
+        """Send now the change that waits, and end the interval. True when one did."""
+        owed = self._owed
+        self.cancel()
+        if owed:
+            self._send()
+        return owed
+
+    def _tick(self) -> bool:
+        # An interval with no change ends the run; one with a change sends it and starts
+        # the next.
+        if not self._owed:
+            self._source = None
+            return GLib.SOURCE_REMOVE
+        self._owed = False
+        self._send()
+        return GLib.SOURCE_CONTINUE
+
+
+def named_layer(layer: tuple[int | None, str | None]) -> dict:
+    """The window's (M profile, game profile) `layer` as a request names it, which the daemon
+    refuses once another is in force (Daemon.check_layer): the M profile's number, and the
+    loaded game profile's name or None."""
+    profile, overlay = layer
+    return {"profile": profile, "overlay": overlay}
+
+
+def take_typed(*rows: Adw.SpinRow) -> None:
+    """Take the number typed in each spin row and not yet taken, as Enter does, for a read
+    of the rows with the cursor maybe still in one. A spin row takes typed text itself on
+    Enter and when the focus leaves it, and the window's close button moves no focus: at
+    the close GTK takes the text only as the window is destroyed, after each page's close
+    (measured with GTK 4.22.4)."""
+    for row in rows:
+        row.update()
+
+
 class DaemonWorker:
     """One thread that talks to the daemon, so the GTK main loop never waits.
 
     A preview's round trip is 36 ms, and the daemon can stall over a second repainting
     after a 0x8071 notification, which on the main thread froze the color picker.
 
-    One FIFO queue; each reply reaches its callback on the main thread through
-    GLib.idle_add, so callbacks may touch widgets. An unsent preview last in the queue
-    is replaced in its queue place by the next one of the same command, so a drag builds
-    no backlog and a commit queued after a preview is sent after it.
+    One FIFO queue; each job goes back to the main thread through GLib.idle_add with its
+    reply, which its callback gets there, so callbacks may touch widgets, and the job is
+    let go of there, so a widget its callback reaches is freed there. An unsent preview
+    last in the queue is replaced in its queue place by the next one of the same command,
+    so a drag builds no backlog and a commit queued after a preview is sent after it.
     """
 
     def __init__(self, send: Callable[..., dict] = send_command) -> None:
@@ -235,15 +338,14 @@ class DaemonWorker:
         self._thread = threading.Thread(target=self._run, name="gearbench-daemon", daemon=True)
         self._thread.start()
 
-    def call(self, request: dict, callback: ReplyCallback | None = None,
-             timeout: float = 3.0) -> None:
+    def call(self, request: dict, callback: ReplyCallback, timeout: float = REPLY_WAIT) -> None:
         if self._stopped:
             return
         with self._lock:
             self._open_preview = None
             self._queue.put(Job(request, callback, timeout))
 
-    def preview(self, request: dict, callback: ReplyCallback | None = None) -> None:
+    def preview(self, request: dict, callback: ReplyCallback) -> None:
         if self._stopped:
             return
         with self._lock:
@@ -252,11 +354,11 @@ class DaemonWorker:
                 self._open_preview.request = request
                 self._open_preview.callback = callback
                 return
-            self._open_preview = Job(request, callback, 3.0)
+            self._open_preview = Job(request, callback, REPLY_WAIT)
             self._queue.put(self._open_preview)
 
     def run[T](self, work: Callable[[], T],
-               callback: Callable[[T | Exception], None] | None = None) -> None:
+               callback: Callable[[T | Exception], None]) -> None:
         """Run `work` on the worker thread and hand the result to `callback`."""
         if self._stopped:
             return
@@ -265,36 +367,55 @@ class DaemonWorker:
             self._queue.put(Job({}, callback, 0.0, work))
 
     def stop(self) -> None:
-        """Drop replies from here on and let the thread exit after its current call."""
+        """Drop replies from here on and, here on the main thread, the jobs still queued, and
+        let the thread exit after its current call."""
         self._stopped = True
+        with self._lock:
+            self._open_preview = None
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
         self._queue.put(None)
 
     def _run(self) -> None:
-        while True:
-            job = self._queue.get()
-            if job is None or self._stopped:
-                return
-            with self._lock:
-                if job is self._open_preview:
-                    self._open_preview = None
-                request, callback, timeout = job.request, job.callback, job.timeout
-                work = job.work
-            if work is not None:
-                try:
-                    reply: Reply | Result = work()
-                except Exception as exc:  # noqa: BLE001 -- the thread must outlive one bad file
-                    reply = exc
-            else:
-                try:
-                    reply = self._send(request, timeout=timeout)
-                except (OSError, ValueError) as exc:
-                    # ValueError: a reply cut short mid-send does not parse, and anything
-                    # raised here ends the thread, after which nothing is answered.
-                    reply = exc
-            if callback is not None:
-                GLib.idle_add(self._deliver, callback, reply)
+        # A job's callback, its work and an exception's traceback can reach widgets, which
+        # GTK frees only on the main thread. So each job goes back to the main loop in a
+        # list the main loop empties (_deliver), and no frame of this thread holds the job
+        # once it is handed over: the main thread lets go of it last, whichever finishes
+        # first.
+        while (job := self._queue.get()) is not None:
+            handed = [job]
+            del job
+            handed[0].reply = self._reply(handed[0])
+            GLib.idle_add(self._deliver, handed)
 
-    def _deliver[T](self, callback: Callable[[T], None], reply: T) -> bool:
+    def _reply(self, job: Job) -> Reply | Result:
+        with self._lock:
+            if job is self._open_preview:
+                self._open_preview = None
+            request, timeout, work = job.request, job.timeout, job.work
+        # Let go of before anything can raise: a caught error's traceback keeps this frame,
+        # and the job keeps the error as its reply, a cycle only the collector frees, on
+        # whichever thread runs it.
+        del job
+        if work is not None:
+            try:
+                return work()
+            except Exception as exc:  # noqa: BLE001 -- the thread must outlive one failed job
+                return exc
+        try:
+            return self._send(request, timeout=timeout)
+        except (OSError, ValueError) as exc:
+            # ValueError: a reply cut short mid-send does not parse, and anything
+            # raised here ends the thread, after which nothing is answered.
+            return exc
+
+    def _deliver(self, handed: list[Job]) -> bool:
+        job = handed.pop()
         if not self._stopped:
-            callback(reply)
+            # The queue holds both kinds of job; `call`, `preview` and `run` each check
+            # their callback against what it gets (Job.callback).
+            cast("Callable[[Reply | Result], None]", job.callback)(job.reply)
         return GLib.SOURCE_REMOVE

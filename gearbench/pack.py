@@ -16,32 +16,30 @@ the pack chose them for its games (the owner's decision of 2026-09-28).
 from __future__ import annotations
 
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-from .config import PER_KEY, ConfigError, format_color, read_json, unprefixed, unread_reason
+from .config import PER_KEY, format_color
 from .import_plan import (
     CLASH_MACRO,
     CLASH_PROFILE,
     CLASH_WORDS,
     REPLACE,
     SKIP,
-    Clash,
     Existing,
     Plan,
-    keepers_last,
-    macro_text,
-    programs_for,
     step_lines,
+    take_programs,
 )
 from .keyboard import own_entry, shown_lighting
-from .library_files import by_name, slug
+from .library_files import by_name, slug, unread_reason
 from .lighting import ANIMATIONS
-from .macros import Macro, MacroLibrary
+from .macros import Macro, MacroLibrary, macro_summary
 from .profiles import GameProfile, Library
-from .wording import DIRECTION_TURNS, both_ends, counted, kind_of, reason, word_list
+from .settings_files import ConfigError, read_json, unprefixed
+from .wording import DIRECTION_TURNS, LEFT_OUT, both_ends, counted, kind_of, reason, word_list
 
 #: Where the package installs the pack.
 PACKAGED = Path("/usr/share/gearbench/pack")
@@ -100,7 +98,7 @@ def read_pack(directory: Path | None = None) -> Pack:
     # A folder a library could not list is one entry, under its own path in the pack. An
     # entry names its file or folder, so its reason leaves out the name and the path.
     for folder, library in ((PROFILES, profiles), (MACROS, macros)):
-        pack.broken += ([(folder, f"cannot be listed: {library.unlisted_reason}")]
+        pack.broken += ([(folder, f"could not be listed ({library.unlisted_reason})")]
                         if library.unlisted_reason is not None
                         else [(f"{folder}/{name}", unread_reason(name, why))
                               for name, why in library.skipped])
@@ -116,20 +114,27 @@ def _read_notes(pack: Pack) -> None:
     not hold a direction turn, which shows its text in another order than it is written:
     a pack's notes come from whoever made the pack (the owner's decision of 2026-10-07)."""
     path = pack.directory / NOTES
-    if not path.is_file():
+    # Not is_file: a link to nothing or a file of another type is read, so read_json
+    # names its fault and it is listed broken.
+    if not path.exists(follow_symlinks=False):
         return
     try:
         raw = read_json(path)
     except (ConfigError, OSError) as exc:
-        pack.broken.append((NOTES, f"cannot be read: {unprefixed(reason(exc), path)}"))
+        pack.broken.append((NOTES, f"could not be read ({unprefixed(reason(exc), path)})"))
         return
-    if not isinstance(raw, dict) or set(raw) - {PROFILES, MACROS}:
-        pack.broken.append((NOTES, f"must be an object of {PROFILES!r} and {MACROS!r}"))
+    if not isinstance(raw, dict):
+        why = f"is an object of {PROFILES!r} and {MACROS!r}, not {kind_of(raw)}"
+        pack.broken.append((NOTES, why))
+        return
+    if unknown := [key for key in raw if key not in (PROFILES, MACROS)]:
+        pack.broken.append((NOTES, f"{unknown[0]!r} is not {PROFILES!r} or {MACROS!r}"))
         return
     for group, kind, items in ((PROFILES, PROFILE, pack.profiles), (MACROS, MACRO, pack.macros)):
         notes = raw.get(group, {})
         if not isinstance(notes, dict):
-            pack.broken.append((NOTES, f"{group!r} must map names to lines"))
+            why = f"{group!r} is an object of names and notes, not {kind_of(notes)}"
+            pack.broken.append((NOTES, why))
             continue
         names = {slug(item.name) for item in items}
         for name, line in notes.items():
@@ -154,7 +159,7 @@ def _note_fault(line: object) -> str | None:
     """Why a note of notes.json is refused, or None. A refused character is named by its
     code point: a direction turn and a lone surrogate draw nothing a reader could find."""
     if not isinstance(line, str):
-        return f"must be text, not {kind_of(line)}"
+        return f"is text, not {kind_of(line)}"
     if not line.strip():
         return "is blank"
     if len(line) > MAX_NOTE:
@@ -168,7 +173,7 @@ def _note_fault(line: object) -> str | None:
 
 
 #: What a pack profile may not hold, by GameProfile field, and why it is refused: every
-#: field but its name, its programs and its lighting.
+#: field but its name, its programs, its lighting and its mouse color.
 REFUSED_FIELDS = {"bindings": "binds a G key", "shift": "binds a G key",
                   "mouse": "binds a mouse button",
                   "mouse_tuning": "holds DPI stages or a report rate"}
@@ -190,9 +195,10 @@ def lighting_text(profile: GameProfile) -> str:
     keyboard)."""
     light = shown_lighting(profile.lighting, None, None)[0]
     if light.effect in ANIMATIONS:
-        return f"{light.effect.capitalize()} effect"
+        # "Pulsar point effect", as the window's Effect row names it.
+        return f"{light.effect.replace('-', ' ').capitalize()} effect"
     # Disabled darkens the board, and a per-key layout's keys still show over
-    # it (keyboard.shown_color).
+    # it (Keyboard.shown_color).
     dark = light.effect == "disabled"
     if light.mode == PER_KEY and (light.keys or not dark):
         rest = "dark" if dark else format_color(light.background)
@@ -204,7 +210,7 @@ def lighting_text(profile: GameProfile) -> str:
 
 def programs_text(profile: GameProfile) -> str:
     """What loads a pack profile imported with its programs."""
-    return (f"loads for {word_list(profile.processes, 'and')}" if profile.processes
+    return (f"loads for {word_list(profile.processes)}" if profile.processes
             else "loads by hand")
 
 
@@ -224,7 +230,7 @@ def as_json(pack: Pack) -> dict:
 
 def listing(pack: Pack) -> list[str]:
     """`import-pack --list`: each profile and macro, a macro's steps under it,
-    and the broken files."""
+    and what was left out (`broken`)."""
     lines = [f"Game profiles in {pack.directory / PROFILES}:"]
     for p in pack.profiles:
         lines.append(f"    {p.name}: {lighting_text(p)[:1].lower()}{lighting_text(p)[1:]}; "
@@ -237,14 +243,14 @@ def listing(pack: Pack) -> list[str]:
         lines.append(MACRO_RISK)
     lines.append(f"Macros in {pack.directory / MACROS}:")
     for macro in pack.macros:
-        lines.append(f"    {macro.name}: {macro_text(macro.repeat, macro.steps)}")
+        lines.append(f"    {macro.name}: {macro_summary(len(macro.steps), macro.repeat)}")
         if note := pack.note(MACRO, macro.name):
             lines.append(f"        {note}")
         lines += ["    " + line for line in step_lines(macro.steps)]
     if not pack.macros:
         lines.append("    none")
     if pack.broken:
-        lines.append("Broken, never imported:")
+        lines.append(f"{LEFT_OUT}:")
         lines += [f"    {file}: {why}" for file, why in pack.broken]
     return lines
 
@@ -256,11 +262,10 @@ def _find(items: Iterable[GameProfile | Macro], name: str) -> str | None:
     return None if found is None else found.name
 
 
-def chosen_names(pack: Pack, names: Iterable[str]) -> tuple[list[str], list[str]]:
+def chosen_names(pack: Pack, names: Sequence[str]) -> tuple[list[str], list[str]]:
     """The game profiles and macros `names` names, by the pack's own names,
     or all of each with none named. Raises PackError for a name the pack
     does not have."""
-    names = list(names)
     if not names:
         return [p.name for p in pack.profiles], [m.name for m in pack.macros]
     profiles: set[str | None] = set()
@@ -301,13 +306,30 @@ def replace_choices(pack: Pack, names: Iterable[str],
 
 # -- the plan --------------------------------------------------------------
 
-def _same_lighting(profile: GameProfile, yours: GameProfile | None) -> bool:
+def _same_lighting(profile: GameProfile, yours: GameProfile) -> bool:
     """Whether `yours` has the pack profile's lighting for each keyboard model the pack's has,
     each under any of its ids (own_entry), the entry merge_under keeps: what a replace would
-    write (Games._import_profile)."""
-    return yours is not None and all(own_entry(yours.lighting, model)
-                                     == own_entry(profile.lighting, model)
-                                     for model in profile.lighting)
+    write (GameCommands._import_profile)."""
+    return all(own_entry(yours.lighting, model) == own_entry(profile.lighting, model)
+               for model in profile.lighting)
+
+
+def _there_already(plan: Plan, profile: GameProfile, have: str | None,
+                   yours: GameProfile | None) -> bool:
+    """Whether the pack's `profile` asks nothing of `yours`, your game profile `have`, and
+    `plan` says why: with the same lighting, and the pack's mouse color where it gives one, it
+    is already there, and with the same lighting and no mouse color of its own yours takes the
+    pack's alone, unasked
+    (Plan.fill_mouse_color, the owner's decision of 2026-10-23)."""
+    if have is None or yours is None or not _same_lighting(profile, yours):
+        return False
+    if profile.mouse_color is None or profile.mouse_color == yours.mouse_color:
+        plan.say_already(PROFILE, profile.name, have)
+        return True
+    if yours.mouse_color is None:
+        plan.fill_mouse_color(profile.name, have, format_color(profile.mouse_color))
+        return True
+    return False
 
 
 def make_plan(pack: Pack, profiles: Iterable[str], macros: Iterable[str], existing: Existing,
@@ -319,9 +341,9 @@ def make_plan(pack: Pack, profiles: Iterable[str], macros: Iterable[str], existi
     rest, and with neither a clash stays unresolved. A profile `with_programs` names loads
     for the programs the pack gives it; one it leaves out, or one the pack gives none, keeps
     yours on a replace and loads by hand when new. `with_programs` has no default, so each
-    front end says which. A profile of a name you have with the same lighting, whatever its
-    bindings and programs, or a macro with the same steps and repeat, is already there: no
-    clash. A program another of your profiles loads stays with it, as in the G HUB import
+    front end says which. A profile that asks nothing of yours (`_there_already`), whatever
+    its bindings and programs, or a macro with the same steps and repeat, is no clash. A
+    program another of your profiles loads stays with it, as in the G HUB import
     (`import_plan.programs_for`).
     """
     choices = choices or {}
@@ -329,12 +351,7 @@ def make_plan(pack: Pack, profiles: Iterable[str], macros: Iterable[str], existi
     loaded = set(with_programs)
 
     def choose(kind: str, name: str, have: str) -> str | None:
-        clash = Clash(kind, name, have)
-        plan.clashes.append(clash)
-        choice = choices.get((kind, name), default)
-        if choice not in CHOICES:
-            plan.unresolved.append(clash)
-            return None
+        choice = plan.ask(kind, name, have, choices, default, CHOICES)
         if choice == SKIP:
             plan.say_skipped(kind, name)
         return choice
@@ -345,8 +362,7 @@ def make_plan(pack: Pack, profiles: Iterable[str], macros: Iterable[str], existi
     for profile in (p for p in pack.profiles if p.name in wanted):
         have = existing.profile(profile.name)
         yours = existing.games.get(have) if have is not None else None
-        if have is not None and _same_lighting(profile, yours):
-            plan.say_already(PROFILE, profile.name, have)
+        if _there_already(plan, profile, have, yours):
             continue
         if have is not None and choose(PROFILE, profile.name, have) != REPLACE:
             continue
@@ -362,12 +378,7 @@ def make_plan(pack: Pack, profiles: Iterable[str], macros: Iterable[str], existi
         plan.profiles.append((body, have is not None))
     # Once every profile is chosen: a replace keeps a program of yours that
     # another profile of the pack goes without for it.
-    programs, keeping = programs_for(taking, existing)
-    for body, _replace in plan.profiles:
-        if body["name"] in programs:
-            body["processes"], said = programs[body["name"]]
-            plan.said += said
-    keepers_last(plan, keeping)
+    take_programs(plan, taking, existing)
     wanted = set(macros)
     for macro in (m for m in pack.macros if m.name in wanted):
         have = existing.macro(macro.name)

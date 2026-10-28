@@ -9,9 +9,7 @@
 # nodes are the sound subsystem, which systemd's 70-uaccess.rules already
 # grants the seat user; this rule adds nothing there.
 #
-# Matched on properties, like the G915's cabled rule, and for the same reason:
-# bInterfaceNumber lives on the USB interface and idVendor/idProduct on the
-# USB device, and every ATTRS key in one rule must match the same parent. The
+# Matched on properties, as 70-g915.rules is, for the reason it gives. The
 # Xbox edition (002d) and console mode (002b, which has no HID interface) stay
 # out until read off the hardware.
 #

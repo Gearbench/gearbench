@@ -3,14 +3,18 @@ dialog over the presets Gearbench keeps beside them (presets_dialog).
 
 A change goes to the base station's RAM at once and to its flash only on Save,
 so a banner lists what differs from flash. The tab polls the daemon on its own
-timer, with its own re-entry guard, as the Mouse tab does.
+timer, with its own re-entry guard, as the Mouse tab does. Game output and Chat output
+follow Balance, their volume as GNOME's Sound settings set it (volume_rows), and the
+Microphone group ends with Mic input, the microphone's volume set the same way, and Input
+level, its level live (input_meter_row).
 """
 
 from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import asdict, replace
+from functools import partial
 from pathlib import Path
 from typing import cast
 
@@ -21,8 +25,12 @@ from ..astro import (
     AUTO_OFF_MINUTES,
     BALANCE_RANGE,
     BANDS,
+    BASE_SILENT,
+    DOCKED_OFF,
     FREQ_RANGE,
     GAIN_RANGE,
+    NOISE_GATES,
+    OFF_OR_AWAY,
     PRESETS,
     SETTING_CHOICES,
     SETTING_NAMES,
@@ -34,96 +42,115 @@ from ..astro import (
     WIDTH_RANGE,
     Band,
     EqPreset,
-    balance_shares,
+    game_share,
 )
 from ..astroeq import load_astroeq
-from ..wording import number, reason, whole
+from ..battery import kept_at
+from ..spatial import A50
+from ..system_volume import MIC
+from ..wording import capitalized, hertz, number, printable, reason, shares_words, signed, whole
 from .holds import Holds
-from .presets_dialog import PresetsDialog, ask_name
+from .input_meter_row import InputMeterRow
+from .presets_dialog import SAVE_BODY, TITLE, PresetsDialog
 from .style import (
     ASLEEP,
     ASTROEQ_IMPORT,
+    ASTROEQ_NOT_IMPORTED,
     ASTROEQ_REFUSED,
+    ASTROEQ_TITLE,
+    BALANCE,
     DAEMON_WAIT,
+    FIRMWARE,
+    HEADSET_TAB,
+    LOOKING,
+    NOT_FOUND,
+    NOT_READ,
+    PRESET,
     PRESET_RESET,
+    REVERT_TO_SAVED,
+    SAVE_HEADING,
+    SIDETONE,
+    STREAM_MIX,
     DeviceView,
     EntryTexts,
+    ask_name,
     astroeq_dialog,
     confirm,
+    displayable,
     name_refusal,
+    offer_save_new,
     percent,
     picked_path,
-    pointer_button,
+    plain_row,
     preset_label,
+    save_new_row,
     set_dot,
     show_battery,
     spoken_scale,
     status_rows,
+    through,
     toast_note,
+    watch_name,
+    watch_pointer,
 )
-from .tips import explain_choices
+from .tips import NOISE_GATE_TIPS, explain_choices
+from .volume_rows import OUTPUT_WORDS, VolumeRows
 from .worker import (
+    REPLY_WAIT,
     Call,
     DaemonWorker,
     LoadingGuard,
     Reply,
     SetStatus,
     daemon_down,
+    take_typed,
     unreachable,
 )
 
-#: The status page's titles while no headset has been seen (DeviceView).
-LOOKING = "Looking for the headset…"
+#: The status page's title over the reason while no headset has been seen (DeviceView).
 NO_HEADSET = "Headset not available"
-#: The status row's title, by state.
-HEADSET_ON = "Headset on"
-HEADSET_OFF = "Headset off or out of range"
-NOT_ANSWERING = "Not answering"
+#: The Status row's subtitle, by state: the route while the headset is linked, the
+#: headset off its link, docked or not, and the base station silent.
+LINKED = through("base station")
+HEADSET_OFF = capitalized(OFF_OR_AWAY)
+HEADSET_DOCKED = capitalized(DOCKED_OFF)
+NOT_ANSWERING = capitalized(BASE_SILENT)
 
 #: The banner's text for unsaved settings and during a save, which hides the button.
 NOT_SAVED = "Not saved to the base station: {}"
 SAVING = "Saving to the base station…"
 SAVE_LABEL = "Save"
-SAVED = "Saved to the base station."
+SAVED = "Saved to the base station"
 REVERT_HEADING = "Revert to saved?"
-REVERT_BODY = ("Unsaved changes go back to what the base station has saved. "
-               "Auto shut-off stays as it is: the base station cannot report its saved value.")
+REVERT_BODY = "Auto shut-off stays as it is: the base station cannot report its saved value."
 #: A revert's toast when neither its note nor the note's first sentence
 #: fits in one (short_note).
-NOT_PUT_BACK = "Not every change was put back"
-#: Each setting's row title: its name (SETTING_NAMES), but the stream port's rows
-#: are titled without "Stream", under their group's title.
-ROW_TITLES = {**SETTING_NAMES, "stream_game": "Game", "stream_chat": "Chat",
+NOT_REVERTED = "Not every change was reverted"
+#: Each setting's slider's name for a screen reader: its name (SETTING_NAMES), but the
+#: sidetone's is every headset page's row title, which says what it is (the owner's
+#: decision of 2026-10-17); the banner and the refusals keep Sidetone.
+SLIDER_NAMES = {**SETTING_NAMES, "sidetone": SIDETONE}
+#: Each setting's row title: its slider's name, but the stream mix's rows are titled
+#: without "Stream", under their group's title.
+ROW_TITLES = {**SLIDER_NAMES, "stream_game": "Game", "stream_chat": "Voice",
               "stream_mic": "Mic", "stream_aux": "Aux"}
 #: The settings each group holds; a group with none of them in the reply hides.
 MIC_SETTINGS = ("mic_level", "sidetone", "noise_gate", "mic_eq")
 STREAM_SETTINGS = ("stream_game", "stream_chat", "stream_mic", "stream_aux")
 BASE_SETTINGS = ("default_balance", "alert_volume", "auto_off")
-#: The settings that are sliders, with their ranges.
-SLIDER_RANGES = SETTING_RANGES
-#: The combo rows: the values the socket takes, in the order the rows list them.
-CHOICES = SETTING_CHOICES
+#: The combo rows' labels, in SETTING_CHOICES's order: a row's index is its value's there.
 CHOICE_LABELS = {**{name: tuple(word.title() for word in words)
                     for name, words in SETTING_WORDS.items()},
                  "auto_off": tuple(f"{m} minutes" for m in AUTO_OFF_MINUTES)}
-#: Command Center's own descriptions of the noise gates, shortened, in
-#: NOISE_GATES order.
-NOISE_GATE_TIPS = (
-    "The lightest gate, for a quiet room: the most natural voice, with the room in it.",
-    "Very lightly gated, for quiet speech late at night.",
-    "Astro's default: removes most light background noise.",
-    "The most aggressive, for loud rooms. It gates the sidetone too.",
-)
-STREAM_HELP = "The mix the base station sends to its stream port."
-EQ_HELP = "Changes go to the active preset."
-#: The row that saves the active preset into the library, and the one that opens the
-#: library's dialog to load one into a slot.
-SAVE_NEW = "Save as new preset…"
+STREAM_HELP = "What the base station's stream port sends"
+#: The tooltip of the row that saves the active preset into the library, and the row that
+#: opens the library's dialog to load one into a slot.
 SAVE_NEW_HELP = "Keeps the active preset's sound on this computer"
-LOAD_PRESET = "Load preset to headset…"
-LOAD_PRESET_HELP = "Puts a saved preset into slot 1, 2 or 3"
-#: The Reset to default row's tooltip, with the name of the active slot's default.
-RESET_HELP = "Puts back {}; Save keeps it"
+LOAD_PRESET = f"{TITLE}…"
+LOAD_PRESET_HELP = "Puts a preset of the library into slot 1, 2 or 3"
+#: The Reset to default row's tooltip, with the name of the active slot's default: what
+#: comes back, as the G432's tooltip says it. Put back is the first-read values' word.
+RESET_HELP = "{} back in this slot; Save keeps it"
 MIX_HELP = "Set by the headset's Game and Voice buttons"
 
 #: The room a slider other than a band's leaves at its right, where a band row draws its
@@ -143,16 +170,37 @@ SPIN_SETTLE_MS = 600
 #: How often the page asks whether a save is done, and for how long.
 SAVE_POLL_MS = 500
 SAVE_WAIT = 10.0
+#: The start of each equalizer edit's Holds key. gains_key and band_key add its preset, so a
+#: write to a preset the headset's EQ button switched away from holds none of the new
+#: preset's rows.
+GAINS_KEY, BAND_KEY = "gains:", "band_"
+
+
+def gains_key(preset: int) -> str:
+    return f"{GAINS_KEY}{preset}"
+
+
+def band_key(band: int, preset: int) -> str:
+    return f"{BAND_KEY}{band}:{preset}"
+
 
 def _int(value: object, low: int, high: int) -> int | None:
     """`value` if it is an int in low..high, else None."""
     return value if whole(value) and low <= value <= high else None
 
 
+def _active_bands(preset: dict) -> dict[int, dict]:
+    """Each band's `active` values in a preset of the reply, by its number; a list or an
+    entry the reply gives in a shape it should not is left out."""
+    found = preset.get("bands")
+    return {b["band"]: values for b in (found if isinstance(found, list) else ())
+            if isinstance(b, dict) and whole(b.get("band"))
+            and isinstance(values := b.get("active"), dict)}
+
+
 def balance_text(value: int) -> str:
     """A Game/Voice balance, 0 all Voice and 255 all Game, in percent."""
-    voice, game = balance_shares(value)
-    return f"Voice {voice}% · Game {game}%"
+    return shares_words(game_share(value))
 
 
 def slider_text(name: str, value: int) -> str:
@@ -166,19 +214,20 @@ def snapped(value: int) -> int:
 
 
 def unsaved_text(keys: list[str]) -> str:
-    """The banner's list: `preset_2` is "Preset 2", a setting its name."""
-    words = [f"Preset {key.removeprefix('preset_')}" if key.startswith("preset_")
+    """The banner's list: `preset_2` is "Slot 2", the base station's place, a setting its
+    name."""
+    words = [f"Slot {key.removeprefix('preset_')}" if key.startswith("preset_")
              else SETTING_NAMES.get(key, key.replace("_", " ")) for key in keys]
     return NOT_SAVED.format(", ".join(words))
 
 
 def versions_text(versions: object) -> str:
-    """The status row's subtitle: the firmware versions the reply gives."""
+    """The Firmware row's subtitle: the firmware versions the reply gives, or NOT_READ."""
     versions = versions if isinstance(versions, dict) else {}
     parts = [f"{what} {versions[key]}"
-             for what, key in (("base station", "base"), ("headset", "headset"))
+             for what, key in (("Base station", "base"), ("headset", "headset"))
              if isinstance(versions.get(key), str)]
-    return f"Firmware: {', '.join(parts)}" if parts else ""
+    return ", ".join(parts) if parts else NOT_READ
 
 
 def _balance_scale(label: str) -> Gtk.Scale:
@@ -261,9 +310,7 @@ class SaveWatch:
         return True
 
     def take(self, info: dict, saving: bool) -> None:
-        """A `headset` reply, `saving` what it says of a save running: once it says the save
-        accepted is over, say how it went, and read every setting again unless the save
-        worked and was read back."""
+        """A `headset` reply, `saving` what it says of a save running."""
         if self.unsure:
             self.unsure = False
             if saving:
@@ -273,7 +320,7 @@ class SaveWatch:
             return
         self.stop()
         error = info.get("save_error")
-        self._say(str(error) if error else SAVED)
+        self._say(capitalized(str(error)) if error else SAVED)
         # A save that worked was read back before this reply, which then lists nothing
         # unsaved; one that failed, or whose read-back was cut short, owes the read.
         if error or info.get("unsaved"):
@@ -294,10 +341,10 @@ class SaveWatch:
 
 
 class HeadsetPage:
-    """The Headset tab: status, microphone, equalizer, stream port and base
+    """The Headset tab: status, microphone, equalizer, stream mix and base
     station, with Save and Revert for what differs from flash.
 
-    `call` and `refused` are the window's. Every write goes through `call` and answers
+    `call` is the window's. Every write to the base station goes through `call` and answers
     with the whole `headset` reply, which sets the rows. HeadsetStack puts the Spatial sound
     group under Revert, in `page`, while this page shows.
     """
@@ -305,24 +352,21 @@ class HeadsetPage:
     #: The last reply said the base station answers, and a save is running.
     answering = True
     saving = False
+    #: The rows take a change (_set_editable).
+    _editable = False
 
     def __init__(self, parent: Gtk.Window, worker: DaemonWorker, call: Call,
                  toast: Callable[..., object],
-                 set_status: SetStatus,
-                 refused: Callable[[dict], None]) -> None:
+                 set_status: SetStatus) -> None:
         self._parent = parent
         self._worker = worker
         self._call = call
         self._toast = toast
-        self._refused = refused
         self._set_status = set_status
 
         self._loading = LoadingGuard()
         self._pending = False
-        #: The last failure shown, so a missing base does not toast every poll and the
-        #: problem banner stays down meanwhile, and the `headset_*` problem the last status
-        #: carried (show_problem).
-        self._error: str | None = None
+        #: The headset problem the last status gave the page (show_problem).
         self._problem: str | None = None
         #: A `read: True` was answered by a responsive base station with no save
         #: running, so the daemon ran it. The tab asks for one when first shown and
@@ -336,11 +380,18 @@ class HeadsetPage:
         self._preset_ids: list[int] = []
         self._preset_labels: list[str] = []
         self._holds = Holds()
+        #: The window's close ran (close): the band rows send nothing from then on.
+        self._closed = False
         self._shown = EntryTexts()
+        #: The Name row held text being typed when _set_editable grayed it out, which took
+        #: the cursor: the polls leave that text, as they leave typing, until a name is put.
+        self._typed_when_grayed = False
         # Lambdas, so each finds the page's method as it runs, a stand-in set later included.
         self.save_watch = SaveWatch(lambda: None if self._pending else self.refresh(ask=False),
                                     lambda text: self._toast(text),
                                     lambda: self.refresh(read=True))
+        self.meter = InputMeterRow(worker)
+        self.volumes = VolumeRows(worker, toast, inset=ARROW_ROOM)
         self.widget = self._build()
 
     # -- construction -----------------------------------------------------
@@ -354,57 +405,63 @@ class HeadsetPage:
         page.append(self._status_group())
         page.append(self._mic_group())
         self.library = PresetsDialog(self._parent, self._worker, self._toast, self.write_preset,
-                                     self.shown_preset)
+                                     self.shown_preset, self._show_save_new)
         page.append(self._eq_group())
         page.append(self._stream_group())
         page.append(self._base_group())
         page.append(self._revert_group())
 
-        # Top bars, so they show whatever the tab is scrolled to. Not markup: the problem
-        # is the daemon's words, and the unsaved list can carry them (unsaved_text).
-        self.problem_banner = Adw.Banner(use_markup=False)
+        # A top bar, so it shows whatever the tab is scrolled to. Not markup: the unsaved
+        # list can carry the daemon's words (unsaved_text). The headset's problems are the
+        # Status row's (show_state, _failed).
         self.save_banner = Adw.Banner(use_markup=False)
         self.save_banner.connect("button-clicked", self.on_save)
         self.view = DeviceView(page, "audio-headset-symbolic", LOOKING)
         toolbar = Adw.ToolbarView(content=self.view.stack)
-        toolbar.add_top_bar(self.problem_banner)
         toolbar.add_top_bar(self.save_banner)
         return toolbar
 
     def _status_group(self) -> Adw.PreferencesGroup:
-        """The status group: the headset's state, its battery and its live balance."""
+        """The status group: the headset's state and its readings."""
         # Titled from the reply: its name.
-        status = self.status_group = Adw.PreferencesGroup(title="Headset")
+        status = self.status_group = Adw.PreferencesGroup(title=HEADSET_TAB)
         self.state_row, self.state_dot, self.battery_row, self.battery_icon = status_rows(
-            status, NOT_ANSWERING)
-        # Read only, set by the headset's buttons; grayed out so it does not look draggable.
-        self.mix_scale = _balance_scale("Game and voice balance")
-        self.mix_scale.update_property([Gtk.AccessibleProperty.READ_ONLY], [True])
-        mix = _between(self.mix_scale)
-        mix.set_sensitive(False)
-        self.mix_row = Adw.ActionRow(title="Balance", use_markup=False, visible=False)
-        self.mix_row.add_suffix(_in_line(mix))
+            status)
+        # Its own row, as the G432's: the state row says the state.
+        self.firmware_row = plain_row(Adw.ActionRow, FIRMWARE, "", visible=False)
+        status.add(self.firmware_row)
+        # A reading, set by the headset's buttons, as the Centurion's: a grayed slider would
+        # read as a setting the device refuses, beside the Default balance slider.
+        self.mix_row = plain_row(Adw.ActionRow, BALANCE, "", tooltip_text=MIX_HELP,
+                                 visible=False)
         status.add(self.mix_row)
+        # Under Balance (the owner's decision of 2026-10-25).
+        for word in OUTPUT_WORDS:
+            status.add(self.volumes.rows[word])
         return status
 
     def _mic_group(self) -> Adw.PreferencesGroup:
-        """The Microphone group: two sliders, the noise gate and the mic EQ."""
         mic = self.mic_group = Adw.PreferencesGroup(title="Microphone")
         mic.add(self._slider_row("mic_level"))
         mic.add(self._slider_row("sidetone"))
-        mic.add(self._combo_row("noise_gate", NOISE_GATE_TIPS))
+        mic.add(self._combo_row("noise_gate", tuple(NOISE_GATE_TIPS[gate]
+                                                      for gate in NOISE_GATES)))
         mic.add(self._combo_row("mic_eq"))
+        mic.add(self.volumes.rows[MIC])
+        mic.add(self.meter.row)
         return mic
 
     def _eq_group(self) -> Adw.PreferencesGroup:
-        """The Equalizer group: the preset and its name, a row per band, the import, Save as
-        new preset, Load preset to headset and Reset to default."""
-        eq = self.eq_group = Adw.PreferencesGroup(title="Equalizer", description=EQ_HELP)
-        self.preset_row = Adw.ComboRow(title="Preset", model=Gtk.StringList.new([]))
+        eq = self.eq_group = Adw.PreferencesGroup(title="Equalizer")
+        # The name as the subtitle, as the Keyboard tab's Active: a preset's name is one
+        # people type, and the inline value is cut at 20 characters.
+        self.preset_row = Adw.ComboRow(title=PRESET, use_subtitle=True,
+                                       model=Gtk.StringList.new([]))
         self.preset_row.connect("notify::selected", self.on_preset)
         eq.add(self.preset_row)
         self.name_row = Adw.EntryRow(title="Name", show_apply_button=True)
         self.name_row.connect("apply", self.on_name)
+        watch_name(self.name_row)
         eq.add(self.name_row)
         self.band_rows: list[Adw.ExpanderRow] = []
         self.gain_scales: list[Gtk.Scale] = []
@@ -413,7 +470,7 @@ class HeadsetPage:
         for band in BANDS:
             row = Adw.ExpanderRow(title=f"Band {band}")
             gain = spoken_scale(*GAIN_RANGE, f"Band {band} gain", page=1, origin=False,
-                                spoken="{:+d} dB".format)
+                                spoken=signed)
             gain.add_mark(0, Gtk.PositionType.BOTTOM, None)
             gain.connect("value-changed", self.on_gain, band)
             row.add_suffix(gain)
@@ -436,35 +493,33 @@ class HeadsetPage:
         self.import_row = Adw.ButtonRow(title=ASTROEQ_IMPORT,
                                         start_icon_name="document-open-symbolic")
         self.import_row.connect("activated", self.on_import)
+        # The rows that bring a curve in first, as the G432's Copy, then the save and the
+        # reset: the equalizer group's one order (the owner's decision of 2026-10-22).
         eq.add(self.import_row)
-        self.save_new_row = Adw.ButtonRow(title=SAVE_NEW, tooltip_text=SAVE_NEW_HELP,
-                                          start_icon_name="document-save-as-symbolic")
-        self.save_new_row.connect("activated", self.on_save_new)
-        eq.add(self.save_new_row)
         self.load_row = Adw.ButtonRow(title=LOAD_PRESET, tooltip_text=LOAD_PRESET_HELP,
                                       start_icon_name="document-send-symbolic")
         self.load_row.connect("activated", lambda _row: self.library.open())
         eq.add(self.load_row)
+        self.save_new_row = save_new_row(SAVE_NEW_HELP, self.on_save_new)
+        eq.add(self.save_new_row)
         self.reset_row = Adw.ButtonRow(title=PRESET_RESET, start_icon_name="edit-undo-symbolic")
         self.reset_row.connect("activated", self.on_reset)
         eq.add(self.reset_row)
         return eq
 
     def _stream_group(self) -> Adw.PreferencesGroup:
-        """The Stream port group: a slider per STREAM_SETTINGS name."""
-        stream = self.stream_group = Adw.PreferencesGroup(title="Stream port",
+        """The Stream mix group: a slider per STREAM_SETTINGS name."""
+        stream = self.stream_group = Adw.PreferencesGroup(title=STREAM_MIX,
                                                           description=STREAM_HELP)
         for name in STREAM_SETTINGS:
             stream.add(self._slider_row(name))
         return stream
 
     def _base_group(self) -> Adw.PreferencesGroup:
-        """The Base station group: the default balance, the alert volume and auto shut-off."""
         base = self.base_group = Adw.PreferencesGroup(title="Base station")
         base.add(self._slider_row("default_balance"))
-        pointer = Gtk.EventControllerLegacy(propagation_phase=Gtk.PropagationPhase.CAPTURE)
-        pointer.connect("event", self._on_balance_pointer)
-        self.sliders["default_balance"].add_controller(pointer)
+        watch_pointer(self.sliders["default_balance"], partial(self.on_press, "default_balance"),
+                      partial(self.on_release, "default_balance"))
         base.add(self._slider_row("alert_volume"))
         base.add(self._combo_row("auto_off"))
         return base
@@ -472,7 +527,7 @@ class HeadsetPage:
     def _revert_group(self) -> Adw.PreferencesGroup:
         """The group that holds Revert to saved."""
         self.revert_group = Adw.PreferencesGroup()
-        self.revert_row = Adw.ButtonRow(title="Revert to saved",
+        self.revert_row = Adw.ButtonRow(title=f"{REVERT_TO_SAVED}…",
                                         start_icon_name="edit-undo-symbolic")
         self.revert_row.connect("activated", self.on_revert)
         self.revert_group.add(self.revert_row)
@@ -483,7 +538,7 @@ class HeadsetPage:
         balance = name == "default_balance"
         row = Adw.ActionRow(title=ROW_TITLES[name], use_markup=False, visible=False)
         scale = (_balance_scale(SETTING_NAMES[name]) if balance
-                 else spoken_scale(*SLIDER_RANGES[name], SETTING_NAMES[name]))
+                 else spoken_scale(*SETTING_RANGES[name], SLIDER_NAMES[name]))
         scale.connect("value-changed", self.on_slider, name)
         row.add_suffix(_in_line(_between(scale) if balance else scale))
         self.sliders[name] = scale
@@ -511,22 +566,26 @@ class HeadsetPage:
         answered a full read, and again after it or the daemon was lost (read_done); its
         state after that. `ask` False, and while a save runs, the daemon answers from what it
         holds. With `ask`, the open Load preset to headset dialog reads the library again too:
-        a change the CLI made shows."""
+        a change the CLI made shows. The volumes are read again where their rows show
+        (VolumeRows.refresh)."""
         asking = ask and not self.saving
         self.refresh(ask=asking, read=asking and not self.read_done)
+        self.volumes.refresh()
         if ask:
             self.library.refresh()
 
     def refresh(self, force: bool = False, ask: bool = True, read: bool = False) -> None:
         """Ask for the headset. `read` has the daemon read every setting again
-        first; `force` puts the name back even with the cursor in it."""
+        first, tens of round trips, so it waits SLOW_REQUEST_WAIT as the CLI's `--read`
+        does; `force` puts the name back even with the cursor in it."""
         self._pending = True
         request: dict = {"command": "headset"}
         if read:
             request["read"] = True
         elif not ask:
             request["ask"] = False
-        self._worker.call(request, lambda info: self._on_info(info, force, read))
+        self._worker.call(request, lambda info: self._on_info(info, force, read),
+                          SLOW_REQUEST_WAIT if read else REPLY_WAIT)
 
     def daemon_gone(self, error: Exception) -> None:
         """A read failed, the window's or the tab's: the tab says it is the daemon."""
@@ -535,50 +594,47 @@ class HeadsetPage:
         self._failed(unreachable(error), DAEMON_WAIT)
 
     def show_problem(self, problem: dict | None) -> None:
-        """Show a `headset_*` problem from the daemon's status in the banner, or hide it.
-        Until a headset is seen the status page shows it instead, and while the reply says
-        there is none the status row does: the banner would repeat it."""
+        """Take a problem from the daemon's status: a `headset_*` one, or another family's
+        while no headset is attached (Window._take_devices). Until a headset is seen the
+        status page shows it, and after that the Status row of a base station not answering
+        does, the problem saying how to wake it (show_state); the reply's refusal says the
+        others (_failed)."""
         message = str((problem or {}).get("message") or "")
-        self._problem = message[:1].upper() + message[1:] if message else None
-        if self._problem:
-            self.problem_banner.set_title(self._problem)
-            if not self.view.seen:
-                self.view.missing(NO_HEADSET, self._problem)
-        self.problem_banner.set_revealed(
-            bool(self._problem) and self.view.seen and self._error is None)
+        self._problem = capitalized(message) if message else None
+        if self._problem and not self.view.seen:
+            self.view.missing(NO_HEADSET, self._problem)
 
     def _failed(self, detail: str, title: str = NO_HEADSET) -> None:
-        """No headset to show: said on the status page until one has been
-        seen, and after that on the status row and in one toast."""
+        """No headset to show: said on the status page until one has been seen, and after
+        that on the Status row alone, as the Keyboard tab says it: a toast would repeat it."""
         self.read_done = False
         set_dot(self.state_dot, False)
-        self.state_row.set_title(detail[:1].upper() + detail[1:])
-        self.state_row.set_subtitle("")
-        # The node, the battery reading and the live balance were the gone base's, as the
-        # Mouse and Keyboard tabs have it.
+        self.state_row.set_subtitle(capitalized(detail))
+        # The readings were the gone base's, as the Mouse and Keyboard tabs have it.
         self.state_row.set_tooltip_text(None)
-        show_battery(self.battery_row, self.battery_icon, None)
+        show_battery(self.battery_row, self.battery_icon, None, gone=True)
+        self.firmware_row.set_visible(False)
         self.mix_row.set_visible(False)
+        self.meter.show_headset(None)
+        self.volumes.show_headset(None)
         self._set_editable(False)
         self.revert_row.set_sensitive(False)
         self.save_banner.set_sensitive(False)
         if not self.view.seen:
             self.view.missing(title, self._problem if title == NO_HEADSET and self._problem
                               else detail)
-            return
-        # The row says why there is no headset, in the problem's own sentence when the
-        # daemon refused the reply: the banner would repeat it.
-        self.problem_banner.set_revealed(False)
-        if detail != self._error:
-            self._error = detail
-            self._toast(f"Headset: {detail}")
 
     def _set_editable(self, editable: bool) -> None:
         """Load preset to headset stays sensitive: its dialog renames, deletes and adds with
         no base station, and grays out its own Load (set_writable)."""
+        if not editable and self._shown.typing(self._parent, self.name_row):
+            # Grayed out, the row loses the cursor, which EntryTexts.typing goes by.
+            self._typed_when_grayed = True
         for row in (*self.setting_rows.values(), self.preset_row, self.name_row,
-                    *self.band_rows, self.import_row, self.save_new_row, self.reset_row):
+                    *self.band_rows, self.import_row, self.reset_row):
             row.set_sensitive(editable)
+        self._editable = editable
+        self._show_save_new()
         self.library.set_writable(editable)
         if not editable:
             # A row grayed out under the pointer never sees its release.
@@ -593,11 +649,12 @@ class HeadsetPage:
         if not info.get("ok"):
             self._save_lost()                   # no base: the daemon dropped the save with it
             self.save_banner.set_revealed(False)    # and it is back with its flash values
-            self._failed(str(info.get("error") or "not connected"))
+            # The words of the other headset pages for a refusal that gives none.
+            self._failed(str(info.get("error") or NOT_FOUND))
             return
         self.view.found()
-        self.problem_banner.set_revealed(self._problem is not None)
-        self._error = None
+        self.meter.show_headset(A50.key)
+        self.volumes.show_headset(A50.key)
         self.answering = info.get("answering") is not False
         self.saving = info.get("saving") is True
         # The daemon skips a read while the base is silent or a save runs,
@@ -606,75 +663,88 @@ class HeadsetPage:
         self._set_editable(self.answering and not self.saving)
         self.save_banner.set_sensitive(self.answering)
         self.show_state(info)
-        self.show_settings(info.get("settings"))
+        self.show_settings(info.get("settings"), info.get("read_at") is not None)
         self.show_presets(info, force)
         self.show_unsaved(info.get("unsaved"))
         self.save_watch.take(info, self.saving)
 
     def show_state(self, info: dict) -> None:
-        """The status group: its title, the dot, battery and the live balance."""
-        self.status_group.set_title(GLib.markup_escape_text(str(info.get("name") or "Headset")))
+        """The status group's title and rows, from the reply."""
+        self.status_group.set_title(GLib.markup_escape_text(str(info.get("name")
+                                                                or HEADSET_TAB)))
         linked = info.get("linked") is True
         state: bool | str
         if not self.answering:
-            title, state = NOT_ANSWERING, ASLEEP
+            # The daemon's problem says how to wake it, where status gave one.
+            words, state = self._problem or NOT_ANSWERING, ASLEEP
         elif linked:
-            title, state = HEADSET_ON, True
+            words, state = LINKED, True
         else:
-            title, state = HEADSET_OFF, ASLEEP
+            words = HEADSET_DOCKED if info.get("docked") is True else HEADSET_OFF
+            state = ASLEEP
         set_dot(self.state_dot, state)
-        # set_dot's ASLEEP label, asleep or switched off, is wrong for a silent base station.
-        self.state_dot.update_property([Gtk.AccessibleProperty.LABEL], [title])
-        self.state_row.set_title(title)
-        self.state_row.set_subtitle(versions_text(info.get("versions")))
+        if state == ASLEEP:
+            # set_dot's label, asleep or switched off, is wrong for a silent base station.
+            self.state_dot.update_property([Gtk.AccessibleProperty.LABEL], [words])
+        self.state_row.set_subtitle(words)
+        self.firmware_row.set_subtitle(displayable(versions_text(info.get("versions"))))
+        self.firmware_row.set_visible(True)
         device = info.get("device")
         self.state_row.set_tooltip_text(str(device) if device else None)
         battery = info.get("battery") if isinstance(info.get("battery"), dict) else None
         # A headset away from the base says when its reading was taken.
-        at = info.get("battery_at") if not (self.answering and linked) else None
-        show_battery(self.battery_row, self.battery_icon, battery,
-                     at if isinstance(at, int | float) else None)
+        show_battery(self.battery_row, self.battery_icon, battery, kept_at(info))
         balance = _int(info.get("balance"), *BALANCE_RANGE)
         self.mix_row.set_visible(balance is not None)
         if balance is not None:
-            self.mix_scale.set_value(balance)
-            self.mix_row.set_subtitle(f"{balance_text(balance)}\n{MIX_HELP}")
+            self.mix_row.set_subtitle(balance_text(balance))
 
-    def show_settings(self, settings: object) -> None:
-        """Each setting's row on its active value; a setting the reply lacks,
-        or gives in a shape it should not, hides its row."""
+    def show_settings(self, settings: object, read_whole: bool) -> None:
+        """Each setting's row on its active value. One the reply lacks, or gives in a shape it
+        should not, says Not read with its control off until the base station's first full
+        read (`read_whole`), as the A50 X's and the G432's rows do, and hides its row after
+        it."""
         settings = settings if isinstance(settings, dict) else {}
         self._active = {}
         for name in SETTINGS:
             value = self._active_of(settings.get(name), object)
-            if name in SLIDER_RANGES:
-                value = _int(value, *SLIDER_RANGES[name])
-            elif value not in CHOICES[name]:
+            if name in SETTING_RANGES:
+                value = _int(value, *SETTING_RANGES[name])
+            elif value not in SETTING_CHOICES[name]:
                 value = None
-            self.setting_rows[name].set_visible(value is not None)
+            row = self.setting_rows[name]
+            row.set_visible(value is not None or not read_whole)
             if value is None:
+                row.set_subtitle(NOT_READ)
+                row.set_sensitive(False)
                 continue
+            if name not in self.sliders:
+                # Its value shows in the row itself.
+                row.set_subtitle("")
             self._active[name] = value
             if self._holds.held(name):
                 continue
-            # _build gives a slider to each of SLIDER_RANGES, whose value _int passed above,
+            # _build gives a slider to each of SETTING_RANGES, whose value _int passed above,
             # and a combo row (_combo_row) to every other setting.
             if name in self.sliders:
                 self._show_slider(name, cast(int, value))
             else:
                 self._loading.put_selected(cast(Adw.ComboRow, self.setting_rows[name]),
-                                   CHOICES[name].index(value))
+                                   SETTING_CHOICES[name].index(value))
         for group, names in ((self.mic_group, MIC_SETTINGS), (self.stream_group, STREAM_SETTINGS),
                              (self.base_group, BASE_SETTINGS)):
-            group.set_visible(any(name in self._active for name in names))
+            group.set_visible(not read_whole or any(name in self._active for name in names))
 
     def show_presets(self, info: dict, force: bool) -> None:
-        """The preset dropdown, and the active preset's name, gains and bands."""
+        """The preset dropdown, and the active preset's name, gains and bands; a preset or a
+        band the reply gives in a shape it should not is left out, as a setting is."""
         if self._holds.held("preset"):
             return                              # a reply to a read sent before the switch
-        presets = {p["preset"]: p for p in info.get("presets") or ()
-                   if isinstance(p, dict) and p.get("preset") in PRESETS}
-        active = info.get("preset") if info.get("preset") in presets else None
+        listed = info.get("presets")
+        presets = {p["preset"]: p for p in (listed if isinstance(listed, list) else ())
+                   if isinstance(p, dict) and whole(p.get("preset")) and p["preset"] in PRESETS}
+        given = info.get("preset")
+        active = given if whole(given) and given in presets else None
         switched = active != self._preset
         if switched:
             # An edit still settling was made on the preset shown: it goes there.
@@ -696,25 +766,27 @@ class HeadsetPage:
         name = self._active_of(preset.get("name"), str)
         self.name_row.set_visible(name is not None)
         # A name being typed was for the preset shown: a switch drops it.
+        typing = self._shown.typing(self._parent, self.name_row) or (
+            self._typed_when_grayed and self._shown.typed(self.name_row))
         if name is not None and not self._holds.held("name") and (
-                force or switched or not self._shown.typing(self._parent, self.name_row)):
+                force or switched or not typing):
             # No loading guard: set_text never emits `apply`, the row's only handler (on_name).
             self._shown.show(self.name_row, name)
+            self._typed_when_grayed = False
         gains = self._active_of(preset.get("gains"), list)
-        if not (isinstance(gains, list) and len(gains) == len(BANDS)
+        if not (gains is not None and len(gains) == len(BANDS)
                 and all(_int(g, *GAIN_RANGE) is not None for g in gains)):
             gains = None
-        bands = {b.get("band"): values for b in preset.get("bands") or ()
-                 if isinstance(b, dict) and isinstance(values := b.get("active"), dict)}
+        bands = _active_bands(preset)
         for index, band in enumerate(BANDS):
-            self._show_band(index, band, None if gains is None else gains[index],
+            self._show_band(active, index, band, None if gains is None else gains[index],
                             bands.get(band, {}))
-        self.save_new_row.set_sensitive(self.answering and not self.saving
-                                        and self.shown_preset() is not None)
+        self._show_save_new()
 
-    def _show_band(self, index: int, band: int, gain: int | None, found: dict) -> None:
-        """One band's row: shown with its gain, and its frequency and width
-        when the reply has them."""
+    def _show_band(self, preset: int, index: int, band: int, gain: int | None,
+                   found: dict) -> None:
+        """One band's row of `preset`, the active one: shown with its gain, and its frequency
+        and width when the reply has them."""
         self.band_rows[index].set_visible(gain is not None)
         freq = _int(found.get("freq"), *FREQ_RANGE)
         width = found.get("width")
@@ -723,10 +795,10 @@ class HeadsetPage:
         self.freq_rows[index].set_visible(shown)
         if band in self.width_rows:
             self.width_rows[band].set_visible(shown)
-        if gain is not None and not self._holds.held(f"gains:{self._preset}"):
+        if gain is not None and not self._holds.held(gains_key(preset)):
             self._loading.put_value(self.gain_scales[index], gain)
         # `shown` says the frequency is there: asking again only tells the type checker so.
-        if shown and freq is not None and not self._holds.held(f"band_{band}:{self._preset}"):
+        if shown and freq is not None and not self._holds.held(band_key(band, preset)):
             self._loading.put_value(self.freq_rows[index], freq)
             if band in self.width_rows:
                 # A band with a width row is no shelf (_build), so `shown` saw a number.
@@ -757,14 +829,15 @@ class HeadsetPage:
 
     def _band_subtitle(self, band: int) -> None:
         index = BANDS.index(band)
-        gain = f"{round(self.gain_scales[index].get_value()):+d} dB"
+        gain = signed(round(self.gain_scales[index].get_value()))
         freq = self.freq_rows[index]
+        # In every view's words (hertz); the Frequency row, a value typed, keeps Hz.
         self.band_rows[index].set_subtitle(
-            f"{round(freq.get_value())} Hz, {gain}" if freq.get_visible() else gain)
+            f"{hertz(round(freq.get_value()))}, {gain}" if freq.get_visible() else gain)
 
     # -- writes -----------------------------------------------------------
 
-    def _write(self, key: str, request: dict, timeout: float = 3.0,
+    def _write(self, key: str, request: dict, timeout: float = REPLY_WAIT,
                then: Callable[[dict], None] | None = None) -> None:
         """Send a write through the window's `call` and take the `headset` reply it
         answers with. A refusal, which `call` says, reads the headset again, which puts
@@ -788,34 +861,32 @@ class HeadsetPage:
         self._call(request, done, unanswered, timeout=timeout)
 
     def _flush_eq(self) -> None:
-        self._holds.flush(("gains:", "band_"))
+        self._holds.flush((GAINS_KEY, BAND_KEY))
 
     def flush(self) -> bool:
-        """Send what is still settling now, for the window's close or a save; True if any."""
-        return self._holds.flush()
+        """Send what is still settling now, a frequency or a width typed and not yet taken
+        and a volume among it (VolumeRows), for the window's close or a save; True if any."""
+        take_typed(*self.freq_rows, *self.width_rows.values())
+        return self.volumes.flush() | self._holds.flush()
 
     def close(self) -> None:
+        self._closed = True
         self._holds.cancel_all()
         self.save_watch.stop()
-        self.library.close()
+        self.meter.close()
+        self.volumes.close()
 
     def on_slider(self, scale: Gtk.Scale, name: str) -> None:
         value = round(scale.get_value())
         self.setting_rows[name].set_subtitle(slider_text(name, value))
         if self._loading.active or self._holds.pressing(name):
             return
-        self._send_later(scale, name)
+        self._send_later(name)
 
-    def _send_later(self, scale: Gtk.Scale, name: str) -> None:
-        self._holds.settle(name, lambda: self._send_setting(name, round(scale.get_value())),
-                           SLIDER_SETTLE_MS)
-
-    def _on_balance_pointer(self, controller: Gtk.EventControllerLegacy,
-                            _event: object) -> bool:
-        if (change := pointer_button(controller)) is not None:
-            # A canceled touch counts as the release, or the slider stays held and never sends.
-            (self.on_press if change.pressed else self.on_release)("default_balance")
-        return False
+    def _send_later(self, name: str) -> None:
+        self._holds.settle(
+            name, lambda: self._send_setting(name, round(self.sliders[name].get_value())),
+            SLIDER_SETTLE_MS)
 
     def on_press(self, name: str) -> None:
         """The pointer went down on a slider that snaps: nothing is sent
@@ -832,14 +903,14 @@ class HeadsetPage:
         value = snapped(round(scale.get_value()))
         scale.set_value(value)
         self.setting_rows[name].set_subtitle(slider_text(name, value))
-        self._send_later(scale, name)
+        self._send_later(name)
 
     def on_choice(self, row: Adw.ComboRow, _p: GObject.ParamSpec, name: str) -> None:
         if self._loading.active:
             return
         index = row.get_selected()
-        if 0 <= index < len(CHOICES[name]):
-            self._send_setting(name, CHOICES[name][index])
+        if index < len(SETTING_CHOICES[name]):
+            self._send_setting(name, SETTING_CHOICES[name][index])
 
     def _send_setting(self, name: str, value: int | str) -> None:
         """Write one setting, unless it is unchanged, or the daemon never gave it."""
@@ -851,7 +922,7 @@ class HeadsetPage:
         if self._loading.active:
             return
         index = row.get_selected()
-        if not 0 <= index < len(self._preset_ids) or self._holds.unchanged(
+        if index >= len(self._preset_ids) or self._holds.unchanged(
                 "preset", self._preset_ids[index] == self._preset):
             return
         self._flush_eq()
@@ -876,10 +947,10 @@ class HeadsetPage:
         preset = self._preset
         if self._loading.active or preset is None:
             return
-        self._holds.settle(f"gains:{preset}", lambda: self._send_gains(preset), SLIDER_SETTLE_MS)
+        self._holds.settle(gains_key(preset), lambda: self._send_gains(preset), SLIDER_SETTLE_MS)
 
     def _send_gains(self, preset: int) -> None:
-        key = f"gains:{preset}"
+        key = gains_key(preset)
         gains = [round(scale.get_value()) for scale in self.gain_scales]
         shown = self._active_of(self._presets.get(preset, {}).get("gains"), list)
         if self._holds.unchanged(key, gains == shown):
@@ -888,31 +959,41 @@ class HeadsetPage:
                     SLOW_REQUEST_WAIT)
 
     def on_band(self, _row: Adw.SpinRow, _p: GObject.ParamSpec, band: int) -> None:
+        # GTK takes a number typed in the row as the window is destroyed, after the close
+        # (worker.take_typed).
+        if self._closed:
+            return
         self._band_subtitle(band)
         preset = self._preset
         if self._loading.active or preset is None:
             return
-        self._holds.settle(f"band_{band}:{preset}", lambda: self._send_band(preset, band),
+        self._holds.settle(band_key(band, preset), lambda: self._send_band(preset, band),
                            SPIN_SETTLE_MS)
 
     def _send_band(self, preset: int, band: int) -> None:
-        key = f"band_{band}:{preset}"
-        freq = round(self.freq_rows[BANDS.index(band)].get_value())
-        width = round(self.width_rows[band].get_value(), 1) if band in self.width_rows else None
-        held = next((b.get("active") for b in self._presets.get(preset, {}).get("bands") or ()
-                     if isinstance(b, dict) and b.get("band") == band), None)
-        if self._holds.unchanged(key, held == {"freq": freq, "width": width}):
+        key = band_key(band, preset)
+        shown = asdict(self._shown_band(band))
+        held = _active_bands(self._presets.get(preset, {})).get(band)
+        if self._holds.unchanged(key, held == shown):
             return
         self._write(key, {"command": "headset_eq", "preset": preset,
-                          "bands": [{"band": band, "freq": freq, "width": width}]},
+                          "bands": [{"band": band, **shown}]},
                     SLOW_REQUEST_WAIT)
+
+    def _shown_band(self, band: int) -> Band:
+        """A band as its rows show it: no width on a shelf, which has no Width row."""
+        width = self.width_rows.get(band)
+        return Band(round(self.freq_rows[BANDS.index(band)].get_value()),
+                    None if width is None else round(width.get_value(), 1))
 
     # -- the library ------------------------------------------------------
 
     @property
     def busy(self) -> bool:
-        """A save of the library is out, which the window's close waits for."""
-        return self.library.busy
+        """A save of the library is out, or the library's read of a file to import before one,
+        or a volume set (VolumeRows), which the window's close waits for; the Import row's
+        own read (import_path) is not counted."""
+        return self.library.busy or self.volumes.busy
 
     def shown_preset(self) -> EqPreset | None:
         """The active preset as its rows show it, an edit still settling included, under the
@@ -923,13 +1004,16 @@ class HeadsetPage:
                 else a50_preset(self._presets.get(self._preset), named=False))
         if read is None:
             return None
-        # A gain and a frequency for each band, and a width for each that is no shelf
-        # (_eq_group).
         return EqPreset.of_bands(
             read.name, [round(scale.get_value()) for scale in self.gain_scales],
-            [Band(round(row.get_value()), round(self.width_rows[band].get_value(), 1)
-                  if band in self.width_rows else None)
-             for band, row in zip(BANDS, self.freq_rows, strict=True)])
+            [self._shown_band(band) for band in BANDS])
+
+    def _show_save_new(self) -> None:
+        """Save as new preset, usable while the rows are (_set_editable) and the active preset
+        is read whole, grayed out with the library full (style.offer_save_new); again as each
+        read or change of the library lands."""
+        offer_save_new(self.save_new_row, self._editable and self.shown_preset() is not None,
+                       self.library.saved(), SAVE_NEW_HELP)
 
     def on_save_new(self, _row: Adw.ButtonRow) -> None:
         """Save as new preset: what the rows show, an edit still settling sent first, into
@@ -938,7 +1022,8 @@ class HeadsetPage:
             return
         self._flush_eq()
         ask_name(self._parent, preset.name,
-                 lambda name: self.library.save_new(replace(preset, name=name)))
+                 lambda name: self.library.save_new(replace(preset, name=name)),
+                 SAVE_HEADING, SAVE_BODY)
 
     def on_reset(self, _row: Adw.ButtonRow) -> None:
         """Reset to default: the active slot's own name and curve written back, as an import
@@ -946,7 +1031,7 @@ class HeadsetPage:
         drops one: it is what the reset takes back."""
         if (preset := self._preset) is None:
             return
-        for key in (f"gains:{preset}", *(f"band_{band}:{preset}" for band in BANDS)):
+        for key in (gains_key(preset), *(band_key(band, preset) for band in BANDS)):
             self._holds.cancel(key)
         self._write("import", {**default_slot(preset).request(), "preset": preset},
                     SLOW_REQUEST_WAIT)
@@ -964,8 +1049,9 @@ class HeadsetPage:
         if self._preset is None:
             return
         # The preset the dialog was opened for, whatever is active when it closes.
-        astroeq_dialog().open(self._parent, None,
-                    lambda d, result, p=self._preset: self._picked(d, result, p))
+        astroeq_dialog(ASTROEQ_TITLE).open(self._parent, None,
+                                           lambda d, result, p=self._preset: self._picked(
+                                               d, result, p))
 
     def _picked(self, dialog: Gtk.FileDialog, result: Gio.AsyncResult, preset: int) -> None:
         if (path := picked_path(dialog, result, self._toast)) is not None:
@@ -975,8 +1061,12 @@ class HeadsetPage:
         """Parse an .astroeq file on the worker and write it to `preset`."""
         def parsed(result: EqPreset | Exception) -> None:
             if isinstance(result, Exception):
-                # As the G HUB and pack imports do: one over TOAST_MAX opens a dialog.
-                self._refused({"error": ASTROEQ_REFUSED.format(path.name, reason(result))})
+                # One sentence: the file's name can hold ". ", where short_note's first-sentence
+                # line would cut it, as the Load preset dialog's import has it.
+                # Whoever shared the file named it: a direction turn or a separator in the
+                # name would draw the rest of the sentence in another order or on a new line.
+                said = ASTROEQ_REFUSED.format(printable(path.name), reason(result))
+                toast_note(self._toast, said, ASTROEQ_NOT_IMPORTED, one_sentence=True)
                 return
             # The daemon reads the preset back before it answers.
             self._write("import", {**result.request(), "preset": preset}, SLOW_REQUEST_WAIT)
@@ -1021,7 +1111,7 @@ class HeadsetPage:
         def done(reply: dict) -> None:
             # The daemon read every setting again before it answered.
             if reply.get("note"):
-                toast_note(self._toast, reply["note"], NOT_PUT_BACK)
+                toast_note(self._toast, reply["note"], NOT_REVERTED)
         self._write("revert", {"command": "headset_revert"}, SLOW_REQUEST_WAIT, then=done)
 
     def _ask(self, heading: str, body: str, response: str, then: Callable[[], None]) -> None:

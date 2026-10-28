@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
-from .config import config_home
+from .settings_files import config_home
 from .wording import first_of, printable
 
 CGROUP_ROOT = Path("/sys/fs/cgroup")
@@ -154,6 +154,9 @@ def _is_autostart(app_id: str) -> bool:
 #: The kernel's cap on /proc/<pid>/comm in bytes; the cut can fall inside a UTF-8 character.
 COMM_MAX = 15
 
+#: Bytes read of /proc/<pid>/comm, one page: the kernel keeps a comm far shorter.
+COMM_READ = 4096
+
 #: Linux's PATH_MAX. process_name looks for a flag as the path's end only within it: each
 #: try copies the string up to the flag, and any process can make its argv[0] 128 KiB of
 #: " -a" at exec: uncapped, 2.5 to 18 s of the daemon's only thread at every scan
@@ -187,17 +190,30 @@ def _cut(name: str) -> str:
 _WINE_OWN = WINE_OWN | {_cut(name) for name in WINE_OWN}
 
 
+def _read_head(path: str, limit: int) -> bytes:
+    """The first `limit` bytes of `path` in one read, with os calls and not a file object:
+    walk_processes reads every process's comm, and a scan in the service the cmdline of each
+    of this user's processes. /proc gives either whole up to `limit` in one read (measured
+    2026-10-26 on Linux 7.0, a 128 KiB argv[0] included)."""
+    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        return os.read(fd, limit)
+    finally:
+        os.close(fd)
+
+
 def read_comm(proc: Path) -> str:
     """/proc/<pid>/comm as text, bytes that do not decode replaced: the kernel can cut
     inside a character, and any process can set any bytes. Raises OSError once it has gone."""
-    return printable((proc / "comm").read_bytes().decode(errors="replace").strip())
+    raw = _read_head(os.path.join(proc, "comm"), COMM_READ)
+    return printable(raw.decode(errors="replace").strip())
 
 
 def read_argv0(proc: Path) -> str:
     """argv[0] from /proc/<pid>/cmdline, within its first ARGV0_MAX bytes, bytes that do not
     decode replaced. Raises OSError once the process has gone."""
-    with (proc / "cmdline").open("rb") as file:
-        return file.read(ARGV0_MAX).split(b"\x00", 1)[0].decode(errors="replace")
+    raw = _read_head(os.path.join(proc, "cmdline"), ARGV0_MAX)
+    return raw.split(b"\x00", 1)[0].decode(errors="replace")
 
 
 def process_name(pid: int) -> str | None:
@@ -351,12 +367,12 @@ OTHER_TOOLS = {
         "quit it and uninstall it: its package starts it at every login"),
     "ratbagd": OtherTool(
         "ratbagd", "talks HID++ to Logitech devices too",
-        "stop it (sudo systemctl stop ratbagd) and uninstall it, or Piper starts it again"),
+        "stop it (`sudo systemctl stop ratbagd`) and uninstall it, or Piper starts it again"),
     "openrgb": OtherTool(
         "OpenRGB", "may drive Logitech devices too: which of its drivers are on cannot be "
                    "seen from here",
         "quit it, and stop the server its package starts at every login "
-        "(systemctl --user mask --now openrgb)"),
+        "(`systemctl --user mask --now openrgb`)"),
 }
 
 
@@ -364,22 +380,23 @@ def walk_processes() -> list[Process]:
     """Every process's pid, owner and comm, from one walk of /proc. A /proc that cannot be
     listed raises OSError."""
     found = []
-    for entry in PROC.iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            uid = entry.stat().st_uid
-            comm = read_comm(entry)
-        except OSError:
-            continue        # exited between listing and reading
-        found.append(Process(int(entry.name), uid, comm))
+    # os.scandir, which makes no Path for a name that is not a pid's: the daemon's scan walks
+    # every process as often as every PROCESS_SCAN_INTERVAL (daemon/games/).
+    with os.scandir(PROC) as entries:
+        for name in (entry.name for entry in entries if entry.name.isdigit()):
+            proc = PROC / name
+            try:
+                uid = proc.stat().st_uid
+                comm = read_comm(proc)
+            except OSError:
+                continue        # exited between listing and reading
+            found.append(Process(int(name), uid, comm))
     return found
 
 
 def running_processes(procs: list[Process]) -> set[str]:
     """Names of this user's processes in `procs`, each by the names the focus matches it by
-    (match_names): the comm, cut at 15 bytes, the full program name, which misses a
-    program that set its own comm, and a Windows program's own name under Wine."""
+    (match_names)."""
     uid = os.getuid()
     return set().union(*(match_names(proc.pid, proc.comm)[1] for proc in procs if proc.uid == uid))
 
@@ -516,3 +533,12 @@ def candidates() -> list[tuple[str, str]]:
         out.append((comm, shown))
     out.sort(key=lambda pair: pair[1].lower())
     return out
+
+
+def runs_in(process: str, label: str) -> str | None:
+    """The launcher a candidates() row runs in, by the name it goes by, read from the label
+    candidates gives a program in a launcher's scope; None for the launcher's own process and
+    for any other program."""
+    if label in LAUNCHERS.values() and LAUNCHERS.get(process.lower()) != label:
+        return label
+    return None

@@ -10,6 +10,9 @@
 # interfaces. The c539 pairs one device (Solaar's listing: "a maximum of
 # 1"), so no keyboard can share its node.
 #
+# The node still carries the keystrokes the mouse sends for a button its
+# onboard profile binds to a key, as 70-g502x.rules says of the G502 X PLUS's.
+#
 # Cabled, its firmware's USB descriptors (MPM15.02_B0026) give 00 a boot
 # mouse, 01 a keyboard and 02 the vendor collection, the G502 X PLUS's
 # layout. Interface 01 is not granted.

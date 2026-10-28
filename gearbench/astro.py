@@ -21,14 +21,26 @@ from pathlib import Path
 from typing import cast
 
 from .hidpp import GONE_ERRNOS, HidrawNode, find_attached
-from .wording import counted, escaped, number, whole, word_list, written
+from .wording import counted, escaped, given_count, number, reason, whole, word_list, written
 
 log = logging.getLogger("gearbench")
 
 VENDOR_ID = 0x9886
 # Only PC mode is measured; the Xbox edition (002d) and console mode (002b,
 # which has no HID interface) stay out until read off the hardware.
-PRODUCTS = {0x002C: "Astro A50"}
+#: The model's name as every view gives it; "Astro A50" alone names the family (the owner's
+#: decision of 2026-10-22).
+NAME = "Astro A50 Gen 4"
+PRODUCTS = {0x002C: NAME}
+#: The headset with no link to its base station, off it or docked on it, and the base station
+#: silent, in every view's words; the window capitalizes them.
+OFF_OR_AWAY = "switched off or out of range"
+DOCKED_OFF = "switched off, docked"
+BASE_SILENT = "the base station is not answering"
+#: Why the base station takes no request now: it is not answering, or it is saving. The
+#: first names the model, as `status` lists it beside other devices' problems.
+NOT_ANSWERING = f"the {NAME}'s base station is not answering; unplug it and plug it back in"
+SAVING = f"the {NAME}'s base station is saving; try again in a moment"
 INTERFACE = 6
 REPORT_ID = 0x02
 REPORT_SIZE = 64
@@ -79,9 +91,12 @@ SETTINGS = (
 # only be marked unsaved by having been written since the last save.
 READS_SAVED = frozenset({*SLIDERS, "noise_gate", "mic_eq", "default_balance", "alert_volume"})
 # Each setting's name, in a refusal and in the window: its socket word spaced and
-# capitalized, or its own where the word does not spell it.
+# capitalized, or its own where the word does not spell it. The stream mix's voice channel
+# is Voice, as the Balance row and the headset's Game and Voice buttons name it; the socket
+# and the command line keep stream_chat.
 SETTING_NAMES = {**{name: name.replace("_", " ").capitalize() for name in SETTINGS},
-                 "mic_eq": "Mic EQ", "auto_off": "Auto shut-off"}
+                 "mic_eq": "Mic EQ", "auto_off": "Auto shut-off",
+                 "stream_chat": "Stream voice"}
 
 PRESETS = (1, 2, 3)
 BANDS = (1, 2, 3, 4, 5)
@@ -108,11 +123,10 @@ SETTING_CHOICES: dict[str, tuple[str, ...] | tuple[int, ...]] = {
     **SETTING_WORDS, "auto_off": AUTO_OFF_MINUTES}
 
 
-def balance_shares(value: int) -> tuple[int, int]:
-    """A Game/Voice balance, 0 all Voice to 255 all Game, as (Voice, Game) in whole
-    percent: what `gearbench-ctl headset` and the Headset tab show."""
-    game = round(value * 100 / BALANCE_RANGE[1])
-    return 100 - game, game
+def game_share(value: int) -> int:
+    """The Game share of a balance, 0 all Voice to 255 all Game, in whole percent; Voice has
+    the rest."""
+    return round(value * 100 / BALANCE_RANGE[1])
 
 
 class AstroFailure(Exception):
@@ -165,8 +179,8 @@ class Band:
 
 @dataclass(frozen=True)
 class EqPreset:
-    """An .astroeq file: five gains in dB, five frequencies, the widths of
-    bands 2 to 4."""
+    """An EQ preset, as an .astroeq file holds one: its name, five gains in dB, five
+    frequencies, the widths of bands 2 to 4."""
 
     name: str
     gains: tuple[int, int, int, int, int]
@@ -189,8 +203,8 @@ class EqPreset:
                 for band in BANDS]
 
     def request(self) -> dict:
-        """`headset_eq` for this file: its name, gains and five bands, on the active
-        preset unless the caller adds one."""
+        """`headset_eq` with this preset's name, gains and five bands, on the active preset
+        unless the caller adds one."""
         return {"command": "headset_eq", "name": self.name, "gains": list(self.gains),
                 "bands": [{"band": number, "freq": band.freq, "width": band.width}
                           for number, band in zip(BANDS, self.bands(), strict=True)]}
@@ -241,14 +255,16 @@ def _checked(reply: Reply, what: str) -> Reply:
 
 
 def _dropped(report: bytes) -> None:
-    log.debug("astro: dropped %s", report.rstrip(b"\x00").hex(" ") or "an empty report")
+    log.debug("astro: dropped %s", report.rstrip(b"\x00").hex(" ") or "a report of zeros")
 
 
 class Base(HidrawNode):
     """The base station's hidraw node: one request in flight, no resend."""
 
+    _read_size = REPORT_SIZE
+
     def __init__(self, path: str | os.PathLike[str]) -> None:
-        self._setup(os.open(path, os.O_RDWR | os.O_NONBLOCK))
+        self._setup(self._opened(path))
 
     @classmethod
     def from_fd(cls, fd: int) -> Base:
@@ -282,10 +298,7 @@ class Base(HidrawNode):
         packet = frame(cmd, payload, seq)
         self._seq = seq
         self.pump()
-        try:
-            os.write(self._fd, packet)
-        except OSError as exc:
-            raise _node_failure(exc, "write to") from exc
+        self._send_packet(packet)
         return seq
 
     def answer(self, seq: int) -> Reply | None:
@@ -305,37 +318,26 @@ class Base(HidrawNode):
 
     # -- wire ------------------------------------------------------------
 
-    def _raw_read(self) -> bytes | None:
-        """One queued report, or None when nothing is waiting. With send,
-        the only place an errno becomes an AstroFailure."""
-        try:
-            report = os.read(self._fd, REPORT_SIZE)
-        except BlockingIOError:
-            return None
-        except OSError as exc:
-            raise _node_failure(exc, "read from") from exc
-        if not report:
-            # hidraw never reads empty; a descriptor whose far end closed does.
-            raise BaseGone("the node closed")
-        return report
-
-
-def _node_failure(exc: OSError, what: str) -> AstroFailure:
-    if exc.errno in GONE_ERRNOS:
-        return BaseGone(str(exc))
-    if exc.errno == errno.ETIMEDOUT:
+    def _failure(self, exc: OSError, what: str) -> AstroFailure:
+        """A failed read or write as an AstroFailure."""
+        if exc.errno in GONE_ERRNOS:
+            return BaseGone(reason(exc))
+        said = f"{what} the base station failed: {reason(exc)}"
         # A write the base does not take fails after the kernel's 5 s USB timeout,
         # O_NONBLOCK or not, and counts as no answer.
-        return AstroTimeout(f"{what} the base station timed out: {exc}")
-    return NodeFailure(f"{what} the base station failed: {exc}")
+        return AstroTimeout(said) if exc.errno == errno.ETIMEDOUT else NodeFailure(said)
+
+    def _closed(self) -> Exception:
+        """An empty read: the base station gone."""
+        return BaseGone("the node closed")
 
 
 class A50:
     """The typed commands over a `Base`. Reads return what the base holds; `saved=True`
     asks for the flash value. Setters raise ValueError for a value outside the ranges
     above, before sending, and AstroFailure on a wrong echo. A preset's checks are
-    `preset_name`, `preset_gains` and `band_width`, for a caller that checks every part
-    before its first write."""
+    `preset_number`, `preset_name`, `preset_gains` and `band_width`, for a caller that
+    checks every part before its first write."""
 
     def __init__(self, base: Base) -> None:
         self.base = base
@@ -417,7 +419,8 @@ class A50:
         NOISE_GATES or MIC_EQS."""
         if not isinstance(setting, str) or setting not in SETTINGS:
             raise _not_a_setting(setting)
-        what = SETTING_NAMES[setting]
+        # The row's title, its first letter lowered, starts the refusal.
+        what = SETTING_NAMES[setting][:1].lower() + SETTING_NAMES[setting][1:]
         if setting in SLIDERS:
             slider = SLIDERS[setting]
             self._put(0x62, bytes([slider, _whole(value, *SETTING_RANGES[setting], what)]),
@@ -447,23 +450,23 @@ class A50:
         return preset
 
     def set_preset(self, preset: int) -> None:
-        preset = _one_of(preset, PRESETS, "Preset")
+        preset = preset_number(preset)
         self._put(0x67, bytes([preset]), bytes([0x67, preset]))
 
     def gains(self, preset: int) -> tuple[list[int], list[int]]:
         """69: (active, saved) gains in dB."""
-        preset = _one_of(preset, PRESETS, "Preset")
+        preset = preset_number(preset)
         data = self._ask(0x69, bytes([preset]), need=12, echo=bytes([0x69, preset]))
         return ([g - GAIN_OFFSET for g in data[2:7]], [g - GAIN_OFFSET for g in data[7:12]])
 
     def set_gains(self, preset: int, gains: list[int] | tuple[int, ...]) -> None:
-        preset = _one_of(preset, PRESETS, "Preset")
+        preset = preset_number(preset)
         wire = preset_gains(gains)
         self._put(0x63, bytes([preset, *wire]), bytes([0x63, preset]))
 
     def band(self, preset: int, band: int) -> tuple[Band, Band]:
         """70: (active, saved)."""
-        preset, band = _one_of(preset, PRESETS, "Preset"), _one_of(band, BANDS, "Band")
+        preset, band = preset_number(preset), _one_of(band, BANDS, "band")
         data = self._ask(0x70, bytes([preset, band]), need=11, echo=bytes([0x70, preset, band]))
         bw_active, bw_saved, fc_active, fc_saved = (
             int.from_bytes(data[i:i + 2], "little") for i in (3, 5, 7, 9))
@@ -474,20 +477,20 @@ class A50:
         return at(bw_active, fc_active), at(bw_saved, fc_saved)
 
     def set_band(self, preset: int, band: int, freq: int, width: float | None) -> None:
-        preset = _one_of(preset, PRESETS, "Preset")
+        preset = preset_number(preset)
         bw = band_width(band, freq, width)
         payload = bytes([preset, band]) + bw.to_bytes(2, "little") + freq.to_bytes(2, "little")
         self._put(0x6F, payload, bytes([0x6F, preset]))
 
     def name(self, preset: int, saved: bool = False) -> str:
-        preset = _one_of(preset, PRESETS, "Preset")
+        preset = preset_number(preset)
         data = self._ask(0x6E, bytes([preset]) + _selector(saved), need=2,
                          echo=bytes([0x6E, preset]))
         return data[2:].split(b"\x00", 1)[0].decode("utf-8", "replace")
 
     def set_name(self, preset: int, name: str) -> None:
-        preset = _one_of(preset, PRESETS, "Preset")
-        text = preset_name(name, "A preset name")
+        preset = preset_number(preset)
+        text = preset_name(name)
         self._put(0x6D, bytes([preset, len(text) + 1]) + text + b"\x00", bytes([0x6D, preset]))
 
     # Flash
@@ -548,63 +551,90 @@ def _selector(saved: bool) -> bytes:
     return b"\x01" if saved else b"\x00"
 
 
-def _whole(value: object, low: int, high: int, what: str) -> int:
+def _whole(value: object, low: int, high: int, what: str, unit: str = "") -> int:
+    """`value` where it is a whole number from `low` to `high`, else ValueError naming
+    `what`; `unit` is said after "whole number", as " of dB"."""
     if not whole(value) or not low <= value <= high:
-        raise ValueError(f"{what} must be a whole number from {low} to {high}, "
-                         f"not {written(value)}.")
+        raise ValueError(f"{what} is a whole number{unit} from {low} to {high}, "
+                         f"not {written(value)}")
     return value
 
 
 def _choice(value: object, words: tuple[str, ...], what: str) -> int:
     if not isinstance(value, str) or value not in words:
-        raise ValueError(f"{what} must be {word_list(words)}, not {written(value)}.")
+        raise ValueError(f"{what} is {word_list(words)}, not {written(value)}")
     return words.index(value)
 
 
+#: The refusal of a setting the A50 Gen 4 does not have, its name and the settings put in:
+#: the A50 X family's shape (daemon.a50x), and `headset-set`'s too.
+NO_SETTING = f"there is no {NAME} setting {{}}; the settings are {{}}"
+
+
 def _not_a_setting(name: object) -> ValueError:
-    return ValueError(f"{written(name)} is not a headset setting; "
-                      f"the settings are {', '.join(SETTINGS)}.")
+    return ValueError(NO_SETTING.format(written(name), word_list(SETTINGS, "and")))
 
 
 def _slider(name: str) -> int:
     if not isinstance(name, str) or name not in SLIDERS:
         raise ValueError(f"{written(name)} is not a slider; "
-                         f"the sliders are {', '.join(SLIDERS)}.")
+                         f"the sliders are {word_list(list(SLIDERS), 'and')}")
     return SLIDERS[name]
 
 
 def _one_of(value: object, choices: tuple[int, ...], what: str, unit: str = "") -> int:
     if not whole(value) or value not in choices:
-        raise ValueError(f"{what} must be {word_list([str(c) for c in choices])}{unit}, "
-                         f"not {written(value)}.")
+        raise ValueError(f"{what} is {word_list([str(c) for c in choices])}{unit}, "
+                         f"not {written(value)}")
     return value
 
 
-#: Unicode's control characters (Cc), NUL aside.
-_CONTROL = re.compile(r"[\x01-\x1f\x7f-\x9f]")
+def preset_number(preset: object) -> int:
+    """`preset` where it is one of PRESETS. Raises ValueError with the sentence."""
+    return _one_of(preset, PRESETS, "preset")
 
 
-def preset_name(name: object, what: str = "A preset's name") -> bytes:
-    """A preset's name as 6D takes it, in UTF-8. Raises ValueError with a sentence `what`
-    starts."""
-    low, high = NAME_BYTES
+#: Unicode's control characters (Cc), NUL included.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+#: What a refusal of a preset's name calls it, where no file names its field ("Name" in an
+#: .astroeq); and the refusals, `what` put in: the daemon's, the command line's and, with a
+#: capital, the window's (style.name_refusal).
+PRESET_NAME = "a preset name"
+NAME_NOT_TEXT = "{what} is text, not {value}"
+NAME_BLANK = "{what} cannot be blank"
+NAME_LONG = "{what} is at most {most} bytes, not {size}: an accented letter takes 2 or more"
+NAME_CONTROL = "{what} cannot hold a control character, such as a tab or a line break"
+
+
+def name_refusal(name: object, what: str = PRESET_NAME) -> str | None:
+    """Why `name` is no preset name as 6D takes it, in a sentence `what` starts, or None."""
+    if not isinstance(name, str):
+        return NAME_NOT_TEXT.format(what=what, value=written(name))
     try:
-        text = name.encode("utf-8") if isinstance(name, str) else b""
+        size = len(name.encode("utf-8"))
     except UnicodeEncodeError:
         # UTF-8 refuses only a surrogate, which json.loads keeps from a lone "\ud800".
-        raise ValueError(f"{what} cannot hold a lone surrogate: {name!r}.") from None
-    if not low <= len(text) <= high:
-        raise ValueError(f"{what} must be text of {low} to {high} bytes in UTF-8, "
-                         f"not {written(name)}.")
-    if b"\x00" in text:
-        raise ValueError(f"{what} cannot hold a NUL character: {name!r}.")
-    # The base keeps the name in flash and A50.name passes it on as read, so a control
-    # character from a shared .astroeq would reach every place that shows the name, each
-    # left to escape it. The name is text here: anything else was encoded as b"" above,
-    # which NAME_BYTES refuses.
-    if _CONTROL.search(cast("str", name)):
-        raise ValueError(f"{what} cannot hold a control character: {name!r}.")
-    return text
+        return NAME_CONTROL.format(what=what)
+    if size < NAME_BYTES[0]:
+        return NAME_BLANK.format(what=what)
+    if size > NAME_BYTES[1]:
+        return NAME_LONG.format(what=what, most=NAME_BYTES[1], size=size)
+    # A NUL would cut the name in the base's flash. The base keeps the name in flash and
+    # A50.name passes it on as read, so a control character from a shared .astroeq would
+    # reach every place that shows the name, each left to escape it.
+    if _CONTROL.search(name):
+        return NAME_CONTROL.format(what=what)
+    return None
+
+
+def preset_name(name: object, what: str = PRESET_NAME) -> bytes:
+    """A preset's name as 6D takes it, in UTF-8. Raises ValueError with name_refusal's
+    sentence."""
+    refused = name_refusal(name, what)
+    if refused is not None:
+        raise ValueError(refused)
+    return cast("str", name).encode("utf-8")
 
 
 def preset_gains(gains: object) -> list[int]:
@@ -613,23 +643,23 @@ def preset_gains(gains: object) -> list[int]:
     if not isinstance(gains, (list, tuple)) or len(gains) != len(BANDS):
         # A list of the wrong length is counted: its items can be anything, and as many as
         # a request holds.
-        given = counted(len(gains), "gain") if isinstance(gains, (list, tuple)) else written(gains)
-        raise ValueError(f"An equalizer takes {len(BANDS)} gains, not {given}.")
-    return [_whole(g, *GAIN_RANGE, "Each gain") + GAIN_OFFSET for g in gains]
+        raise ValueError(f"an equalizer takes {len(BANDS)} gains, "
+                         f"not {given_count(gains, 'gain')}")
+    return [_whole(g, *GAIN_RANGE, "each gain", " of dB") + GAIN_OFFSET for g in gains]
 
 
 def band_width(band: object, freq: object, width: object) -> int:
     """A band's width as 6F takes it, 0 on a shelf, whose width is None. Raises ValueError
     with the sentence for a band, frequency or width it does not take."""
-    band = _one_of(band, BANDS, "Band")
-    _whole(freq, *FREQ_RANGE, f"Band {band}'s frequency")
+    band = _one_of(band, BANDS, "band")
+    _whole(freq, *FREQ_RANGE, f"band {band}'s frequency", " of Hz")
     if band in SHELVES:
         if width is not None:
-            raise ValueError(f"Band {band} is a shelf and takes no width, "
-                             f"not {written(width)}.")
+            raise ValueError(f"band {band} is a shelf and takes no width, "
+                             f"not {written(width)}")
         return 0
     low, high = WIDTH_RANGE
     if not number(width) or not low <= width <= high:
-        raise ValueError(f"Band {band}'s width must be {low} to {high}, not {written(width)}.")
+        raise ValueError(f"band {band}'s width is {low} to {high}, not {written(width)}")
     # Truncated, as Command Center does: 1.7 is 6963.
     return int(width * WIDTH_SCALE)

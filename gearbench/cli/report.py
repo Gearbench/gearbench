@@ -16,9 +16,10 @@ import subprocess
 import sys
 from collections.abc import Mapping
 
-from .. import __version__, spatial
+from .. import __version__, pipewire_client
 from ..apps import OTHER_TOOLS, find_other_tools, other_tool_problem, walk_processes
 from ..astro import VENDOR_ID as ASTRO_VENDOR_ID
+from ..battery import reading_words
 from ..daemon import (
     BUSY,
     DOWN,
@@ -26,11 +27,14 @@ from ..daemon import (
     UNREAD,
     failure,
     invoking_uid,
+    listening,
+    socket_path,
     use_invoking_users_runtime_dir,
 )
-from ..g432_eq import levels
 from ..hidpp import VENDOR_ID
+from ..pipewire_unit import levels
 from ..report import (
+    BESIDE_HELD,
     FORMAT,
     HELD,
     NO_PERMISSION,
@@ -41,10 +45,10 @@ from ..report import (
     gather,
 )
 from ..wording import counted, escaped, number, whole, word_list
-from .output import PROBE_WAIT, Subcommands, battery_words, print_json, send
+from .output import PROBE_WAIT, START, STOP, Subcommands, print_json, send
 
 #: The fields of each daemon reply the report keeps for a node the daemon holds: what a
-#: model's support needs, nothing the owner set or named.
+#: model's support needs, nothing the owner named.
 KEYBOARD_FIELDS = ("name", "product", "answering", "capabilities", "clusters", "effects",
                    "brightness_levels")
 MOUSE_FIELDS = ("name", "product", "answering", "capabilities", "clusters", "effects", "dpi",
@@ -56,14 +60,11 @@ NODE = re.compile(r"/dev/(hidraw[0-9]{1,4})")
 #: The daemon's state in the report's words, for each way its status may fail
 #: (daemon.failure) but DOWN, which is "not running".
 DAEMON_UNSURE = {BUSY: "running and did not answer in time",
-                 UNREAD: "running, and its answer could not be read",
-                 UNKNOWN: "maybe running: its socket could not be used"}
+                 UNREAD: "running, and its reply could not be read",
+                 UNKNOWN: "maybe running: it could not be reached"}
 #: The daemon's state where it answered `status` with an error, which says nothing of the
 #: nodes it holds.
 STATUS_FAILED = "running, and its status failed"
-
-#: The commands that stop and start the daemon, as the advice gives them.
-STOP, START = "systemctl --user stop gearbench", "systemctl --user start gearbench"
 
 
 def kept(reply: Mapping[str, object], fields: tuple[str, ...]) -> dict:
@@ -87,8 +88,9 @@ def ask(request: dict) -> dict | str:
 
 def daemon_holds() -> tuple[str, dict[str, dict], bool]:
     """The daemon's state in words, what it says of each node it holds by node name, and
-    whether the models this build drives are left alone: true whenever a daemon runs or
-    may, since its attach retries open and probe such a node it does not hold."""
+    whether the models this build drives are left alone from the start: true whenever a
+    daemon runs or may when `status` is asked, since its attach retries open and probe such
+    a node it does not hold. Where it is false, cmd_report asks again before each such node."""
     status = ask({"command": "status"})
     if status == DOWN:
         return "not running", {}, False
@@ -97,6 +99,7 @@ def daemon_holds() -> tuple[str, dict[str, dict], bool]:
     held: dict[str, dict] = {}
     if node := held_node(status.get("device")):
         held[node] = kept(status, KEYBOARD_FIELDS)
+    held.update(other_keyboards(status))
     mouse = ask({"command": "mouse", "ask": False})
     if isinstance(mouse, dict):
         for each in mouse.get("devices") or []:
@@ -115,47 +118,54 @@ def daemon_holds() -> tuple[str, dict[str, dict], bool]:
 AUDIO_VENDORS = frozenset(f"0x{vendor:04x}" for vendor in (VENDOR_ID, ASTRO_VENDOR_ID))
 
 
-def pipewire_part(run: spatial.Run) -> dict:
+def pipewire_part(run: pipewire_client.Run) -> dict:
     """The audio cards of AUDIO_VENDORS in one pw-dump (audio_cards), or, in words, why
-    none was read: no pw-dump, or no PipeWire session to answer it, is no failure of the
-    report. pw-dump only reads; nothing here changes a card."""
+    none was read: no pw-dump, or no PipeWire session to answer it, fails the report only
+    where it read no Logitech node either (cmd_report). pw-dump only reads; nothing here
+    changes a card."""
     try:
-        objects = spatial.dump_objects(run)
-    except spatial.SpatialError as exc:
+        objects = pipewire_client.dump_objects(run)
+    except pipewire_client.StepError as exc:
         return {"unread": str(exc), "cards": []}
     return {"unread": None, "cards": audio_cards(objects)}
 
 
+#: pw-dump's environment beside this process's: libpipewire then logs nothing to stderr,
+#: which a failed pw-dump's words in the block are taken from. With a client.conf it could
+#: not parse it logged the file's path, in the home folder, and the line it failed on
+#: (pw-dump 1.6.2, 2026-10-25); with this, only "can't create context: Invalid argument".
+QUIET_PIPEWIRE = {"PIPEWIRE_DEBUG": "0"}
+
+
 def pipewire_read() -> dict:
-    """pipewire_part, with pw-dump run as the user who ran the report under sudo, run0 or
-    pkexec: it reads that user's PipeWire (use_invoking_users_runtime_dir, which cmd_report
-    calls first), whose socket any program of that user can serve, so it gets that user's
-    rights and no more. Not checked under any of the three: that pw-dump, run with root's
-    environment, finds that PipeWire."""
+    """pipewire_part, pw-dump run with QUIET_PIPEWIRE and as the user who ran the report
+    under sudo, run0 or pkexec: it reads that user's PipeWire (use_invoking_users_runtime_dir,
+    which cmd_report calls first), whose socket any program of that user can serve, so it
+    gets that user's rights and no more. Not checked under any of the three: that pw-dump,
+    run with root's environment, finds that PipeWire."""
+    quiet = functools.partial(subprocess.run, env={**os.environ, **QUIET_PIPEWIRE})
     invoker = invoking_uid()
     if invoker is None:
-        return pipewire_part(subprocess.run)
+        return pipewire_part(quiet)
     try:
         group = pwd.getpwuid(invoker).pw_gid
     except KeyError:
         return {"unread": f"pw-dump was not run: no user has id {invoker}", "cards": []}
-    return pipewire_part(functools.partial(subprocess.run, user=invoker, group=group,
-                                           extra_groups=[]))
+    return pipewire_part(functools.partial(quiet, user=invoker, group=group, extra_groups=[]))
 
 
 def audio_cards(objects: list) -> list[dict]:
-    """Each Audio/Device of AUDIO_VENDORS among pw-dump's objects, None for a field of another
-    shape. No name of the card's or its nodes' is taken: PipeWire's ALSA monitor builds them
-    from the USB serial, as alsa_card.usb-Logitech_G432_Gaming_Headset_000000000000-00
-    (2026-10-18)."""
+    """Each Audio/Device of AUDIO_VENDORS among pw-dump's objects, each value of another shape
+    left out: None in its field, or no item in a list. No name of the card's or its nodes' is
+    taken: PipeWire's ALSA monitor builds them from the USB serial, as
+    alsa_card.usb-Logitech_G432_Gaming_Headset_000000000000-00 (2026-10-18)."""
     cards = []
     for obj in objects:
         info = (obj.get("info") if isinstance(obj, dict)
                 and obj.get("type") == "PipeWire:Interface:Device" else None)
         props, params = _object(info, "props"), _object(info, "params")
-        vendor = props.get("device.vendor.id")
-        if props.get("media.class") != "Audio/Device" or not (
-                isinstance(vendor, str) and vendor in AUDIO_VENDORS):
+        vendor = _text(props.get("device.vendor.id"))
+        if props.get("media.class") != "Audio/Device" or vendor not in AUDIO_VENDORS:
             continue
         cards.append({
             "vendor": vendor, "product": _text(props.get("device.product.id")),
@@ -197,11 +207,27 @@ def _route(route: dict) -> dict:
             "volume_base": base if number(base) else None}
 
 
+def other_keyboards(status: Mapping) -> dict[str, dict]:
+    """What the daemon says of each keyboard it drives beside the leader's (status's
+    `keyboards_driven`, the leader's first), by node name: `status` asked with `keyboard`
+    naming its model, which answers with that keyboard's entries. A reply that fails, a
+    refusal among them, names no node and adds nothing."""
+    held: dict[str, dict] = {}
+    for each in (status.get("keyboards_driven") or [])[1:]:
+        if not (isinstance(each, dict) and isinstance(each.get("model"), str)):
+            continue
+        reply = ask({"command": "status", "keyboard": each["model"]})
+        if isinstance(reply, dict) and (node := held_node(reply.get("device"))):
+            held[node] = kept(reply, KEYBOARD_FIELDS)
+    return held
+
+
 def other_mouse(each: dict) -> dict:
     """What the daemon says of an attached mouse beside the selected one, asked by its
     product id with nothing sent to it (`mouse` with `device` and `ask` false), else its
-    entry in the selected one's `devices`, its name and product alone: a daemon that did
-    not answer, refused, or is older than `device` and so answered for the selected mouse."""
+    entry in the selected one's `devices`, its name, product and `answering` alone: a daemon
+    that did not answer, refused, or is older than `device` and so answered for the selected
+    mouse."""
     reply = ask({"command": "mouse", "ask": False, "device": each.get("product")})
     if (isinstance(reply, dict) and reply.get("ok")
             and reply.get("product") == each.get("product")):
@@ -218,6 +244,14 @@ def others_running() -> dict[str, list[int]]:
         return {}
 
 
+#: The refusal with no Logitech node and a PipeWire that listed no card, and the one for a
+#: PipeWire that was not read, whose cause is said: PipeWire alone finds an A50 Gen 4.
+NO_DEVICE = "error: no Logitech or Astro device found; plug one in and run the report again"
+NO_DEVICE_UNREAD = ("error: no Logitech device found on USB, and PipeWire, which finds an A50 "
+                    "Gen 4, was not read: {}; plug one in, or fix that, and run the report "
+                    "again")
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     """Gather the report and print it, then what to do about what it could not read."""
     # Under sudo, run0 or pkexec, the daemon's socket and pw-dump's PipeWire are both
@@ -226,18 +260,24 @@ def cmd_report(args: argparse.Namespace) -> int:
     state, held, unsure = daemon_holds()
     others = others_running()
     try:
-        nodes = gather(held, unsure)
+        # A daemon `status` found down may start while the nodes are read: systemd restarts
+        # a failed one 2 s after it stops (RestartSec).
+        nodes = gather(held, lambda: unsure or listening(socket_path()))
     except NotARead as exc:
-        print(f"error: {exc}, so the report stopped with it unsent. This is a fault in "
-              "Gearbench: please report it.", file=sys.stderr)
+        print(f"error: {exc}, so the report stopped with it unsent; this is a fault in "
+              "Gearbench: please report it", file=sys.stderr)
         return 1
-    if not nodes:
-        print("error: no Logitech device found on USB. Plug one in and run the report again.",
+    # An A50 Gen 4 has no Logitech node: its base station is on Astro's vendor id.
+    pipewire = pipewire_read()
+    if not nodes and not pipewire["cards"]:
+        unread = pipewire["unread"]
+        # The unread words can hold pw-dump's stderr.
+        print(escaped(NO_DEVICE if unread is None else NO_DEVICE_UNREAD.format(unread)),
               file=sys.stderr)
         return 1
     report = {"format": FORMAT, "gearbench": __version__, "kernel": os.uname().release,
               "daemon": state, "others_running": [OTHER_TOOLS[comm].name for comm in others],
-              "nodes": nodes, "pipewire": pipewire_read()}
+              "nodes": nodes, "pipewire": pipewire}
     if args.json:
         print_json(report)
     else:
@@ -351,7 +391,7 @@ def _identity_lines(node: Mapping) -> list[str]:
 
 
 def _feature_lines(rows: list) -> list[str]:
-    # A FeatureSet v0 gives no versions (report.feature_table): a row says none, not v0.
+    # A FeatureSet v0 gives no versions (report.feature_table): a row has no version, not v0.
     unversioned = any(row["version"] is None for row in rows)
     note = "; FeatureSet v0 gives no versions" if unversioned else ""
     lines = [f"  features: {len(rows)} beside the root{note}"]
@@ -368,15 +408,15 @@ def _effects(cluster: Mapping) -> str:
 
 
 def _section_lines(node: Mapping) -> list[str]:
-    """The features read, each in a line or two."""
+    """The sections read from lighting to the equalizer, in read_device's order."""
     lines = []
     for cluster in node.get("lighting", {}).get("clusters", []):
         lines.append(f"  lighting cluster {cluster['index']}, {cluster['name']} at "
                      f"{cluster['location']}: {_effects(cluster)}")
     if node.get("lighting", {}).get("brightness_levels"):
         light = node["lighting"]
-        lines.append(f"  brightness: {light['brightness']}, levels "
-                     f"{_words(light['brightness_levels'])}")
+        lines.append(f"  brightness: {light['brightness']}%, levels "
+                     f"{_words(light['brightness_levels'])}%")
     lines += _per_key_lines(node.get("per_key"))
     for zone in node.get("zones", {}).get("zones", []):
         lines.append(f"  zone {zone['index']}, {zone['name']} at {zone['location']}: "
@@ -391,26 +431,78 @@ def _section_lines(node: Mapping) -> list[str]:
                      f"format {memory['profile_format']}, {memory['mode']} mode, running "
                      f"sector {memory['running_sector']}; its factory sectors are in --json")
     if "battery" in node:
-        lines.append(f"  battery: {battery_words(node['battery'])}")
+        # level_words has no words for a reading with no percent on battery or in an unknown
+        # state, as a 0x1001 or 0x1F20 one with no cell; its voltage is what a cell's curve
+        # is built from. In volts after the level, as status and g432-sidetone give it.
+        reading = node["battery"]
+        volts = f" ({reading['volts']} V)" if "volts" in reading else ""
+        lines.append(f"  battery: {reading_words(reading) or reading['state']}{volts}")
     if "dpi" in node:
         dpi = node["dpi"]
-        span = (f"{dpi['range'][0]} to {dpi['range'][1]} in steps of {dpi['range'][2]}"
-                if dpi["range"] else "none listed")
-        lines.append(f"  DPI: {dpi['dpi']}, default {dpi['default']}, range {span}, "
-                     f"{counted(dpi['sensors'], 'sensor')}")
+        lines.append(f"  DPI: {dpi['dpi']}, default {dpi['default']}, range "
+                     f"{_span_words(dpi['range'])}, {counted(dpi['sensors'], 'sensor')}")
     if "report_rate" in node:
         rate = node["report_rate"]
         lines.append(f"  report rate: every {rate['interval_ms']} ms, of "
-                     f"{', '.join(f'{hz} Hz' for hz in rate['rates'])}")
+                     f"{', '.join(f'{hz} Hz' for hz in rate['rates']) or 'none listed'}")
+    lines += _extended_lines(node)
+    lines += _control_lines(node.get("control_list"))
     if "sidetone" in node:
         lines.append(f"  sidetone: {node['sidetone']['level']}")
     if "equalizer" in node:
         eq = node["equalizer"]
+        # getEqInfo's bytes as they came: an end of 0 is dbRange's (g432.eq_range).
         lines.append(f"  equalizer: {counted(eq['bands'], 'band')} at "
-                     f"{_words(eq['frequencies'])} Hz, {eq['db_min']} to {eq['db_max']} dB; "
+                     f"{_words(eq['frequencies'])} Hz, dB range {eq['db_range']}, minimum "
+                     f"{eq['db_min']}, maximum {eq['db_max']}, capabilities "
+                     f"0x{eq['capabilities']:02x}; "
                      f"gain bytes saved {_words(eq['saved_gains'])}, active "
                      f"{_words(eq['active_gains'])}")
     return lines
+
+
+def _extended_lines(node: Mapping) -> list[str]:
+    """0x2202's DPI, 0x8061's rate and 0x1B0C's buttons, each in a line, where the node has
+    them."""
+    lines = []
+    if "extended_dpi" in node:
+        dpi = node["extended_dpi"]
+        lines.append(f"  DPI: {dpi['dpi']}, Y {dpi['dpi_y']}, lift-off {dpi['lift_off']}, "
+                     f"range {_span_words(dpi['range'])}, flags 0x{dpi['flags']:02x}")
+    if "extended_report_rate" in node:
+        rate = node["extended_report_rate"]
+        now = f"{rate['hz']} Hz" if rate["hz"] else "a rate no source names"
+        listed = [f"{hz} Hz" for hz in rate["rates"]] + [
+            f"bit {each}" for each in rate["unnamed_bits"]]
+        lines.append(f"  report rate: {now} (bit {rate['bit']}), of "
+                     f"{', '.join(listed) or 'none listed'}")
+    if "analog_buttons" in node:
+        analog = node["analog_buttons"]
+        lines.append(f"  analog buttons: capabilities {analog['capabilities']}; left "
+                     f"{analog['buttons'][0]}, right {analog['buttons'][1]}")
+    return lines
+
+
+def _span_words(span: list[int] | None) -> str:
+    """A DPI list's range in words, by band where it has a fourth value (sensor.DpiRange.reply)."""
+    return "none listed" if not span else (
+        f"{span[0]} to {span[1]}, in steps of {span[2]}"
+        + (f" to {span[3]}, by band" if len(span) == 4 else ""))
+
+
+#: The control ids a line of the text form gives of 0x1B10's list.
+CONTROLS_A_LINE = 16
+
+
+def _control_lines(controls: Mapping | None) -> list[str]:
+    """0x1B10's count in a line, then its control ids, CONTROLS_A_LINE a line, each line led
+    by the key id of its first."""
+    if controls is None:
+        return []
+    ids = controls["controls"]
+    head = f"  control list: {counted(controls['count'], 'control')}, the control id at each key id"
+    return [head, *(f"    0x{first:02x} {' '.join(ids[first:first + CONTROLS_A_LINE])}"
+                    for first in range(0, len(ids), CONTROLS_A_LINE))]
 
 
 def _per_key_lines(keys: Mapping | None) -> list[str]:
@@ -435,27 +527,40 @@ def _words(value: object) -> str:
 
 # -- what to do next ------------------------------------------------------------------
 
+#: Why a node left UNSURE was not read.
+DAEMON_MAY_OPEN = ("The daemon opens the devices this build drives while it looks for them, "
+                   "so those it does not hold were not read.")
+#: The steps to a read of every node the daemon kept the report from.
+FULL_READ = f"For the full read: `{STOP}`, run the report again, then `{START}`."
+
+
 def advice(nodes: list[dict], *, block: bool) -> list[str]:
     """Where to paste the block above, where the text form printed one (`block`), and what
-    the person who ran the report can do about a node the daemon holds or may open, and
-    about one this account may not open."""
+    the person who ran the report can do about a node the daemon holds or may open, one on
+    the USB device of a node it holds, and one this account may not open."""
     paste = f"Paste the block above, both ``` lines included, into a device report: {REPORT_FORM}"
     lines = [paste] if block else []
-    full_read = f"For the full read: {STOP}, run the report again, then {START}."
     held = [node["node"] for node in nodes if node["state"] == HELD]
-    unread = any(node["state"] == UNSURE for node in nodes)
+    beside = [node["node"] for node in nodes if node["state"] == BESIDE_HELD]
+    not_read: list[str] = []
     if held:
-        # The stop and start are said once, after the line of the devices not read.
-        lines.append(f"Gearbench holds {word_list(held, 'and')}, so the report has only what "
-                     f"the daemon says of {'it' if len(held) == 1 else 'each'}."
-                     f"{'' if unread else ' ' + full_read}")
-    if unread:
-        lines.append("The daemon opens the devices this build drives while it looks for them, "
-                     f"so those it does not hold were not read. {full_read}")
+        not_read.append(f"Gearbench holds {word_list(held, 'and')}, so the report has only "
+                        f"what the daemon says of {'it' if len(held) == 1 else 'each'}.")
+    if beside:
+        not_read.append(f"{word_list(beside, 'and')} {'shares' if len(beside) == 1 else 'share'} "
+                        "a USB device with a node Gearbench holds, so the report sent "
+                        f"{'it' if len(beside) == 1 else 'them'} nothing.")
+    if any(node["state"] == UNSURE for node in nodes):
+        not_read.append(DAEMON_MAY_OPEN)
+    if not_read:
+        # The stop and start are said once, after the last line of the devices not read.
+        not_read[-1] += f" {FULL_READ}"
+    lines += not_read
     for node in nodes:
         if node["state"] == NO_PERMISSION:
-            lines.append(f"This account may not open {node['node']}. To let it until the "
-                         f"device is unplugged: sudo setfacl -m u:$USER:rw /dev/{node['node']}")
+            # "No permission to open", the words of the daemon, probe and the node's state.
+            lines.append(f"No permission to open {node['node']}. To grant it until the "
+                         f"device is unplugged: `sudo setfacl -m u:$USER:rw /dev/{node['node']}`")
             if node["descriptor"]["key_reports"]:
                 lines.append(f"{node['node']} carries the device's key reports too: until "
                              "it is unplugged, any program you run could read what is typed "
@@ -464,6 +569,5 @@ def advice(nodes: list[dict], *, block: bool) -> list[str]:
 
 
 def add_report(sub: Subcommands) -> None:
-    r = sub.add("report", help="read every Logitech device on USB, writing nothing, to paste "
-                               "into an issue")
-    r.set_defaults(func=cmd_report)
+    sub.add("report", help="read every Logitech device on USB, writing nothing, to paste "
+                           "into an issue").set_defaults(func=cmd_report)

@@ -7,7 +7,7 @@ mouse in HOST mode (`tune`, `retune`, `send_rate`), and the rate `mouse_rate` se
 on a mouse in HOST mode whose onboard profile is not written (`live_rate`). What is written
 here goes to a mouse's working memory, to the game profile's file and, for a DPI the user
 chose outside a game profile's own stages and that live rate, to config.json
-(`remember_dpi`, `forget_dpi`, `remember_rate`), never to the mouse's onboard profile."""
+(`remember_dpi`, `forget_dpi`, `live_rate`), never to the mouse's onboard profile."""
 
 from __future__ import annotations
 
@@ -17,16 +17,18 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
-from ...config import RATE_CHOICES, entry_under, keep_under
+from ...config import RATE_CHOICES, REPORT_RATES, entry_under, keep_under
 from ...library_files import slug
-from ...mouse import PROFILE_SECTOR, MouseError, live_rate_note, place_stages, profile_words
-from ...onboard import stage_dpi
-from ...profiles import REPORT_RATES, GameProfile, MouseTuning
+from ...mouse import PROFILE_SECTOR, MouseError, live_rate_note, profile_words
+from ...onboard import DPI_HIGHEST, DPI_LOWEST, dpi_fits, stage_dpi
+from ...profiles import GameProfile, MouseTuning
+from ...sensor import place_stages
 from ...wording import escaped
 from ..shared import MOUSE_PROBE, whole_number
 from .attached import (
     TUNING_HOST_ONLY,
     AttachedMouse,
+    aimed,
     dpi_keys,
     follow_shift,
     own_stages,
@@ -59,7 +61,7 @@ class Dpi:
         return {"mouse_dpi": self._cmd_mouse_dpi}
 
     def send_rate(self, attached: AttachedMouse) -> bool:
-        """Send the report rate in force live (0x8060 fn 2), since no profile runs in HOST mode:
+        """Send the report rate in force live (send_live_rate), since no profile runs in HOST mode:
         at an arm, and after a restore or any other HOST-mode profile 1 write. The loaded game
         profile's own rate on a mouse the daemon runs in HOST mode (runs_host), else the one
         rate_for gives without it: one counted there with host mode off awaits its hand-back.
@@ -77,8 +79,9 @@ class Dpi:
 
     def send_live_rate(self, attached: AttachedMouse, rate: int, *, probe: bool = False,
                        check: bool = False) -> None:
-        """Send `rate` live (0x8060 fn 2) through mouse_call, on the probe's budget with
-        `probe` and after the mouse's own rate check with `check`, or raise MouseError.
+        """Send `rate` live (Mouse.set_live_report_rate) through mouse_call, on the probe's
+        budget with `probe` and after the mouse's own rate check with `check`, or raise
+        MouseError.
         `attached.live_rate` is cleared just before the send, since one whose answer is lost
         may have landed, and set with the reading's rate once it is answered."""
         mouse = attached.mouse
@@ -94,20 +97,19 @@ class Dpi:
 
         self.mice.mouse_call(send, target=attached)
         attached.live_rate = rate
-        if attached.reading is not None:
-            attached.reading["report_rate"] = rate
+        attached.on_rate(rate)
 
     def live_rate(self, target: AttachedMouse, hz: int) -> dict:
-        """mouse_rate on a mouse that sets_rate_live: the rate sent live, 0x8060 fn 2, with
-        nothing stored on the mouse, and kept for its model in config.json (remember_rate),
-        the rate in force on it that each arm sends (rate_for). A rate outside REPORT_RATES
-        is refused, though the mouse may list it."""
+        """mouse_rate on a mouse that sets_rate_live: the rate sent live (send_live_rate), with
+        nothing stored on the mouse, and kept for its model in config.json, the rate in force
+        on it that each arm sends (rate_for). A rate outside REPORT_RATES is refused, though
+        the mouse may list it."""
         if hz not in REPORT_RATES:
             # config.json's mouse_rate loads no other: kept, it would leave the file unusable.
             raise MouseError(f"{hz} Hz is not supported; Gearbench sets the {target.name} to "
                              f"{RATE_CHOICES} Hz")
         self.send_live_rate(target, hz, check=True)
-        self.remember_rate(hz, target)
+        self.keep_for(self.d.config.mouse_rate, target, hz)
         return {"ok": True, "report_rate": hz, "written": "live",
                 "note": live_rate_note(target.name)}
 
@@ -131,17 +133,13 @@ class Dpi:
         """The DPI remembered for this mouse on either of its routes, or None."""
         return self.kept_for(self.d.config.mouse_dpi, attached)
 
-    def remember_rate(self, hz: int, found: AttachedMouse) -> None:
-        """Keep the rate set live on a mouse whose onboard profile is not written
-        (live_rate) in config.json, for each arm of HOST mode to send (rate_for), at the next
-        start too."""
-        self.keep_for(self.d.config.mouse_rate, found, hz)
-
     def known_dpi(self, attached: AttachedMouse) -> int | None:
-        """The DPI a mouse is on as far as the daemon knows, with nothing sent:
-        the last reading, which its own writes keep up to date, else the one
-        chosen for it, which restore_dpi put back at the attach."""
+        """The DPI a mouse is on as far as the daemon knows, with nothing sent: the last reading,
+        which its own writes keep up to date, else the DPI it last put the mouse on or read
+        (AttachedMouse.on_dpi), else the one remembered for it (remembered_dpi)."""
         dpi = (attached.reading or {}).get("dpi")
+        if dpi is None:
+            dpi = attached.dpi_on
         return dpi if dpi is not None else self.remembered_dpi(attached)
 
     def remember_dpi(self, dpi: int, found: AttachedMouse) -> None:
@@ -151,8 +149,10 @@ class Dpi:
         them owed), config.mouse_dpi keeps it, under this route's key only. One chosen
         outside them replaces the DPI read before a move to them that is owed, or whose retry
         was refused, as the one to go back to when they go (the owner's decision of 2026-10-07),
-        and the one kept from before a load whose own stages were dropped under it. Not called
-        for the DPI shift: held only as long as the paddle is, it is not a choice.
+        and the one kept from before a load whose own stages were dropped under it. A DPI outside
+        DPI_LOWEST to DPI_HIGHEST, as a mouse that answers 0 gives, never goes to
+        config.mouse_dpi: the one there is forgotten instead. Not called for the DPI shift: held
+        only as long as the paddle is, it is not a choice.
         """
         # Chosen since a stage edit's move went unanswered: its retry maps from this one.
         found.dpi_before_edit = None
@@ -163,38 +163,58 @@ class Dpi:
                 and own_stages(self.tuning_for(found)) is not None):
             self.game_dpi[cast(tuple[str, str], self.game_key(found))] = dpi
             return
+        if not dpi_fits(dpi):
+            # A DPI read is taken as the mouse answers it (sensor.py), 0 included, which
+            # config.json's mouse_dpi refuses at the next load, every other setting with it:
+            # forgotten, as a DPI that cannot be read is (ProfileWrites.follow_dpi).
+            log.info("%s answered %d DPI, outside %d to %d; its remembered DPI is forgotten",
+                     found.name, dpi, DPI_LOWEST, DPI_HIGHEST)
+            self.forget_dpi(found)
+            return
         # Forgotten, not set: desktop_dpi falls back on the DPI remembered below, and a retried
         # move to own stages reads the mouse again (wanted_dpi).
         found.dpi_before_tuning = found.dpi_before_load = None
         self.keep_for(self.d.config.mouse_dpi, found, dpi)
 
     def forget_dpi(self, attached: AttachedMouse) -> None:
-        """Forget the DPI remembered for this mouse on both routes: after a write changed profile
-        1's stage list it may be an edited stage's old value, which restore_dpi would put back
-        (ProfileWrites.follow_dpi)."""
+        """Forget the DPI remembered for this mouse on both routes: one restore_dpi must not put
+        back."""
         dropped = [self.d.config.mouse_dpi.pop(key, None) for key in dpi_keys(attached.product)]
         if any(value is not None for value in dropped):
             self.d.persist()
 
-    def restore_dpi(self, found: AttachedMouse) -> bool:
+    def restore_dpi(self, found: AttachedMouse, held: int | None = None) -> bool:
         """Put the DPI back on a mouse that has just appeared or been set up again: it comes back
         from a power cycle on the stage it was last on in ONBOARD mode, and on the profile's
         default in HOST mode, neither of which need be the user's choice.
 
-        The DPI is the remembered one. In HOST mode under a game profile's own stages it is the
-        DPI last chosen under them, else their default stage, and the DPI outside them is kept
-        for when they go (dpi_before_tuning). Stages edited while the mouse was away keep it on
-        its stage, as retune does; the edited stage's DPI becomes the one chosen only once those
-        stages are taken, so a retried setup maps it once. Stages that went out of force while
-        it was away, or before an unanswered move was retried, put back the DPI from before
-        them. Nothing is written when there is nothing to put back or the mouse already reads
-        it. False when the read or the write failed, so the setup sets no cookie.
+        The DPI is the remembered one, else `held`, the DPI under a shift its caller let go
+        of, which the mouse would otherwise keep. In HOST mode under a game
+        profile's own stages it is the DPI last chosen under them, else their default stage,
+        and the DPI outside them, `held` where none is remembered, is kept for when they go
+        (dpi_before_tuning). Stages edited while the mouse was away keep it on its stage, as
+        retune does; the edited stage's DPI becomes the one chosen only once those stages are
+        taken, so a retried setup maps it once. Stages that went out of force while it was
+        away, or before an unanswered move was retried, put back the DPI from before them. One
+        the mouse did not take stays kept for the retry, or for its next attach when it went
+        away. Nothing is written when there is nothing to put back or the mouse already reads
+        it, or outside HOST mode to a mouse that takes a DPI there alone (Mouse.dpi_host_only),
+        whose onboard profile sets it. The DPI read is the one the mouse is on until a write
+        replaces it (AttachedMouse.on_dpi). False when the read or the write failed, so the
+        setup sets no cookie.
         """
+        if found.mouse.dpi_host_only and not found.host:
+            return True
         tuning = self.tuning_for(found) if self.mice.runs_host(found) else None
         stages, had = own_stages(tuning), own_stages(found.tuning)
         mapped = key = None
+        outside = found.dpi_before_tuning, found.dpi_before_load
         if tuning is not None and stages is not None:
             kept = had is not None and found.tuning_load == self.d.games.loads
+            if not kept:
+                # Not on these stages until the read below lands (take_tuning): a retune
+                # before then moves it as a load does (retune's `loaded`).
+                found.tuning_load = None
             key = self.game_key(found)
             if kept and had is not None and had != stages and key in self.game_dpi:
                 # Edited while it was away. The DPI it reads is the power-on's, so the one
@@ -202,8 +222,7 @@ class Dpi:
                 mapped = same_place(self.game_dpi[key], had, stages)
             wanted = mapped or self.chosen_under(found, tuning, kept) or tuning.default
         else:
-            wanted = self.desktop_dpi(found)
-            found.dpi_before_load = None
+            wanted = self.desktop_dpi(found) or held
         if wanted is None:
             self.take_tuning(found, tuning)
             return True
@@ -211,21 +230,29 @@ class Dpi:
             have = self.mice.mouse_call(found.mouse.get_dpi, target=found)
             if stages is not None and had is None:
                 # Read before a load's move that went unanswered, it stays: `have` may be the
-                # power-on's.
-                found.dpi_before_tuning = self.desktop_dpi(found) or have
+                # power-on's, or a shift's let go of.
+                found.dpi_before_tuning = self.desktop_dpi(found) or held or have
             self.take_tuning(found, tuning)
+            if stages is None:
+                # Kept until the mouse takes it, for the retry or the load's end (desktop_dpi):
+                # a teardown at the read or the write keeps them for the next attach (KeptMouse).
+                found.dpi_before_tuning, found.dpi_before_load = outside
             if mapped is not None and key is not None:
                 self.game_dpi[key] = mapped
-            if have == wanted:
-                return True
-            log.debug("%s came back on %s DPI; %s was chosen", found.name, have, wanted)
-            # Without the level byte: a DPI put back never flashes, and after a power-on the
-            # flash outlasted DPI_FLASH_REPAINT.
-            applied = self.mice.mouse_call(
-                lambda: found.mouse.set_dpi(wanted, indicate=False), target=found)
+            found.on_dpi(have)
+            if have != wanted:
+                log.debug("%s came back on %s DPI; %s was chosen", found.name, have, wanted)
+                # Without the level byte: a DPI put back never flashes, and after a power-on
+                # the flash outlasted DPI_FLASH_REPAINT.
+                applied = self.mice.mouse_call(
+                    lambda: found.mouse.set_dpi(wanted, indicate=False), target=found)
         except MouseError as exc:
             log.debug("could not restore %s to %s DPI: %s", found.name, wanted, exc)
             return False
+        if stages is None:
+            found.dpi_before_tuning = found.dpi_before_load = None
+        if have == wanted:
+            return True
         log.info("%s DPI restored to %s", found.name, applied)
         self.after_dpi_write(found, applied)
         return True
@@ -274,10 +301,9 @@ class Dpi:
 
     def put_back_shift(self, attached: AttachedMouse,
                        why: str = "the shift held when its link went down") -> None:
-        """Put back the DPI under a DPI shift whose release was lost with the link, or whose
-        release's write the mouse did not answer, without the level byte; `why` is for the
-        log. One not taken stays owed: the next link-up, a recheck that finds the setup kept,
-        the teardown or the paddle's next release puts it back."""
+        """Put back the DPI under a DPI shift that its release did not put back
+        (dpi_before_shift), without the level byte; `why` is for the log. One the mouse does
+        not take stays owed."""
         # Set: each caller checks it.
         held = cast(int, attached.dpi_before_shift)
         try:
@@ -346,21 +372,18 @@ class Dpi:
                       attached.name, slot + 1, dpi)
             return
         log.info("%s moved to DPI stage %d by itself: %d DPI", attached.name, slot + 1, dpi)
-        if attached.reading is not None:
-            attached.reading["dpi"] = dpi
+        attached.on_dpi(dpi)
         self.remember_dpi(dpi, attached)
         self.d.session.dpi_notice.post(attached.name, dpi)
 
     def after_dpi_write(self, found: AttachedMouse, dpi: int) -> None:
-        """After a DPI write, `dpi` the value the mouse took: `mouse` answers with it until the
-        mouse is next read, which a `mouse` with `ask` false never does.
+        """After a DPI write, `dpi` the value the mouse took (AttachedMouse.on_dpi).
 
         After a write that sent a stage's level byte to a mouse with lighting, in either mode,
         its lights flash and end dark (DPI_FLASH_REPAINT): what it shows is forgotten, and its
         lighting is written again once the flash is over (MouseLighting.repaint_after_flash,
         from tend_mice). A second write during the flash puts the repaint back."""
-        if found.reading is not None:
-            found.reading["dpi"] = dpi
+        found.on_dpi(dpi)
         if found.lighting is None or not found.mouse.dpi_level_sent:
             return
         found.forget_showing()
@@ -406,7 +429,7 @@ class Dpi:
 
     def kept_rate(self, attached: AttachedMouse) -> int | None:
         """The rate last set live on a mouse whose onboard profile is not written
-        (remember_rate), or None: on any other model profile 1's is in force. A model whose
+        (live_rate), or None: on any other model profile 1's is in force. A model whose
         writes pass their test later takes profile 1's."""
         if attached.mouse.flash_refusal is None:
             return None
@@ -438,6 +461,17 @@ class Dpi:
         return (attached.dpi_before_load or attached.dpi_before_tuning
                 or self.remembered_dpi(attached))
 
+    @staticmethod
+    def follow_kept(target: AttachedMouse, before: list[int], after: list[int]) -> None:
+        """Follow the DPIs desktop_dpi puts back ahead of the remembered one, dpi_before_load
+        and dpi_before_tuning, through the edit (same_place), as follow_shift follows the DPI
+        under a held shift: kept as they were, the next setup or a load's end would put back an
+        edited stage's old value. One that is no stage of `before` stays, and so does one that
+        `after` holds; one whose place is past the end of `after` is dropped."""
+        target.dpi_before_load, target.dpi_before_tuning = (
+            same_place(dpi, before, after) if dpi in before else dpi
+            for dpi in (target.dpi_before_load, target.dpi_before_tuning))
+
     def take_tuning(self, attached: AttachedMouse, tuning: MouseTuning | None) -> None:
         """Note that the mouse is on `tuning` now, under the load in force (Games.loads). A
         loaded profile with no stages of its own has no DPI chosen under them, and a tuning
@@ -458,9 +492,10 @@ class Dpi:
     @staticmethod
     def out_of_force(attached: AttachedMouse) -> None:
         """In ONBOARD mode from here (Mice.hand_back): a game profile's own stages and rate
-        are out of force, and the rate in force is not known."""
+        are out of force, and the rate in force is not known; no load's stages are taken in
+        ONBOARD mode, so a retune before the next restore_dpi moves the mouse as a load does."""
         attached.tuning = attached.dpi_before_tuning = attached.live_rate = None
-        attached.dpi_before_edit = None
+        attached.tuning_load = attached.dpi_before_edit = None
         attached.owed_tuning = False
 
     def game_key(self, attached: AttachedMouse) -> tuple[str, str] | None:
@@ -521,17 +556,11 @@ class Dpi:
         it is `attached.live_rate`, the DPI moved without the level byte. Own stages a load
         brings move it to the DPI last chosen under them, else their default (chosen_under),
         keeping the DPI before for when they go (desktop_dpi); stages changed under the same
-        load keep it on its stage once it has taken that load's (`tuning_load`; under a held DPI
-        shift that is the shift's stage, and once the move is taken the DPI under the shift
-        moves to its place in the new list, for the release: follow_shift, as on profile 1),
-        else move it as a load does, and own stages dropped under it keep the DPI from before
-        the load for its end (dpi_before_load). A mouse that stops answering part way is owed
-        it, and the DPI read before a move it did not answer is kept, through a refused retry
-        too, until a DPI is chosen (remember_dpi): the next try puts it back if no own stages
-        are in force by then. A stage edit's move it did not answer keeps the DPI it was mapped
-        from (`dpi_before_edit`), which the retry maps again, so the DPI is mapped once; a DPI
-        shift pressed, let go or put back before the retry moves the mouse, and the retry maps
-        from the DPI it sent (edit_moved). The DPI it moved to, or None."""
+        load keep it on its stage once it has taken that load's (`tuning_load`), else move it
+        as a load does, and own stages dropped under it keep the DPI from before the load for
+        its end (dpi_before_load). A mouse that stops answering part way is owed it, and what
+        an unanswered move leaves for the retry is kept in `dpi_before_tuning` and
+        `dpi_before_edit`. The DPI it moved to, or None."""
         new, old = self.tuning_for(attached), attached.tuning
         loaded = attached.tuning_load != self.d.games.loads
         stages, before = own_stages(new), own_stages(old)
@@ -540,15 +569,14 @@ class Dpi:
             or (loaded and attached.dpi_before_load is not None))
         mouse = attached.mouse
         rate = self.rate_for(attached, new)
-        resend = self.rate_unsent(attached, rate)
         applied = edited = None
         read = False        # dpi_before_tuning read by this try
-        said = "%s: the report rate in force could not be sent: %s"
+        said = "%s: the report rate in effect could not be sent: %s"
         try:
-            if resend and rate is not None:
+            if rate is not None and self.rate_unsent(attached, rate):
                 self.send_live_rate(attached, rate)
                 log.info("%s at %s Hz, live", attached.name, rate)
-            said = "%s: the DPI for the stages in force could not be sent: %s"
+            said = "%s: the DPI for the stages in effect could not be sent: %s"
             wanted, why, read, edited = self.wanted_dpi(attached, new, before, loaded, undo)
             if wanted is not None:
                 applied = self.mice.mouse_call(lambda: mouse.set_dpi(wanted, indicate=False),
@@ -593,9 +621,9 @@ class Dpi:
                    undo: bool) -> tuple[int | None, str, bool, int | None]:
         """Where retune moves a mouse's DPI with `new` in force, `before` the own stages it
         was on: the DPI, or None to leave it; why, for the journal; whether this try read
-        dpi_before_tuning; and the DPI a stage edit was mapped from, or None. `undo`: a DPI
-        is kept from a move to own stages that went unanswered, or from before a load whose
-        own stages were dropped under it and which has ended, and none are in force now.
+        dpi_before_tuning; and the DPI a stage edit was mapped from, or None. `undo`: no own
+        stages in `before` or in force now, and a DPI kept from outside them waits to be put
+        back (dpi_before_tuning, or dpi_before_load once its load has ended).
         The mouse is asked for its DPI at most once and nothing is kept before it answers,
         so a MouseError comes with nothing read."""
         stages, mouse = own_stages(new), attached.mouse
@@ -619,12 +647,12 @@ class Dpi:
         elif (loaded and before is not None) or undo:
             wanted, why = (self.desktop_dpi(attached),
                            "where it was before a game profile's own stages")
-        elif not loaded and stages != before:
+        elif stages != before:
             was, now = self.edited_lists(attached, before, stages)
             # A retry after a move it did not answer maps from the DPI before that move, which
             # may have landed, or from the one a DPI shift write sent since (edit_moved). Under
-            # a held paddle that DPI is the shift's, read or kept, and goes to its place in
-            # `now`, as on profile 1.
+            # a held paddle that DPI is the shift's, read or kept, and follows the edit
+            # (same_place), as on profile 1.
             have = edited = (attached.dpi_before_edit
                              or self.mice.mouse_call(mouse.get_dpi, target=attached))
             if before is None and attached.dpi_before_tuning is None:
@@ -634,7 +662,11 @@ class Dpi:
                                               or attached.dpi_before_shift or have)
                 read = True
             moved = same_place(have, was, now)
-            if moved is not None:
+            # A list that ends before the stage's old place sends nothing, though it still
+            # holds the DPI (same_place), to a mouse read on it; one whose move may have
+            # landed (dpi_before_edit) may be on that move's DPI, and is sent it.
+            if moved is not None and (attached.dpi_before_edit is not None
+                                      or was.index(have) < len(now)):
                 wanted, why = moved, "the stage it was on"
         return wanted, why, read, edited
 
@@ -649,7 +681,8 @@ class Dpi:
 
     def edits_tuning(self, target: AttachedMouse) -> GameProfile | None:
         """The loaded game profile when mouse_dpi_stages and mouse_rate edit its own stages and
-        rate for `target` (wants_host); None when they write onboard profile 1."""
+        rate for `target` (wants_host); None when no profile is loaded or `target` does not
+        want HOST mode."""
         return self.d.games.overlay if self.mice.wants_host(target) else None
 
     def tunes_game_profile(self, request: dict) -> bool:
@@ -717,7 +750,7 @@ class Dpi:
         again = (f"(see the journal), which is sent again at the mouse's next setup or "
                  f"{name}'s next load")
         refused = f"the mouse refused the change {again}"
-        dpi = f", but the mouse refused the DPI for the stages in force {again}"
+        dpi = f", but the mouse refused the DPI for the stages in effect {again}"
         if dropped:
             if state == "refused":
                 return f"{name} has no {what} of its own for the {target.name}, but {refused}."
@@ -727,10 +760,10 @@ class Dpi:
             uses = "the rate kept for its model" if kept else "onboard profile 1's"
             return (f"{name} has no {what} of its own for the {target.name}: it uses "
                     f"{uses}{once}{dpi if state == 'dpi refused' else ''}.")
-        when = {"later": "in force once the mouse is in host mode", "now": "in force now",
-                "owed": "in force once the mouse answers",
-                "refused": f"not in force: {refused}",
-                "dpi refused": f"in force now{dpi}"}[state]
+        when = {"later": "in effect once the mouse is in host mode", "now": "in effect now",
+                "owed": "in effect once the mouse answers",
+                "refused": f"not in effect: {refused}",
+                "dpi refused": f"in effect now{dpi}"}[state]
         return (f"Saved as {name}'s own {what} for the {target.name}, {when}; onboard "
                 f"profile 1 is unchanged.")
 
@@ -740,7 +773,7 @@ class Dpi:
         and saved to its file; `reset` drops them. Nothing is written to the mouse's flash."""
         mouse = target.mouse
         own = self.tuning_for(target) or MouseTuning()
-        if request.get("reset"):
+        if request.get("reset") is True:
             tuning = replace(own, dpi_stages=None, default=None, shift=None)
         else:
             if own.dpi_stages is not None:
@@ -760,7 +793,7 @@ class Dpi:
         self.save_tuning(overlay, target, tuning)
         moved = self.tune(target)
         # Tunes `target` a second time too, kept on purpose: a write it refused goes out once
-        # more, and if that one is taken the note says "in force now" (after a reset, that
+        # more, and if that one is taken the note says "in effect now" (after a reset, that
         # profile 1's is used) and the reply's `dpi` is the DPI it moved to. Not checked on a
         # mouse: whether one takes the second copy of a write it refused.
         again = self.follow_tuning(target)
@@ -784,8 +817,10 @@ class Dpi:
         """mouse_rate with a game profile loaded, for a mouse that wants host mode, taken or
         not: the profile's own report rate for this model, saved to its file and sent live
         while in force; `reset` drops it."""
-        own = self.tuning_for(target) or MouseTuning()
-        if request.get("reset"):
+        # As the file holds it, not tuning_for's copy on the sensor's step: a rate edit keeps a
+        # hand edit's stages as written, and a reset with no rate to drop writes nothing.
+        own = overlay.tuning(dpi_keys(target.product)) or MouseTuning()
+        if request.get("reset") is True:
             tuning = replace(own, report_rate=None)
         else:
             hz = whole_number(request["value"], "mouse_rate")
@@ -812,8 +847,11 @@ class Dpi:
         """Why `reset` has nothing to give back."""
         if self.d.games.overlay is None:
             return ("no game profile is loaded, so there are no stages or rate of its own "
-                    "to drop")
-        return f"the {target.name} is not set to run in host mode: {TUNING_HOST_ONLY}"
+                    "to remove")
+        if target.spy is None:
+            return f"Gearbench has no host mode for the {target.name}: {TUNING_HOST_ONLY}"
+        return (f"the {target.name} is not set to run in host mode (`gearbench-ctl mouse-host "
+                f"on`): {TUNING_HOST_ONLY}")
 
     def _cmd_mouse_dpi(self, request: dict) -> dict:
         target = self.mice.mouse_for(request)
@@ -824,4 +862,4 @@ class Dpi:
         self.after_dpi_write(target, applied)
         target.dpi_before_shift = None          # as dpi_step's
         self.remember_dpi(applied, target)
-        return {"ok": True, "dpi": applied, "requested": value}
+        return aimed(target, {"ok": True, "dpi": applied, "requested": value})

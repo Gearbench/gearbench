@@ -43,8 +43,9 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_
 # /dev/uinput's: a program that opened the node keeps reading it after another
 # account gets the seat, and so reads what that account types on the G915 TKL,
 # a password at the login screen included. On a machine several people use,
-# that file's group grant, in a copy of this file in /etc/udev/rules.d/,
-# limits the node to the group's accounts.
+# that file's group grant, on the line below and on the c545 line, in a copy
+# of this file in /etc/udev/rules.d/, limits the node to the group's accounts.
+# A member then reads it from any session, whoever has the seat.
 #
 # KERNELS matches a parent's kernel name, which for the paired device is
 # bus:vendor:product.instance.

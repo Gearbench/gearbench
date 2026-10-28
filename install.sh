@@ -2,18 +2,21 @@
 #
 # Install Gearbench for the current user.
 #
-# Usage:  ./install.sh            install the udev rules, the gearbench group
-#                                 with you in it, the user unit, the launcher,
-#                                 the Shell extension, the headsets' audio profiles
-#                                 (restarting WirePlumber if one changed), the
-#                                 spatial sound service (left off) and, with GTK 4
-#                                 and libadwaita for Python present, the window
+# Usage:  ./install.sh            install the udev rules, the mice's hwdb entry, the
+#                                 gearbench group with you in it, the user unit, the
+#                                 launcher, the Shell extension, the headsets' audio
+#                                 profiles (a running WirePlumber restarts on a change),
+#                                 the spatial sound service (off until switched on) and,
+#                                 with GTK 4 and libadwaita for Python present, the window
 #         ./install.sh --uninstall
 #         ./install.sh --help
 #
 # Installs:
 #   /usr/local/lib/udev/rules.d/                 every udev rule in udev/, /dev/uinput's
 #                                                among them (via sudo)
+#   /etc/udev/hwdb.d/71-gearbench-mouse-dpi.hwdb each mouse's default DPI as 1000, so the
+#                                                pointer moves at the DPI Gearbench sets
+#                                                (via sudo, with the hwdb rebuilt)
 #   the gearbench system group, with you in it   (via sudo)
 #   ~/.config/systemd/user/gearbench.service
 #   ~/.config/systemd/user/gearbench-spatial.service
@@ -24,6 +27,12 @@
 #                                                gives the A50 that profile set
 #   ~/.config/wireplumber/wireplumber.conf.d/60-gearbench-logitech-g432.conf
 #                                                gives the G432 PipeWire's analog-only.conf
+#   ~/.config/wireplumber/wireplumber.conf.d/60-gearbench-hidpp-headsets.conf
+#                                                gives the rest of its family the same
+#   ~/.config/alsa-card-profile/mixer/profile-sets/gearbench-astro-a50x.conf
+#                                                the A50 X's Game and Chat as two outputs
+#   ~/.config/wireplumber/wireplumber.conf.d/60-gearbench-astro-a50x.conf
+#                                                gives the A50 X that profile set
 #   ~/.local/bin/gearbench-ctl                   launcher
 #   ~/.local/share/applications/...desktop       app grid entry
 #   ~/.local/share/dbus-1/services/...service    D-Bus starts the window
@@ -38,34 +47,47 @@
 # above and leaves the gearbench group, with you in it, and the settings,
 # ~/.config/gearbench, where they are.
 #
-# The daemon runs as you, never as root. The udev rules grant uaccess on the HID++
-# interface of each cabled keyboard and mouse, the vendor interface of the G915's
-# and G915 TKL's receivers, the hidraw node of its own that a receiver gives each
-# wireless mouse, the G515 LIGHTSPEED TKL and the G915 TKL, the A50 base station's
-# and the G432 adapter's HID interfaces, and /dev/uinput, which bindings type
-# through and systemd's rules do not grant, and let the gearbench group read the
-# G502 X PLUS's event nodes. Some of those nodes carry keystrokes: the G815's
-# interface 01, the G515 LIGHTSPEED TKL's node behind its receiver and the G915
-# TKL's, on a kernel that gives it one, carry what is typed on the keyboard, and
-# the cabled G502 HERO's and G502 X's interface 01 what a button bound to a key
-# types; each rule's comment says what its node carries. A program that opened one
-# of those keeps reading it after another account gets the seat, and so reads what
-# that account types. A mouse's node behind its receiver carries its motion and
-# buttons too and, going by the kernel's source, would carry the keystrokes of a
-# keyboard paired to that receiver after it, so pair nothing else there. The
-# uinput rule is the line steam-devices ships: with it, any program you run can
-# create a virtual keyboard (see the rule's comment).
+# The daemon runs as you, never as root. The udev rules grant uaccess on the control
+# interface of each keyboard, on its cable or its receiver, of each cabled mouse and of
+# each headset's base station, adapter, cable or receiver, on the node a receiver gives a
+# device paired to it, and on /dev/uinput, which bindings type through and systemd's
+# rules do not grant, and let the gearbench group read the G502 X PLUS's event nodes. A
+# program of any account in the group that has one open can still take the mouse from your
+# session until it lets go, or change what its buttons send until the mouse is plugged in
+# again. Some of the nodes the rules grant carry keystrokes: what is typed on a keyboard,
+# what a mouse button bound to a key types, or the modifier keys a keyboard with lit FN
+# keys reports once it is asked to; each rule's comment says what its node carries. A
+# program that opened one of those keeps reading it after another account gets the seat,
+# and so reads what that account types. A mouse's node behind its receiver carries its
+# motion and buttons too and, going by the kernel's source, the keys its buttons are bound
+# to type, and would carry the keystrokes of a keyboard paired to that receiver after it,
+# so pair nothing else there. A keyboard's node behind its receiver would carry those of
+# a keyboard paired there after it too, so pair no other keyboard there either.
+# The uinput rule is the line steam-devices ships: with it, any program you run can create
+# a virtual keyboard, and one that opened it can keep that keyboard after another account
+# gets the seat and type into that account's session (see the rule's comment).
 set -euo pipefail
+# What this writes runs as you or is loaded by what does: no login umask may leave it, or a
+# folder made for it, writable by another account. go-w keeps a stricter one, as 077.
+umask go-w
 
 # An exported CDPATH makes cd print the directory it finds, a second line in CHECKOUT.
-CHECKOUT="$(CDPATH= cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# The . keeps each $(...) from dropping a newline the path ends in, which
+# checkout_path_check refuses: dirname's, where this runs by its path, and pwd's.
+CHECKOUT=$(dirname -- "${BASH_SOURCE[0]}" && echo .); CHECKOUT="$(CDPATH= cd -- "${CHECKOUT%$'\n.'}" && pwd -P && echo .)"; CHECKOUT=${CHECKOUT%$'\n.'}
 RULE_DIR="/usr/local/lib/udev/rules.d"
 # Every rule in udev/, as the package installs them: one missing looks like the device
 # being unsupported, and /dev/uinput's is among them, without which no binding types.
 RULES=("$CHECKOUT"/udev/*.rules)
 RULES=("${RULES[@]##*/}")
+# The mice's hwdb entry. systemd-hwdb reads /etc/udev/hwdb.d and /usr/lib/udev/hwdb.d alone,
+# not a folder under /usr/local as udev does for rules.
+HWDB_DIR="/etc/udev/hwdb.d"
+HWDB="71-gearbench-mouse-dpi.hwdb"
+# The compiled hwdb udev reads before the one in /usr/lib/udev, where there is one.
+HWDB_ETC_BIN="/etc/udev/hwdb.bin"
 # XDG_CONFIG_HOME and XDG_DATA_HOME only if absolute, as the XDG spec has it and
-# gearbench.config reads the first: a relative one names a folder under wherever this runs.
+# gearbench.settings_files reads the first: a relative one names a folder under wherever this runs.
 CONFIG_HOME="$HOME/.config"
 if [[ "${XDG_CONFIG_HOME:-}" == /* ]]; then CONFIG_HOME=$XDG_CONFIG_HOME; fi
 DATA_HOME="$HOME/.local/share"
@@ -77,16 +99,33 @@ SPATIAL_SRC="$CHECKOUT/spatial/gearbench-spatial.service.in"
 SPATIAL_DST="$UNIT_DIR/gearbench-spatial.service"
 # Written by an install from before Gearbench Spatial, which had a login unit: removed.
 SPATIAL_LOGIN_OLD="$UNIT_DIR/gearbench-spatial-login.service"
-# The headsets' outputs: the A50's two, from an ACP profile set and the WirePlumber rule
-# giving it that set, and the G432's one, from the rule giving it PipeWire's analog-only.conf.
-# The profile set comes before the rules.
+# The spatial unit's restart a run owes, restart or try-restart, kept until spatial_restart
+# runs it: a run that stops after the unit's file changed or the login unit went leaves the
+# next one nothing else to go by. Without a unit suffix, so the user manager loads no unit
+# from it.
+SPATIAL_OWED="$UNIT_DIR/.gearbench-spatial-owed"
+# The closing lines' HWDB_NOTE a run owes, kept until closing_notes says it: a run that stops
+# after the hwdb entry changed leaves the next one nothing else to go by.
+HWDB_OWED="$UNIT_DIR/.gearbench-hwdb-owed"
+# A mouse the session's compositor holds keeps its old speed until the compositor opens it
+# again, as a replug or a login does, since it ignores the trigger's add for it.
+HWDB_NOTE="Plug each mouse in again, or log out and back in, for its pointer to move at the DPI
+Gearbench sets: until then the desktop slows some models down, the G502 HERO among them."
+# The headsets' audio files and their installed paths, at the same index, in the order
+# audio_install writes them: each profile set before the rule that names it.
 ACP_DIR="$CONFIG_HOME/alsa-card-profile/mixer/profile-sets"
 WP_DIR="$CONFIG_HOME/wireplumber/wireplumber.conf.d"
 AUDIO_SRC=("$CHECKOUT/alsa-card-profile/gearbench-astro-a50.conf"
            "$CHECKOUT/wireplumber/60-gearbench-astro-a50.conf"
-           "$CHECKOUT/wireplumber/60-gearbench-logitech-g432.conf")
+           "$CHECKOUT/wireplumber/60-gearbench-logitech-g432.conf"
+           "$CHECKOUT/wireplumber/60-gearbench-hidpp-headsets.conf"
+           "$CHECKOUT/alsa-card-profile/gearbench-astro-a50x.conf"
+           "$CHECKOUT/wireplumber/60-gearbench-astro-a50x.conf")
 AUDIO_DST=("$ACP_DIR/gearbench-astro-a50.conf" "$WP_DIR/60-gearbench-astro-a50.conf"
-           "$WP_DIR/60-gearbench-logitech-g432.conf")
+           "$WP_DIR/60-gearbench-logitech-g432.conf"
+           "$WP_DIR/60-gearbench-hidpp-headsets.conf"
+           "$ACP_DIR/gearbench-astro-a50x.conf"
+           "$WP_DIR/60-gearbench-astro-a50x.conf")
 BIN_DIR="$HOME/.local/bin"
 BIN_DST="$BIN_DIR/gearbench-ctl"
 APP_DIR="$DATA_HOME/applications"
@@ -104,7 +143,7 @@ EXT_FILES=(metadata.json extension.js)
 # old_ids_remove removes.
 OLD_APP_ID="io.github.wmuschetto.Gearbench"
 OLD_EXT_UUID="gearbench-focus@wmuschetto.github.io"
-# The settings folder as gearbench.config reads it.
+# The settings folder as gearbench.settings_files reads it.
 SETTINGS_DIR="$CONFIG_HOME/gearbench"
 # The launcher and the unit run this one, not a pyenv or conda python3 first on PATH.
 PYTHON=/usr/bin/python3
@@ -200,8 +239,8 @@ extension_note() {
     echo "among them unless it runs Wine's Wayland driver."
 }
 
-# Per user: as root it would install for root. It calls sudo itself for the rules and
-# the group.
+# Per user: as root it would install for root. It calls sudo itself for the rules, the
+# mice's hwdb entry and the group.
 refuse_root() {
     [[ "${1:-}" == -h || "${1:-}" == --help ]] && return 0
     if [[ "$(id -u)" == 0 ]]; then
@@ -227,7 +266,7 @@ refuse_packages() {
 # What is made in a setgid folder takes its group, and under umask 002 or a default ACL
 # that group's write. Where the primary group is shared, as `users` can be, g+w for it
 # passes. Then the first of them whose ACL lets another account write (acl_writer). Links
-# are left out: theirs is 0777.
+# are left out, since theirs is 0777; outside_link checks where they lead.
 others_can_write() {
     local uid gid dir=$CHECKOUT folders=("$CHECKOUT") others unsearchable found
     uid=$(id -u) gid=$(id -g)
@@ -284,7 +323,11 @@ def lets_others_write(path: bytes) -> bool:
             # No ACL, or a filesystem without them.
             if error.errno in (errno.ENODATA, errno.EOPNOTSUPP):
                 continue
-            sys.exit(f"cannot read the ACL of {os.fsdecode(path)}: {error.strerror}. "
+            # Another account may have named it: each character a terminal would act on is
+            # written as its escape, as gearbench.wording.escaped does, which this does not
+            # import, since the checkout's code is what is being checked.
+            shown = "".join(c if c.isprintable() else repr(c)[1:-1] for c in os.fsdecode(path))
+            sys.exit(f"cannot read the ACL of {shown}: {error.strerror}. "
                      "Check that it is still there, and run this again.")
         entries = list(struct.iter_unpack("<HHI", acl[4:]))
         if any(tag == ACL_OTHER and allowed & WRITE for tag, allowed, _who in entries):
@@ -303,6 +346,77 @@ sys.stdout.buffer.write(next((path for path in paths if lets_others_write(path))
 PY
 }
 
+# in_or_above PATH: PATH is the checkout, in it or a folder above it.
+in_or_above() {
+    [[ "$1" == "$CHECKOUT" || "$1" == "$CHECKOUT"/* || "$CHECKOUT" == "${1%/}"/* ]]
+}
+
+# steps_in PATH: status 0 when each step of PATH resolves to the checkout, to what it holds or
+# to a folder above it, and so does each step of each link a step is, followed one link at a
+# time: realpath alone judges only the end of a link's chain, which may leave and come back
+# in. LINK_HOPS counts the links followed, the kernel's 40 at most (path_resolution(7)).
+# Sets STEPS_REAL to PATH resolved. realpath's and readlink's output keep a newline a name
+# ends in through the "." after each.
+steps_in() {
+    local parts part path='' real='' folder target
+    IFS=/ read -r -d '' -a parts < <(printf '%s\0' "$1")
+    for part in "${parts[@]}"; do
+        [[ -n "$part" ]] || continue
+        path+=/$part folder=$real
+        real=$(realpath -e -- "$path" 2>/dev/null && echo .) || return 1
+        real=${real%$'\n.'}
+        in_or_above "$real" || return 1
+        if [[ -L "$path" ]]; then
+            (( ++LINK_HOPS <= 40 )) || return 1
+            target=$(readlink -- "$path" && echo .) || return 1
+            target=${target%$'\n.'}
+            [[ "$target" == /* ]] || target=$folder/$target
+            steps_in "$target" || return 1
+        fi
+    done
+    STEPS_REAL=$real
+}
+
+# outside_link: the first link in the checkout that leads out of it or to nothing, as
+# others_can_write checks only the checkout and the folders above it, and the rules' sudo
+# install and Python's imports follow a link. Each step of the link's path is checked, not
+# only its end (steps_in): a path through a folder elsewhere is only as safe as that folder,
+# even where it comes back in. A step may be a folder above the checkout, which
+# others_can_write checks, and the link must end in the checkout. As there, find stays out
+# of a folder it may not search. find gives the link's whole path, so ${link%/*} is its
+# folder, with a newline the folder's name ends in, which $(dirname) would drop.
+outside_link() {
+    local link target
+    while IFS= read -r -d '' link; do
+        target=$(readlink -- "$link" && echo .) || { printf '%s' "$link"; return 0; }
+        target=${target%$'\n.'}
+        [[ "$target" == /* ]] || target=${link%/*}/$target
+        # The link itself is the first the kernel follows.
+        LINK_HOPS=1
+        if ! steps_in "$target" \
+            || [[ "$STEPS_REAL" != "$CHECKOUT" && "$STEPS_REAL" != "$CHECKOUT"/* ]]; then
+            printf '%s' "$link"
+            return 0
+        fi
+    done < <(find "$CHECKOUT" \( -type d ! -executable -prune \) , -type l -print0 2>/dev/null)
+}
+
+# unlisted_folder: the first folder whose files are used though others_can_write and
+# outside_link cannot list them: udev/, where this account may not read or search it, since
+# the sudo install of the rules and the hwdb entry reads it as root whatever its mode; then
+# the checkout or a folder in it this account may search but not read, whose files the
+# service opens by name. A folder it may not search is left out, as there: the service
+# cannot reach what it holds either.
+unlisted_folder() {
+    local udev=$CHECKOUT/udev
+    if [[ -e "$udev" && ! ( -r "$udev" && -x "$udev" ) ]]; then
+        printf '%s' "$udev"
+        return 0
+    fi
+    find "$CHECKOUT" \( -type d ! -executable -prune \) , -type d -executable ! -readable \
+        -print -quit 2>/dev/null || true
+}
+
 # Run before the rules go in: udev looks the group up when it reads them and drops a line
 # naming a group that is not there; it applies one that is not a system group, with a
 # warning. `id -un`, since USER can be unset.
@@ -311,11 +425,21 @@ group_install() {
     sudo usermod -aG "$GROUP" "$(id -un)"
 }
 
-# The daemon has its user manager's groups, as this shell does. The manager outlives a
-# logout while another session is open, for logind's UserStopDelaySec (10 s) after the
-# last, and with lingering on until a restart.
+# The daemon has its user manager's groups, which a shell from a login since the usermod,
+# su - or newgrp does not share: the running daemon's groups are read, and this shell's
+# only when none runs or ps cannot read them. The manager outlives a logout while another
+# session is open, for logind's UserStopDelaySec (10 s) after the last, and with lingering
+# on until a restart. ps prints supgrp comma-separated, and -ww keeps an exported COLUMNS
+# from cutting the list (procps-ng 4.0.4).
 group_note() {
-    id -nG | tr ' ' '\n' | grep -qx "$GROUP" && return 0
+    local pid groups=
+    pid=$(systemctl --user show --property=MainPID --value gearbench.service 2>/dev/null) || pid=
+    if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+        groups=$(ps -ww -o supgrp= -p "$pid" 2>/dev/null) || groups=
+        groups=${groups//,/ }
+    fi
+    [[ -n "$groups" ]] || groups=$(id -nG)
+    [[ " $groups " == *" $GROUP "* ]] && return 0
     echo "Your account is in the $GROUP group, which the service needs with host mode off to"
     if [[ "$(loginctl show-user "$(id -un)" --property=Linger --value 2>/dev/null)" == yes ]]; then
         echo "read G4 to G9 on a G502 X PLUS. It gets the group when you restart the machine:"
@@ -348,48 +472,55 @@ icon_cache_update() {
 # icons under APP_ID and, when its folder is there, the extension under EXT_UUID, with a
 # line that says so (WORDS end it) and the uuid out of GNOME's lists, which stops it in the
 # running Shell. PACKAGED is 1 beside the package, whose extension has EXT_UUID (the old
-# one in a version from before 1.1.0) and stays enabled.
+# one in a version from before 1.1.0) and stays enabled. A file's .new, the leftover of a
+# write that failed partway, goes with it.
 ids_remove() {
     local ext="$DATA_HOME/gnome-shell/extensions/$2" file
-    rm -f "$APP_DIR/$1.desktop" "$DBUS_DIR/$1.service"
+    rm -f "$APP_DIR/$1.desktop" "$APP_DIR/$1.desktop.new" "$DBUS_DIR/$1.service" \
+        "$DBUS_DIR/$1.service.new"
     # -H: hicolor/ itself may be a link, which find would not enter.
     find -H "$ICON_DIR" \( -name "$1.svg" -o -name "$1-symbolic.svg" \) -delete 2>/dev/null || true
     [[ -d "$ext" ]] || return 0
     echo "removing Gearbench's GNOME Shell extension${4:+ $4}"
     (( $3 )) || shell_settings "$2" disable || true
-    for file in "${EXT_FILES[@]}"; do rm -f "$ext/$file"; done
+    # A leftover .new would keep the folder.
+    for file in "${EXT_FILES[@]}"; do rm -f "$ext/$file" "$ext/$file.new"; done
     rmdir "$ext" 2>/dev/null || true
 }
 
 # old_ids_remove PACKAGED: what an install from before 1.1.0 put under the old ids.
 old_ids_remove() {
-    ids_remove "$OLD_APP_ID" "$OLD_EXT_UUID" "$1" "under its name before 1.1.0, $OLD_EXT_UUID"
+    ids_remove "$OLD_APP_ID" "$OLD_EXT_UUID" "$1" "under its id before 1.1.0, $OLD_EXT_UUID"
 }
 
-# The profile set before the rules: the A50's rule falls back to default.conf (no Game
-# output) without it. WirePlumber reads them only at start, and a restart stops all audio
-# for a moment, so it restarts only when a file changed.
+# Each profile set before the rule that names it: the A50's and the A50 X's rules fall back
+# to default.conf (no Game output) without theirs. WirePlumber reads them only at start: a
+# running one restarts, which stops all audio for a moment, only when a file changed, and a
+# stopped one reads them when it starts.
 audio_install() {
     local changed=0 i
     mkdir -p "$ACP_DIR" "$WP_DIR"
     for i in "${!AUDIO_SRC[@]}"; do
         if ! cmp -s "${AUDIO_SRC[i]}" "${AUDIO_DST[i]}"; then
-            install -m 0644 "${AUDIO_SRC[i]}" "${AUDIO_DST[i]}"
+            # Renamed over the installed file: a write that fails partway leaves it whole.
+            # WirePlumber loads only .conf files from conf.d, and ACP only the set a rule names.
+            install -m 0644 "${AUDIO_SRC[i]}" "${AUDIO_DST[i]}.new"
+            mv -f "${AUDIO_DST[i]}.new" "${AUDIO_DST[i]}"
             changed=1
         fi
     done
     (( changed )) || return 0
     echo "restarting WirePlumber for the headsets' outputs: audio stops for a moment"
-    systemctl --user restart wireplumber.service ||
+    systemctl --user try-restart wireplumber.service ||
         echo "WirePlumber did not restart; the headsets' outputs apply when it next starts: systemctl --user restart wireplumber"
 }
 
-# The reverse order: the rules, then the profile set. $1 is 1 beside the gearbench package.
+# The reverse order: each rule, then its profile set. $1 is 1 beside the gearbench package.
 audio_uninstall() {
     local packaged=$1 had=0 i
     for (( i = ${#AUDIO_DST[@]} - 1; i >= 0; i-- )); do
         [[ -e "${AUDIO_DST[i]}" ]] && had=1
-        rm -f "${AUDIO_DST[i]}"
+        rm -f "${AUDIO_DST[i]}" "${AUDIO_DST[i]}.new"
     done
     (( had )) || return 0
     if (( packaged )); then
@@ -397,38 +528,62 @@ audio_uninstall() {
     else
         echo "restarting WirePlumber without Gearbench's headset outputs: audio stops for a moment"
     fi
-    systemctl --user restart wireplumber.service 2>/dev/null ||
+    systemctl --user try-restart wireplumber.service 2>/dev/null ||
         echo "WirePlumber did not restart: run systemctl --user restart wireplumber in your desktop session"
 }
 
-# Written, never enabled: the Headset tab or `headset-spatial on` enables it.
-# SPATIAL_CHANGED: whether a running spatial unit needs a restart.
+# Written, never enabled: the Headset tab or `headset-spatial on` enables it. A changed file
+# owes a running unit a try-restart, unless a restart is owed already; owed before the
+# rename, so a run that stops between the two leaves one more try-restart, not one fewer.
 spatial_unit_install() {
     sed "s|@CHECKOUT@|$CHECKOUT|g" "$SPATIAL_SRC" > "$SPATIAL_DST.new"
     if cmp -s "$SPATIAL_DST.new" "$SPATIAL_DST"; then
         rm -f "$SPATIAL_DST.new"
-        SPATIAL_CHANGED=0
     else
+        [[ -e "$SPATIAL_OWED" ]] || echo try-restart > "$SPATIAL_OWED"
         mv -f "$SPATIAL_DST.new" "$SPATIAL_DST"
-        SPATIAL_CHANGED=1
     fi
 }
 
 # After the reload. Before Gearbench Spatial the unit was the A50's, enabled by its base
 # station's device unit and by a login unit, which is gone: its link goes with it, and a
 # unit that was on is enabled again by its own [Install] (reenable: systemctl's disable
-# removes every link named after the unit). One that was off stays off.
-# SPATIAL_MIGRATED: whether one was enabled again, which the install then starts: stopped
-# while its base station was away, nothing else starts it before the next login.
+# removes every link named after the unit). One that was off stays off. One enabled again
+# is owed a restart, which starts it: stopped while its base station was away, nothing else
+# starts it before the next login. The login unit's file goes last, so a run that stops
+# before then migrates again.
 spatial_unit_migrate() {
-    SPATIAL_MIGRATED=0
     [[ -e "$SPATIAL_LOGIN_OLD" ]] || return 0
     systemctl --user disable gearbench-spatial-login.service 2>/dev/null || true
-    rm -f "$SPATIAL_LOGIN_OLD"
     if systemctl --user -q is-enabled gearbench-spatial.service 2>/dev/null \
         && systemctl --user reenable gearbench-spatial.service; then
-        SPATIAL_MIGRATED=1
+        echo restart > "$SPATIAL_OWED"
     fi
+    rm -f "$SPATIAL_LOGIN_OLD"
+}
+
+# Rebuilds the compiled hwdb that udev reads, before udev_reload, whose input trigger gives
+# each mouse's event node its entry. udev reads HWDB_ETC_BIN over the one in /usr/lib/udev,
+# which Debian and Ubuntu rebuild with --usr at each udev upgrade: an /etc one made where
+# there was none would hide those rebuilds.
+hwdb_update() {
+    if [[ -e "$HWDB_ETC_BIN" ]]; then
+        sudo systemd-hwdb update
+    else
+        sudo systemd-hwdb --usr update
+    fi
+}
+
+# A new or changed entry owes the closing lines' HWDB_NOTE, owed before the copy.
+hwdb_install() {
+    if ! cmp -s "$CHECKOUT/udev/$HWDB" "$HWDB_DIR/$HWDB"; then
+        mkdir -p "$UNIT_DIR"
+        : > "$HWDB_OWED"
+    fi
+    # /etc/udev/hwdb.d may not exist. mkdir, not install -d, which would chmod it.
+    sudo mkdir -p "$HWDB_DIR"
+    sudo install -m 0644 -o root -g root "$CHECKOUT/udev/$HWDB" "$HWDB_DIR/$HWDB"
+    hwdb_update
 }
 
 # A usb trigger does not re-run hidraw rules, which leaves the node root-owned; input is
@@ -443,6 +598,8 @@ udev_reload() {
 
 uninstall() {
     local had_unit=0 stopped=1 packaged=0
+    # Before anything goes: sudo removes each rule udev/ names.
+    owners_check
     [[ -f "$UNIT_DST" ]] && had_unit=1
     package_installed gearbench && packaged=1
     # This checkout's spatial unit shadows the package's of the same name, and its enable
@@ -453,10 +610,11 @@ uninstall() {
         echo "switching spatial sound off"
         systemctl --user disable --now gearbench-spatial.service 2>/dev/null || true
     fi
-    rm -f "$SPATIAL_DST" "$SPATIAL_LOGIN_OLD"
+    # A file's .new is the leftover of a write that failed partway.
+    rm -f "$SPATIAL_DST" "$SPATIAL_DST.new" "$SPATIAL_LOGIN_OLD" "$SPATIAL_OWED" "$HWDB_OWED"
     audio_uninstall "$packaged"
-    # Beside the package, no --now: that would stop the package's daemon. The disable
-    # only removes the links to this checkout's unit, which would dangle once it goes.
+    # Beside the package, no --now: the restart below swaps in the package's daemon. The
+    # disable only removes the links to this checkout's unit, which would dangle once it goes.
     if (( packaged )); then
         echo "the gearbench package is installed; removing this checkout's files and leaving its daemon"
         if (( had_unit )) && ! systemctl --user disable gearbench.service 2>/dev/null; then
@@ -469,15 +627,17 @@ uninstall() {
             stopped=0
         fi
     fi
-    rm -f "$UNIT_DST" "$BIN_DST"
+    rm -f "$UNIT_DST" "$UNIT_DST.new" "$BIN_DST" "$BIN_DST.new"
     ids_remove "$APP_ID" "$EXT_UUID" "$packaged"
     old_ids_remove "$packaged"
     icon_cache_update
     # A shell may reach no user manager; failing here would leave the rules behind.
     systemctl --user daemon-reload 2>/dev/null || true
     update-desktop-database "$APP_DIR" 2>/dev/null || true
-    echo "removing the udev rules (needs root)"
+    echo "removing the udev rules and the mice's hwdb entry (needs root)"
     for rule in "${RULES[@]}"; do sudo rm -f "$RULE_DIR/$rule"; done
+    sudo rm -f "$HWDB_DIR/$HWDB"
+    hwdb_update
     udev_reload
     # Other accounts may be in it, and the package's rule names it too.
     if getent group "$GROUP" >/dev/null; then
@@ -524,11 +684,16 @@ python_check() {
 checkout_path_check() {
     # The checkout's path goes into the units and the launcher. A space is fine except at
     # the end, where systemd trims it off WorkingDirectory=; a newline breaks them all, and
-    # spatial.render refuses any control character in the chain's conf, which names the
-    # checkout's spatial/ folder.
+    # spatial.render refuses each character below 0x20 in the chain's conf, which names the
+    # checkout's spatial/ folder. Said with %q in the C locale, which writes a control
+    # character and each byte past ASCII as its escape; in a UTF-8 one %q leaves a bidi
+    # override, which turns the rest of the line around. Another account may have named a
+    # folder on the path.
+    local shown
+    LC_ALL=C printf -v shown '%q' "$CHECKOUT"
     case "$CHECKOUT" in
         *[\"\$\`\\%\&\|:]*|*[[:cntrl:]]*|*[[:space:]])
-            echo "the checkout's path, $CHECKOUT, has a character the units, the launcher or the" >&2
+            echo "the checkout's path, $shown, has a character the units, the launcher or the" >&2
             echo "spatial sound conf cannot hold (\" \$ \` \\ % & | :, a control character such as" >&2
             echo "a tab or a newline, or a space at the end);" >&2
             echo "move it and run this again." >&2
@@ -536,7 +701,7 @@ checkout_path_check() {
     esac
     # systemd will not load a unit with a non-UTF-8 path.
     if ! iconv -f UTF-8 -t UTF-8 <<< "$CHECKOUT" >/dev/null 2>&1; then
-        echo "the checkout's path, $CHECKOUT, is not UTF-8, which the unit cannot hold;" >&2
+        echo "the checkout's path, $shown, is not UTF-8, which the unit cannot hold;" >&2
         echo "move it and run this again." >&2
         exit 1
     fi
@@ -548,14 +713,20 @@ home_check() {
     esac
 }
 
-writers_check() {
-    # The units and the launcher run the checkout's code at every start: under a folder others
-    # can write, as /tmp, another account could put its own code at the path once it is gone.
-    local writable
+# owners_check: refuses a checkout that others_can_write names. The units and the launcher
+# run the checkout's code at every start, the install's sudo step installs the rules in its
+# udev/, and the uninstall's removes the rule of each name there: under a folder others can
+# write, as /tmp, another account could put its own code or names at the path once it is
+# gone.
+owners_check() {
+    local writable shown
     writable=$(others_can_write)
     if [[ -n "$writable" ]]; then
-        echo "another account owns or can write $writable, or would share what is made in it," >&2
-        echo "so it could put its own code where Gearbench runs it as you." >&2
+        # Said as checkout_path_check says the checkout's path: it may be one another account
+        # named.
+        LC_ALL=C printf -v shown '%q' "$writable"
+        echo "another account owns or can write $shown, or would share what is made in it," >&2
+        echo "so it could choose what Gearbench runs as you or hands to sudo." >&2
         # A move keeps the owner, mode and ACL of the checkout and of what it holds.
         if [[ "$writable" == "$CHECKOUT" || "$writable" == "$CHECKOUT"/* ]]; then
             echo "Make the checkout and all it holds yours and writable by you alone" >&2
@@ -565,6 +736,25 @@ writers_check() {
             echo "Move the checkout into a folder only you can write, such as your home" >&2
             echo "folder, and run this again." >&2
         fi
+        exit 1
+    fi
+}
+
+writers_check() {
+    local writable shown
+    owners_check
+    writable=$(unlisted_folder)
+    if [[ -n "$writable" ]]; then
+        LC_ALL=C printf -v shown '%q' "$writable"
+        echo "you may not both read and search $shown, so what is in it cannot be checked" >&2
+        echo "before Gearbench runs or installs it. Run chmod u+rx on it, and run this again." >&2
+        exit 1
+    fi
+    writable=$(outside_link)
+    if [[ -n "$writable" ]]; then
+        LC_ALL=C printf -v shown '%q' "$writable"
+        echo "$shown leads out of the checkout or to nothing, so another account could write" >&2
+        echo "what Gearbench runs or installs through it. Remove the link and run this again." >&2
         exit 1
     fi
 }
@@ -599,7 +789,7 @@ preflight() {
 
 rules_install() {
     local rule
-    echo "installing the $GROUP group and the udev rules (needs root)"
+    echo "installing the $GROUP group, the udev rules and the mice's hwdb entry (needs root)"
     group_install
     # /usr/local/lib/udev may not exist. mkdir, not install -d, which would chmod a shared
     # directory already there.
@@ -607,6 +797,7 @@ rules_install() {
     for rule in "${RULES[@]}"; do
         sudo install -m 0644 -o root -g root "$CHECKOUT/udev/$rule" "$RULE_DIR/$rule"
     done
+    hwdb_install
     udev_reload
     udevadm settle
 }
@@ -614,10 +805,9 @@ rules_install() {
 units_install() {
     local loaded
     echo "installing the user unit"
-    # Asked before a unit is written: a spatial unit file a refused run wrote reads as
-    # unchanged to the next run, which then restarts none. show with no unit reads the
-    # manager's own properties (systemctl(1)). With no user manager reached, systemctl's
-    # own hint names an option this script does not take.
+    # Asked before a unit is written, so a shell that reaches no user manager changes none.
+    # show with no unit reads the manager's own properties (systemctl(1)). With no user
+    # manager reached, systemctl's own hint names an option this script does not take.
     if ! systemctl --user show --property=Version --value >/dev/null; then
         echo "this shell reaches no user manager, which runs the service; run ./install.sh" >&2
         echo "again from a terminal in your desktop session." >&2
@@ -656,11 +846,18 @@ units_install() {
 
 spatial_restart() {
     # After audio_install, so the spatial unit links to its headset's output from the new files.
-    if (( SPATIAL_MIGRATED )); then
+    local owed
+    [[ -e "$SPATIAL_OWED" ]] || return 0
+    owed=$(< "$SPATIAL_OWED")
+    # The migration's restart starts the unit only while it is still on: the run that owed it
+    # may be an earlier one, and spatial sound may have been switched off since.
+    if [[ "$owed" == restart ]] \
+        && systemctl --user -q is-enabled gearbench-spatial.service 2>/dev/null; then
         systemctl --user restart gearbench-spatial.service || true
-    elif (( SPATIAL_CHANGED )); then
+    else
         systemctl --user try-restart gearbench-spatial.service || true
     fi
+    rm -f "$SPATIAL_OWED"
 }
 
 launcher_install() {
@@ -685,18 +882,22 @@ old_ids_migrate() {
     fi
 }
 
+# Sets APP_ENTRY: 1 where the desktop entry is installed. The D-Bus service file goes in
+# wherever the window can start, the tray's Open Gearbench starting it from that file.
 window_install() {
     local shown
+    APP_ENTRY=$HAVE_GUI
     # A % in the launcher's path cannot go in Exec: the spec writes it %%, and GLib looks the
-    # program up before expanding that and drops the entry (checked with GLib 2.88).
+    # program up before expanding that and drops the entry (checked with GLib 2.88). D-Bus
+    # gives % no meaning.
     if [[ "$HAVE_GUI" == 1 && "$BIN_DST" == *%* ]]; then
         printf -v shown '%q' "$BIN_DST"
         echo "$BIN_DST has a % in it, which a desktop entry cannot run; the window is" >&2
         echo "installed without one: run it with $shown gui" >&2
-        HAVE_GUI=0
+        APP_ENTRY=0
     fi
-    if [[ "$HAVE_GUI" == 1 ]]; then
-        echo "installing the desktop entry and its D-Bus service file"
+    if [[ "$APP_ENTRY" == 1 ]]; then
+        echo "installing the desktop entry"
         mkdir -p "$APP_DIR"
         # The launcher by full path: GLib drops an entry whose Exec is not on the session's
         # PATH, and ~/.local/bin often is not (the package's /usr/bin always is). Quoted per
@@ -719,9 +920,21 @@ text, count = re.subn(r"^Exec=gearbench-ctl ", lambda _m: f"Exec={quoted(launche
                       Path(source).read_text(), flags=re.M)
 if count != 1:
     sys.exit(f"{source}: expected one 'Exec=gearbench-ctl ' line, found {count}")
-Path(target).write_text(text)
+# Renamed over the installed file: a write that fails partway leaves it whole.
+written = Path(f"{target}.new")
+written.write_text(text)
+written.chmod(0o644)
+written.replace(target)
 PY
-        chmod 0644 "$APP_DST"
+        update-desktop-database "$APP_DIR" 2>/dev/null || true
+    elif [[ -e "$APP_DST" ]]; then
+        # An earlier run's, from when the window could start or had no %: the app grid
+        # would list it.
+        rm -f "$APP_DST"
+        update-desktop-database "$APP_DIR" 2>/dev/null || true
+    fi
+    if [[ "$HAVE_GUI" == 1 ]]; then
+        echo "installing the window's D-Bus service file"
         mkdir -p "$DBUS_DIR"
         # D-Bus unescapes the file's strings, then splits Exec as a shell would: the launcher
         # is quoted as one word and each backslash written twice.
@@ -737,14 +950,16 @@ text, count = re.subn(r"^Exec=/usr/bin/gearbench-ctl ",
                       Path(source).read_text(), flags=re.M)
 if count != 1:
     sys.exit(f"{source}: expected one 'Exec=/usr/bin/gearbench-ctl ' line, found {count}")
-Path(target).write_text(text)
+# Renamed over the installed file: a write that fails partway leaves it whole.
+written = Path(f"{target}.new")
+written.write_text(text)
+written.chmod(0o644)
+written.replace(target)
 PY
-        chmod 0644 "$DBUS_DST"
-        update-desktop-database "$APP_DIR" 2>/dev/null || true
-    elif [[ -e "$APP_DST" || -e "$DBUS_DST" ]]; then
-        # An earlier run's, from when the window could start: the app grid would list it.
-        rm -f "$APP_DST" "$DBUS_DST"
-        update-desktop-database "$APP_DIR" 2>/dev/null || true
+    else
+        # An earlier run's: the tray's Open Gearbench would start a window that cannot
+        # import GTK.
+        rm -f "$DBUS_DST"
     fi
 }
 
@@ -754,8 +969,11 @@ extension_install() {
     echo "installing Gearbench's GNOME Shell extension"
     mkdir -p "$EXT_DST"
     for file in "${EXT_FILES[@]}"; do
-        # -C keeps an unchanged file's mtime, which extension_note reads.
-        install -C -m 0644 "$CHECKOUT/gnome-shell/$EXT_UUID/$file" "$EXT_DST/$file"
+        # An unchanged file keeps its mtime, which extension_note reads. A changed one is
+        # renamed over the installed file: a write that fails partway leaves it whole.
+        cmp -s "$CHECKOUT/gnome-shell/$EXT_UUID/$file" "$EXT_DST/$file" && continue
+        install -m 0644 "$CHECKOUT/gnome-shell/$EXT_UUID/$file" "$EXT_DST/$file.new"
+        mv -f "$EXT_DST/$file.new" "$EXT_DST/$file"
     done
     EXT_NOTE=$(extension_note)
     local ext_status=0
@@ -793,7 +1011,11 @@ closing_notes() {
         echo "$EXT_NOTE"
     fi
     group_note
-    if [[ "$HAVE_GUI" == 1 ]]; then
+    if [[ -e "$HWDB_OWED" ]]; then
+        echo "$HWDB_NOTE"
+        rm -f "$HWDB_OWED"
+    fi
+    if [[ "$APP_ENTRY" == 1 ]]; then
         echo "The window is in the app grid as \"Gearbench\", or run: $COMMAND gui"
     fi
     if ! systemctl --user -q is-enabled gearbench-spatial.service 2>/dev/null; then

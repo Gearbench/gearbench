@@ -1,10 +1,11 @@
 # Gearbench Spatial: data
 
 Gearbench Spatial is Gearbench's 7.1 output for headphones on the headset it
-plays to: the Astro A50's Game output or the Logitech G432. Its user unit's
-process writes a PipeWire filter chain from the template here each time it
-starts the chain, for that headset, and runs it. This directory is read from
-a checkout, or from `/usr/share/gearbench/spatial` when Gearbench is
+plays to: the Astro A50's or the Astro A50 X's Game output, or the first
+output of another headset Gearbench drives, the Logitech G432 among them. Its
+user unit's process writes a PipeWire filter chain from the template here
+each time it starts the chain, for that headset, and runs it. This directory
+is read from a checkout, or from `/usr/share/gearbench/spatial` when Gearbench is
 installed as a package. The package's copy leaves out
 `gearbench-spatial.service.in`, which the package installs as a unit in
 `/usr/lib/systemd/user`, and `make_room.py` and `SHA256SUMS`, which are in a
@@ -41,7 +42,7 @@ no NOTICE file.
 
 The head is chosen in the Headset tab or with
 `gearbench-ctl headset-spatial --head ku100` or `--head kemar`: the KU100 is
-D1, the KEMAR is D2. Both headsets use the same head.
+D1, the KEMAR is D2. Every headset uses the same head.
 
 `cd spatial && sha256sum -c SHA256SUMS` checks every WAV here. The license is
 at `https://zenodo.org/records/12092466/files/LICENSE.txt?download=1`.
@@ -88,8 +89,8 @@ named like one stays in its path, and refuses a template with any other
 | `@HRIR@` | The absolute path of `sadie-ii/D1` or `sadie-ii/D2`, by the head |
 | `@ROOM@` | The absolute path of `room-150ms.wav` |
 | `@ROOM_GAIN@` | The out mixers' "Gain 2": `0.0` for Competitive, `0.1` for Immersive |
-| `@TARGET@` | The node the chain plays to: the A50's Game, the G432's own output, or Logitech G432 Equalizer's sink |
-| `@HEADSET@` | The headset it plays to, `a50` or `g432` |
+| `@TARGET@` | The node the chain plays to: the A50's or the A50 X's Game, another headset's first output, or the sink of its equalizer on the computer, such as Logitech G432 Equalizer's |
+| `@HEADSET@` | The headset it plays to, by its key, such as `a50` or `g432` |
 | `@PLAYS_ON@` | The words for that output in the conf's first comment |
 | `@CLIENT_CONTEXT@` | `CLIENT_CONTEXT`: the client's settings, `log.level = 2`, and its SPA libraries |
 | `@CLIENT_MODULES@` | `CLIENT_MODULES`: the modules a PipeWire client that makes nodes loads, first in `context.modules` |

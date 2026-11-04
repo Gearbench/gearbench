@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Usage: packaging/install-files DESTDIR   run from the top of the source tree
+#
+# Installs into DESTDIR what the .deb holds beside the Python package, for the
+# .rpm and the Arch package: each line of debian/gearbench.install, the pages of
+# debian/gearbench.docs, the man pages of debian/gearbench.manpages, the user
+# units debian/rules builds, and the license. The lists and the unit build
+# stay the .deb's, so the three packages hold the same files. It needs make,
+# for debian/rules' own targets.
+set -euo pipefail
+
+dest=${1:?usage: packaging/install-files DESTDIR}
+# Where both systems keep a package's license, which the installed README links.
+licenses=/usr/share/licenses/gearbench
+
+# put SOURCE FOLDER: SOURCE into DESTDIR's FOLDER under its own name, a folder
+# with all it holds, as dh_install and dh_installdocs copy one. A file keeps its
+# execute bit, as dh_fixperms leaves it, and is 0644 otherwise.
+put() {
+    local source=$1 folder=$2 file
+    if [[ -d "$source" ]]; then
+        while IFS= read -r -d '' file; do
+            put "$file" "$folder/$(dirname "${file#"$(dirname "$source")/"}")"
+        done < <(find "$source" -type f -print0)
+    elif [[ -x "$source" ]]; then
+        install -D -m 0755 "$source" "$dest/$folder/$(basename "$source")"
+    else
+        install -D -m 0644 "$source" "$dest/$folder/$(basename "$source")"
+    fi
+}
+
+# Each line is a glob and a folder, as dh_install reads it: a blank line or a
+# comment is skipped, and a glob that matches nothing stops here, as it stops
+# dh_install.
+while read -r pattern folder; do
+    if [[ -z "$pattern" || "$pattern" == \#* ]]; then
+        continue
+    fi
+    mapfile -t sources < <(compgen -G "$pattern")
+    if (( ${#sources[@]} == 0 )); then
+        echo "install-files: $pattern in debian/gearbench.install matches nothing" >&2
+        exit 1
+    fi
+    for source in "${sources[@]}"; do
+        put "$source" "$folder"
+    done
+done < debian/gearbench.install
+
+for page in $(< debian/gearbench.docs); do
+    put "$page" usr/share/doc/gearbench
+done
+# DEB_BUILD_OPTIONS emptied: the pages are put above whatever it holds, and the
+# target rewrites nothing under nodoc.
+make -s -f debian/rules DEB_BUILD_OPTIONS= DOC="$dest/usr/share/doc/gearbench" \
+    LICENSE_TEXT="$licenses/LICENSE" execute_after_dh_installdocs
+
+for page in $(< debian/gearbench.manpages); do
+    put "$page" "usr/share/man/man${page##*.}"
+done
+
+# debian/rules builds the unit named for the package as debian/gearbench.user.service
+# and any other as debian/gearbench.NAME.user.service, which debhelper installs as
+# NAME.service.
+make -s -f debian/rules execute_after_dh_auto_build
+install -D -m 0644 debian/gearbench.user.service "$dest/usr/lib/systemd/user/gearbench.service"
+for unit in debian/gearbench.*.user.service; do
+    name=${unit#debian/gearbench.}
+    install -D -m 0644 "$unit" "$dest/usr/lib/systemd/user/${name%.user.service}.service"
+done
+
+install -D -m 0644 LICENSE "$dest$licenses/LICENSE"

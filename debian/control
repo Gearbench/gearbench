@@ -17,19 +17,26 @@ X-Python3-Version: >= 3.14
 
 Package: gearbench
 Architecture: all
+# postinst makes the gearbench group with systemd-sysusers, from systemd or a
+# standalone build of it, as debhelper's own sysusers snippet would depend.
 Depends: ${misc:Depends},
          ${python3:Depends},
-         adduser,
+         systemd | systemd-standalone-sysusers | systemd-sysusers,
          udev
 # The window needs GTK 4 and libadwaita through GObject introspection, and
 # `gearbench-ctl gui` says what is missing and exits 1 without them. The
 # daemon runs without python3-gi, its desktop session and login screen check
 # off, and the journal says python3-gi is missing when the service starts.
 # So these are Recommends: apt installs them by default and a headless box
-# can leave them out.
+# can leave them out. pipewire-bin holds the PipeWire programs Gearbench runs
+# for the headsets' sound, spatial sound and Outputs: pw-dump, pw-cli,
+# pw-metadata, pw-record, pw-play and the pipewire program. Without them each
+# of those says the program is not installed, and the keyboards and mice work
+# as before.
 Recommends: python3-gi,
             gir1.2-gtk-4.0,
-            gir1.2-adw-1
+            gir1.2-adw-1,
+            pipewire-bin
 Description: lighting, G keys, DPI and macros for Logitech G keyboards, mice and headsets
  Gearbench drives Logitech G keyboards and mice over their vendor HID++ 2.0
  interfaces, on a cable or through a LIGHTSPEED receiver, and probes what
@@ -44,37 +51,40 @@ Description: lighting, G keys, DPI and macros for Logitech G keyboards, mice and
  mice, the G431, G433, G533, G535, G633, G635, G733, G935 and PRO X
  Wireless headsets, the Astro A50 Gen 5 headset, and the
  PRO X 2 LIGHTSPEED, G522 LIGHTSPEED and G325 LIGHTSPEED headsets. It
- remaps the G keys and the MR shift layer, sets per-key and zone lighting,
+ remaps the G keys and their G-Shift layer, sets per-key and zone lighting,
  records and replays macros through a uinput virtual keyboard, binds the
  extra buttons of each mouse but the G305, and sets each mouse's DPI and
  report rate and, on the G502 X PLUS, G305 and G502 HERO, its DPI stages.
  .
  It also drives the Astro A50 Gen 4 base station over its own vendor HID
  interface, which is not HID++: microphone level, sidetone, noise gate and
- mic EQ, the three EQ presets (Astro Command Center's .astroeq files too),
- the stream port mix and the base station's own settings, and it reads the
+ Mic EQ, the three equalizer presets (Astro Command Center's .astroeq files
+ too), the stream port mix and the base station's own settings, and it reads the
  headset's battery. It lists the A50 Gen 4's and the A50 X's Game and Chat as
  two outputs.
  .
  For the Logitech G432 it sets the sidetone, and adds an equalizer output
- and noise suppression for its microphone. It does the same for the G432's
- ten relatives, with the equalizer in the headset on the G633, G933 and
- G935, drives the lights of the G633, G635, G733, G933 and G935, and reads
- the wireless ones' battery. Gearbench Spatial, a 7.1 output for games
+ and noise suppression for its microphone. It does the same for the ten
+ others of the G432's family, with the equalizer in the headset on the
+ G633, G933 and G935, drives the lights of the G633, G635, G733, G933 and
+ G935, and reads the wireless ones' battery. Gearbench Spatial, a 7.1
+ output for games
  rendered for headphones with SADIE II's measured heads, plays to each
- headset Gearbench drives and is off until switched on.
+ headset Gearbench drives and is off until switched on. The same noise
+ suppression runs for the microphone of the A50 Gen 4, A50 X, A50 Gen 5 and
+ G522 LIGHTSPEED.
  .
  It sets the Astro A50 X through its base station: the sidetone, volume,
  Game and Voice balance, noise gate, auto sleep, tones, the base station's
  brightness and deep sleep, the stream mix and the headset's equalizers,
- and reads its battery. It reads the same of the Astro A50 Gen 5, less the
+ and reads its battery. It reads the same of the Astro A50 Gen 5, without the
  deep sleep. It reads the PRO X 2 LIGHTSPEED through its receiver: the
- battery, sidetone, auto sleep, the microphone's noise reduction and the
- headset's equalizer. It reads the G522 LIGHTSPEED
+ battery, sidetone, auto sleep, noise suppression for the microphone and
+ the headset's equalizer. It reads the G522 LIGHTSPEED
  through its receiver or on its cable, and the G325 LIGHTSPEED through its
  receiver: the battery, sidetone, auto sleep, eco mode and the headset's
- equalizer, and the G325's microphone noise reduction. It changes nothing
- on any of them but the A50 X until each change is tested.
+ equalizer, and the G325's noise suppression for the microphone. It
+ changes nothing on any of them but the A50 X until each change is tested.
  .
  A user systemd service owns the devices and holds the keyboard's software
  lighting claim; the command line and the GTK 4 window are front ends that talk
@@ -93,11 +103,12 @@ Description: lighting, G keys, DPI and macros for Logitech G keyboards, mice and
  A mouse's node behind its receiver carries its motion and buttons too
  and, going by the kernel's source, the keys its buttons are bound to type,
  and would carry the keystrokes of a keyboard paired to the same receiver
- after the mouse, so pair nothing else there. The G815's, G813's
- and G213 Prodigy's control interfaces and the nodes of the G515
+ after the mouse, so pair nothing else there. The G815's and G813's
+ control interfaces and the nodes of the G515
  LIGHTSPEED TKL, G915 TKL, G913 TKL, PRO X TKL LIGHTSPEED, G915 X LIGHTSPEED and
  G915 X LIGHTSPEED TKL behind their receivers
- carry what is typed on them, and the G502 HERO's,
+ carry what is typed on them, the G213 Prodigy's control interface is taken
+ to, and the G502 HERO's,
  G502 X's, G203 LIGHTSYNC's and G102 LIGHTSYNC's control interfaces the keys
  their buttons are bound to type,
  so with those rules any program that user runs can read them. A keyboard
@@ -106,9 +117,12 @@ Description: lighting, G keys, DPI and macros for Logitech G keyboards, mice and
  too, so pair no other keyboard there. The control
  interfaces of the G515 TKL, the G515 LIGHTSPEED TKL on its cable and the
  G915 X, G316 X and G512 X models carry each press and release of Ctrl,
- Shift, Alt, Super and FN too, from the time Gearbench sets the keyboard up
- until it loses power: switched off, or unplugged where it has no battery.
- Any program that user runs can turn that on itself and read them. A program
+ Shift, Alt and Super, and of FN while its custom assignments are on, too,
+ from the time Gearbench sets the keyboard up until it loses power: switched
+ off, or unplugged where it has no battery.
+ Any program that user runs can turn that on itself and read them. It can
+ also set those keyboards' keys to report there in place of typing, read
+ them and type them back, so those interfaces can carry what is typed. A program
  that opened such a node keeps reading it after another account takes the
  seat, and so reads what that account types. Another file tags /dev/uinput
  too, the line steam-devices ships. With it any program that user runs can
@@ -118,8 +132,12 @@ Description: lighting, G keys, DPI and macros for Logitech G keyboards, mice and
  people use, the group grant from the comment of
  /usr/lib/udev/rules.d/70-gearbench-uinput.rules, put into a copy of each
  rule in /etc/udev/rules.d/, limits the rules' grants to the group's
- accounts. The G502 X PLUS's own event nodes are the gearbench group's to
- read, which the package creates; with host mode off, the extra buttons
+ accounts. Unlike the tag, it does not follow the seat: a member's programs
+ then open those nodes from any session, an SSH login included, whoever has
+ the seat, so put only one account in that group. With steam-devices
+ installed, its own rule grants /dev/uinput too; that comment says what to
+ do about it. The G502 X PLUS's own event nodes are the gearbench group's
+ to read, which the package creates; with host mode off, the extra buttons
  need the user's account in it. A program of any account in the group that
  has one open can still take the mouse from the seat user's session until
  it lets go, or change what its buttons send until the mouse is plugged in
@@ -132,4 +150,6 @@ Description: lighting, G keys, DPI and macros for Logitech G keyboards, mice and
  reading the sector back after. The A50 Gen 4's settings reach its base
  station's flash only when saved. The A50 X keeps each setting written to it
  through a power cycle, the G432's adapter keeps its sidetone through an
- unplug, and the G432's relatives may keep theirs.
+ unplug, and the rest of the G432's family may keep theirs. The G933 also
+ keeps its auto shut-off time, its startup effect and the lighting saved to
+ it.

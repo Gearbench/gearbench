@@ -12,11 +12,23 @@ import re
 import sys
 from pathlib import Path
 
+from .. import pipewire_client, spatial
 from ..daemon import Daemon
 from ..desktop import GREETER, session_class
-from ..settings_files import config_dir
-from ..wording import escaped as _escaped
+from ..settings_files import config_dir, config_home
+from ..wording import escaped as _escaped, word_list
 from .output import START, Subcommands
+
+log = logging.getLogger("gearbench")
+
+
+#: The packages that give the window GTK 4 and libadwaita for Python, on each distribution
+#: whose names `gui` and install.sh's window check give. Fedora 44's gtk4 needs the cairo
+#: typelib, which only gobject-introspection has and nothing there pulls in (measured
+#: 2026-10-28).
+GUI_PACKAGES = (("Ubuntu", ("python3-gi", "gir1.2-gtk-4.0", "gir1.2-adw-1")),
+                ("Fedora", ("python3-gobject", "gtk4", "libadwaita", "gobject-introspection")),
+                ("Arch", ("python-gobject", "gtk4", "libadwaita")))
 
 
 def cmd_gui(args: argparse.Namespace) -> int:
@@ -24,9 +36,12 @@ def cmd_gui(args: argparse.Namespace) -> int:
     try:
         from ..gui import main as gui_main  # noqa: PLC0415 -- optional: the CLI runs without GTK
     except (ImportError, ValueError) as exc:
+        packages = "; ".join(f"on {distribution}, {word_list(names, 'and')}"
+                             for distribution, names in GUI_PACKAGES)
         print(
-            f"error: cannot load the GTK interface: {exc}; the window needs python3-gi, "
-            f"gir1.2-gtk-4.0 and gir1.2-adw-1, and the CLI works without them",
+            f"error: cannot open the window, which needs GTK 4 and libadwaita for Python: "
+            f"{exc}; install them ({packages}); gearbench-ctl's other commands work "
+            "without them",
             file=sys.stderr,
         )
         return 1
@@ -54,6 +69,13 @@ def sd_priority(levelno: int) -> int:
 JOURNAL_LINE_CHARS = (48 * 1024 - len("<7>")) // 10     # 4914
 #: No time: the journal keeps its own.
 JOURNAL_FORMAT = "%(levelname)-7s %(message)s"
+#: The daemon's line at its start once spatial.reenable_old_switch_on moved the unit's link.
+SPATIAL_REENABLED = (f"{spatial.UNIT}, switched on by Gearbench 1.1.0 to 1.2.1, was wanted "
+                     "by default.target: enabled again, it now starts with PipeWire")
+#: Its line where systemctl failed, by systemctl's words.
+SPATIAL_NOT_REENABLED = (f"{spatial.UNIT}, switched on by Gearbench 1.1.0 to 1.2.1, could not "
+                         "be enabled again to start with PipeWire: %s. Switch spatial sound "
+                         "off and on")
 
 
 class JournalFormatter(logging.Formatter):
@@ -91,7 +113,8 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     enables the unit for every account, GDM's login screen's too, where the daemon would
     claim the lighting and type through its virtual devices. Exit 0 there: the unit
     restarts only on a failure. Without python3-gi, session_class cannot read the class and
-    the daemon runs there too.
+    the daemon runs there too. Just before the daemon, spatial sound switched on by 1.1.0 to
+    1.2.1 is enabled again by its unit's own [Install] (spatial.reenable_old_switch_on).
     """
     handler = logging.StreamHandler()
     if journal_stream():
@@ -102,13 +125,12 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         handlers=[handler], force=True)
     if os.geteuid() == 0:
-        logging.getLogger("gearbench").error(
+        log.error(
             "the daemon runs as your own account, never as root: exiting without opening a "
-            f"device. Run `gearbench-ctl daemon` or `{START}` as "
-            "yourself, not with sudo")
+            f"device; run `gearbench-ctl daemon` or `{START}` as yourself, not with sudo")
         return 1
     if session_class() == GREETER:
-        logging.getLogger("gearbench").info(
+        log.info(
             "this is the login screen (logind session class %s): exiting without opening "
             "a device", GREETER)
         return 0
@@ -116,12 +138,24 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     # environment.d does not change. ReadWritePaths= resolves links, so this does too.
     granted = os.environ.get("GEARBENCH_SETTINGS_GRANT")
     if granted and Path(granted).resolve() != config_dir().resolve():
-        logging.getLogger("gearbench").error(
+        log.error(
             "the settings folder is %s, but the service may write only %s, from its user "
             "manager's XDG_CONFIG_HOME: where the service's sandbox applies, nothing is "
             "saved. Set XDG_CONFIG_HOME for the user manager itself, with "
             "ManagerEnvironment= in ~/.config/systemd/user.conf, or not at all",
             _escaped(config_dir()), _escaped(granted))
+    # A package's upgrade leaves the link in each account as it was, and the daemon runs as
+    # the account however Gearbench was installed, so no root script writes in a home.
+    # Spatial sound is no part of the daemon, which starts either way. systemctl, inside the
+    # unit's sandbox, whose ProtectHome= makes the home read-only, has the user manager write
+    # the links, as it does where it reaches one (measured with systemd 262 on 2026-11-03).
+    # The manager made 1.2.1's link too, below its own XDG_CONFIG_HOME, the grant's parent.
+    manager_config_home = Path(granted).parent if granted else config_home()
+    try:
+        if spatial.reenable_old_switch_on(manager_config_home):
+            log.info(SPATIAL_REENABLED)
+    except pipewire_client.StepError as exc:
+        log.warning(SPATIAL_NOT_REENABLED, _escaped(exc))
     return Daemon().run()
 
 

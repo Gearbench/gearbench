@@ -25,10 +25,14 @@ CHECK_ICON = "object-select-symbolic"
 NOISE_GATE_TIPS = {
     "off": "Every sound the microphone picks up goes through.",
     "streaming": "The lightest gate, for a quiet room.",
-    "night": "Very lightly gated, for quiet speech.",
+    "night": "A very light gate, for quiet speech.",
     "home": "Astro's default: removes most light background noise.",
     "tournament": "The strongest gate, for loud rooms; it gates the sidetone too.",
 }
+#: The tip of the Not read entry a headset page's explained dropdown lists after its values
+#: (style.show_choice), last in the row's tips: the row is on there only for a value the
+#: headset gave that the list lacks.
+NOT_READ_TIP = "The headset's value is not one Gearbench lists."
 
 
 def explain_choices(dropdown: Gtk.DropDown | Adw.ComboRow, tips: Sequence[str]) -> None:

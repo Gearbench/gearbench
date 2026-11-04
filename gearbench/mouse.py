@@ -19,8 +19,9 @@ from pathlib import Path
 from typing import Literal, TypeGuard
 
 from .battery import G502_LIGHTSPEED_CELL, G903_HERO_CELL, CellCurves
-from .config import MOUSE_LABELS, ModelKeys, entry_under
+from .config import MOUSE_LABELS, NOTHING, ModelKeys, entry_under
 from .hidpp import HidppError, find_each_attached
+from .lighting import EFFECT_IDS, OFF, has_color
 from .onboard import (
     ENTRY_FUNCTION,
     NOOP,
@@ -49,13 +50,13 @@ FUNCTION_BINDINGS = {0x03: "dpi-up", 0x04: "dpi-down", 0x05: "dpi-cycle", 0x07: 
 
 def default_binding(entry: bytes) -> str:
     """The binding that has a button do what `entry` has it do (BUTTON_BINDINGS,
-    FUNCTION_BINDINGS), or "none" for a job no binding does."""
+    FUNCTION_BINDINGS), or NOTHING for a job no binding does."""
     button = entry_mouse_button(entry)
     if button is not None:
-        return BUTTON_BINDINGS.get(button, "none")
+        return BUTTON_BINDINGS.get(button, NOTHING)
     if entry[0] == ENTRY_FUNCTION:
-        return FUNCTION_BINDINGS.get(entry[1], "none")
-    return "none"
+        return FUNCTION_BINDINGS.get(entry[1], NOTHING)
+    return NOTHING
 
 
 @dataclass(frozen=True)
@@ -93,7 +94,7 @@ class ButtonTable:
     @property
     def defaults(self) -> dict[str, str]:
         """Each button's binding where a profile holds none of its own: the one that does its
-        fallback entry's job (default_binding), else "none"."""
+        fallback entry's job (default_binding), else NOTHING."""
         return {slot.name: default_binding(slot.fallback) for slot in self.buttons}
 
     def enabled(self, image: ProfileImage) -> list[str]:
@@ -138,7 +139,7 @@ class ButtonTable:
 #: The G502 X PLUS's, each index read off its flash, found on Windows by giving each index its
 #: own button number and seen on Linux on 2026-09-25; eleven entries (getInfo). The fallback
 #: is the ROM copy's factory entry, except on G9, whose `90 0a` cycles the onboard profiles,
-#: and on profile 2 nothing Gearbench writes is in effect. G9 gets the no-op found on Windows,
+#: and on profile 2 nothing written to profile 1 is in effect. G9 gets the no-op found on Windows,
 #: not the empty `ff ff ff ff`: profile 1 holds that at the wheel's indices, 11 and 12, which
 #: scroll all the same, so what it does on a control is not known.
 G502X_BUTTONS = ButtonTable(
@@ -283,7 +284,7 @@ class MouseModel:
     interface: int = 2
     #: Whether its onboard profile writes are let through: once they pass their test on this
     #: hardware, or by the owner's decision for that test. Any other model's are refused with
-    #: nothing sent (not_tested, the owner's decision of 2026-10-17).
+    #: nothing written (not_tested, the owner's decision of 2026-10-17).
     writes_tested: bool = False
     #: Whether its lighting is 0x8070's zones (mouse_lighting.ZoneLighting), which the daemon
     #: drives on such a model alone: the G305 lists 0x8070 and has no lights.
@@ -356,9 +357,10 @@ PRO_X_SUPERLIGHT = MouseModel("PRO X SUPERLIGHT", "proxsuperlight",
 #: Cabled alone: the G502 X PLUS's body and onboard layout on the G502 HERO's route, its HID++
 #: on interface 01 beside the mouse's keyboard, consumer and system reports, under hid-generic
 #: (Solaar issue 1827's descriptor; libratbag issue 1452's log). Profile format 4, where the X
-#: PLUS's is 5, so a backup prefix of its own; no lights and no battery. Its factory copy holds
-#: the X PLUS's eleven entries (one unit's log). HOST mode as on the X PLUS, whose 0x8100 and
-#: 0x8110 versions both listings give it; that the mode write is volatile here too is assumed.
+#: PLUS's is 5, so a backup prefix of its own; no lighting the daemon drives and no battery. Its
+#: factory copy holds the X PLUS's eleven entries (one unit's log). HOST mode as on the X PLUS,
+#: whose 0x8100 and 0x8110 versions both listings give it; that the mode write is volatile
+#: here too is assumed.
 G502X_WIRED = MouseModel("G502 X", "g502xwired", G502X.stage_colors,
                          button_table=G502X_FAMILY_BUTTONS, host_mode=True, interface=1)
 #: A licensed edition of the G502 X PLUS with ids and a firmware line of its own (MPM 35.00,
@@ -418,8 +420,8 @@ G903_HERO = MouseModel("G903 LIGHTSPEED HERO", "g903hero", (), button_table=G903
 #: is read; that HOST mode is volatile on them is assumed, as on the PRO X SUPERLIGHT. Their
 #: feature tables are Solaar's listings of the SUPERLIGHT 2 (40A9, firmware MPM 32.00.B0012)
 #: and the DEX (issue 2904, MPM 37.01.B0005); the 2c's is assumed the SUPERLIGHT 2's.
-HERO_2_COLORS = (0xFFFFFF, 0xFF7203, 0x85FFB4, 0xFFE913, 0xFF00D7)
-PRO_X_SUPERLIGHT_2 = MouseModel("PRO X SUPERLIGHT 2", "proxsuperlight2", HERO_2_COLORS,
+PRO_X_SUPERLIGHT_2 = MouseModel("PRO X SUPERLIGHT 2", "proxsuperlight2",
+                                (0xFFFFFF, 0xFF7203, 0x85FFB4, 0xFFE913, 0xFF00D7),
                                 button_table=PRO_X_SUPERLIGHT_BUTTONS, host_mode=True)
 PRO_X_SUPERLIGHT_2_DEX = replace(PRO_X_SUPERLIGHT_2, name="PRO X SUPERLIGHT 2 DEX",
                                  backup_name="proxsuperlight2dex")
@@ -479,6 +481,10 @@ MODELS = {product: model.name for product, model in MODEL_OF.items()}
 BACKUP_NAMES = {product: model.backup_name for product, model in MODEL_OF.items()}
 STAGE_COLORS = {product: model.stage_colors for product, model in MODEL_OF.items()}
 COOKIE_MODELS = frozenset(product for product, model in MODEL_OF.items() if model.cookie)
+#: 0x0020 ConfigChange: fn 0 reads a two-byte configuration cookie, fn 1 sets it. A mouse that
+#: answers its recheck and still holds Gearbench's cookie kept its setup (daemon.mice's
+#: reapply_mouse); it is looked up on a model of COOKIE_MODELS alone.
+F_CONFIG_CHANGE = 0x0020
 WRITES_TESTED = frozenset(product for product, model in MODEL_OF.items()
                           if model.writes_tested)
 ZONE_LIGHTING = frozenset(product for product, model in MODEL_OF.items()
@@ -489,6 +495,13 @@ LIGHTING_TESTED = frozenset(product for product, model in MODEL_OF.items()
                             if model.lighting_tested)
 EFFECT_NAMES = {product: dict(model.effect_names) for product, model in MODEL_OF.items()
                 if model.effect_names}
+#: The effects an Effect row can list that take no color of their own (lighting.has_color),
+#: by EFFECT_IDS' names and each model's own (EFFECT_NAMES), but Off and the per-key mode,
+#: whose fill takes the picker's color. A color sent under one turns the mouse to Static.
+COLORLESS_EFFECTS = frozenset(
+    {name for name in EFFECT_IDS if name not in (OFF, "custom") and not has_color(name)}
+    | {own for names in EFFECT_NAMES.values() for own in names.values()
+       if not has_color(own, names)})
 CLAIM_EACH_EFFECT = frozenset(product for product, model in MODEL_OF.items()
                               if model.claim_each_effect)
 CELLS = {product: model.cell for product, model in MODEL_OF.items() if model.cell is not None}
@@ -521,6 +534,16 @@ def bindings_of(entries: Mapping[str, Mapping[str, str]], key: str) -> dict[str,
         return {}
     own = entry_under(entries, model_ids(key)) or {}
     return {name: own.get(name, default) for name, default in table.defaults.items()}
+
+
+def shift_bindings_of(entries: Mapping[str, Mapping[str, str]], key: str) -> dict[str, str]:
+    """What the buttons of the mouse model named `key` are bound to on the G-Shift layer in a
+    profile's `entries` (config.Profile.mouse_shift), in its table's order: only those its
+    entry there names, under any of the model's ids. A button left out takes its base binding
+    (bindings_of), never its default, so the layer has no defaults of its own. Empty where
+    bindings_of is."""
+    own = entry_under(entries, model_ids(key)) or {}
+    return {name: own[name] for name in bindings_of({}, key) if name in own}
 
 
 #: The ids a mouse reports over its cable; the others are its receiver's.
@@ -571,6 +594,10 @@ PROFILE_WRITE_WAIT = 30.0
 #: How long a front end waits for `mouse_dpi`, in seconds: Mouse.set_dpi gives a mouse that
 #: does not answer three tries of 1 s, which outlast send_command's 3 s.
 DPI_WRITE_WAIT = 10.0
+#: How long a front end waits for `mouse_host_mode`, in seconds: one mouse that stops
+#: answering can hold the switch for all of send_command's 3 s (Mice.hand_back's two
+#: askings, Dpi.restore_dpi's read).
+HOST_SWITCH_WAIT = 10.0
 
 
 def profile_words(sector: int) -> str:
@@ -588,6 +615,46 @@ def profile_jobs(table: dict | None) -> str:
     whose buttons need not be the G502 X PLUS's G4 to G9."""
     return ", ".join(f"{str(b.get('name')).upper()} {b['onboard']}"
                      for b in (table or {}).get("buttons") or [] if b.get("onboard"))
+
+
+def profile_in_doubt(onboard: Mapping[str, object]) -> bool:
+    """Whether a `mouse` reply's `onboard` gives a profile 1 in doubt: one a failed write could
+    not read back (`flash_unknown`), whose buttons are the read before it, or one that fails
+    its CRC, which every edit refuses (BAD_CRC)."""
+    return bool(onboard.get("flash_unknown")) or onboard.get("crc_ok") is False
+
+
+class ButtonsState(enum.Enum):
+    """What a `mouse` reply's profile 1 holds for the programmable buttons (buttons_state)."""
+
+    #: The daemon refuses the model's writes to profile 1 (`flash_refused`): its own buttons'
+    #: jobs there, whatever its CRC, and no write named.
+    REFUSED = enum.auto()
+    #: Profile 1 is in doubt (profile_in_doubt): nothing claimed of it, and no write named.
+    IN_DOUBT = enum.auto()
+    #: It holds the fallback write's entries.
+    FALLBACK = enum.auto()
+    #: It has all six as the daemon's mouse buttons.
+    ENABLED = enum.auto()
+    #: It has some of them so (`enabled_buttons`).
+    PARTLY = enum.auto()
+    #: It has none of them so.
+    NOT_ENABLED = enum.auto()
+
+
+def buttons_state(reply: dict) -> ButtonsState:
+    """What a `mouse` reply's profile 1 holds for the programmable buttons, for the CLI's
+    `programmable buttons:` line and the window's row alike. A refused enable write
+    (`enable_refused`) changes no state: each front end drops the step that names it."""
+    if isinstance(reply.get("flash_refused"), str):
+        return ButtonsState.REFUSED
+    if profile_in_doubt(reply.get("onboard") or {}):
+        return ButtonsState.IN_DOUBT
+    if reply.get("buttons_fallback"):
+        return ButtonsState.FALLBACK
+    if reply.get("buttons_enabled"):
+        return ButtonsState.ENABLED
+    return ButtonsState.PARTLY if reply.get("enabled_buttons") else ButtonsState.NOT_ENABLED
 
 
 def runs_another_profile(running: int | None) -> TypeGuard[int]:
@@ -656,8 +723,10 @@ def partly_enabled(enabled: list[str]) -> str:
 
 
 def try_again_words(many: bool = False) -> str:
-    """The step that has a mouse, or `many` of them, try again: a power cycle."""
-    return f"switch {'each mouse' if many else 'the mouse'} off and on to try again"
+    """The step that has a mouse, or `many` of them, try again: a power cycle, which a mouse
+    on a cable alone, with no switch, gets from a replug."""
+    return (f"switch {'each mouse' if many else 'the mouse'} off and on, or replug its cable, "
+            "to try again")
 
 
 def not_taken_words(named: str, many: bool = False) -> str:
@@ -691,8 +760,8 @@ def buttons_idle_words(name: str, host_mode: bool) -> str:
 
 
 def live_rate_note(name: str) -> str:
-    """`mouse_rate`'s note on a mouse in HOST mode whose onboard profile is not written (Mouse
-    .flash_refusal): the rate went live alone, and is kept for its model (Dpi.live_rate)."""
+    """`mouse_rate`'s note on a mouse in HOST mode whose onboard profile is not written
+    (Mouse.flash_refusal): the rate went live alone, and is kept for its model (Dpi.live_rate)."""
     return (f"Set live on the {name}, and again each time Gearbench sets it up in host mode. "
             f"Its onboard profile, which Gearbench does not write yet, keeps its own rate for "
             f"when Gearbench stops.")
@@ -701,9 +770,9 @@ def live_rate_note(name: str) -> str:
 def dpi_in_host_only(name: str, dpi: int, refused: HidppError) -> str:
     """Why a mouse whose firmware takes a DPI in host mode alone (sensor.ExtendedDpi) refused
     `dpi` in onboard mode, and where to look."""
-    return (f"the {name} refused DPI {dpi} ({refused}): outside host mode it takes no DPI "
-            f"from the computer; `gearbench-ctl mouse` says whether host mode is on, and why "
-            f"the mouse is not in it")
+    return (f"the {name} refused DPI {dpi} ({refused}): it takes a DPI from the computer in "
+            f"host mode only; the Mouse tab's Host mode switch or `gearbench-ctl mouse` says "
+            f"why it is not in host mode")
 
 
 def written_note(name: str, host: bool = False, running: int | None = None, own: str = "") -> str:
@@ -713,9 +782,10 @@ def written_note(name: str, host: bool = False, running: int | None = None, own:
     effect (the owner's decision of 2026-10-11). `own`, in HOST mode, names the loaded game
     profile whose own stages or rate stay in force over profile 1's."""
     if host:
-        over = f", except {own}'s own while it is loaded; the mouse runs profile 1" if own else ""
+        runs = (f", except {own}'s own while it is loaded; the mouse runs profile 1" if own
+                else "; the mouse runs it")
         return (f"Written to onboard profile 1 on the {name}. In host mode, Gearbench uses its "
-                f"stages and rate at once{over or '; the mouse runs it'} when Gearbench stops.")
+                f"stages and rate at once{runs} when Gearbench stops.")
     if runs_another_profile(running):
         return (f"Written to onboard profile 1 on the {name}, which runs "
                 f"{profile_words(running)}, so it is not in effect until the mouse runs "
@@ -724,8 +794,8 @@ def written_note(name: str, host: bool = False, running: int | None = None, own:
 
 
 def enable_note(name: str, host: bool = False, running: int | None = None) -> str:
-    """written_note for the enable write. In HOST mode the spy reports G4 to G9 whatever
-    profile 1 holds."""
+    """written_note for the enable write. `host` for a mouse whose armed spy reports G4 to G9
+    whatever profile 1 holds, not one stuck in HOST mode, which runs no profile."""
     if host:
         return (f"Written to onboard profile 1 on the {name}. Nothing changes while "
                 f"Gearbench runs; once it stops, G4 to G9 send buttons 11 to 16, which do "
@@ -813,7 +883,7 @@ def lighting_shown_words(name: str, shown: str) -> str:
     """`status`'s words for whose lighting an attached mouse that waits to claim its lighting
     shows: `shown` is OWN_LIGHTING or GEARBENCH_LIGHTING."""
     if shown == OWN_LIGHTING:
-        return (f"the {name} shows its own lighting until Gearbench sends it a color or an "
+        return (f"the {name} shows its own lighting until Gearbench sends it a color or "
                 f"effect, set for it or followed from the keyboard")
     return f"the {name} shows the lighting Gearbench sends it"
 
@@ -847,6 +917,12 @@ class SwitchRefused(MouseError):
     """A switch to profile 1 not sent, in words that say what to do (Mouse.switch_refusal)."""
 
 
+#: Why a switch to profile 1 that was sent did not take, kept as the attached mouse's
+#: `profile_error` for other_profile_words: the first takes the failure's words.
+SWITCH_FAILED = "the switch to profile 1 failed: {}"
+SWITCH_NOT_TAKEN = "the switch to profile 1 was answered and did not take"
+
+
 def other_profile_words(name: str, running: int, refused: str | None, error: str | None,
                         silent: bool) -> str:
     """`problems`' mouse_other_profile: `name`, the mouse as `problems` names it, runs
@@ -866,11 +942,7 @@ def other_profile_words(name: str, running: int, refused: str | None, error: str
 
 
 def find_attached_mice() -> list[tuple[Path, int, int]]:
-    """Every known mouse attached now, in PRODUCT_IDS order. Two mice on separate receivers
-    each have a hidraw node with its own product id (measured 2026-09-22)."""
+    """The first node of each known mouse product id attached now, in PRODUCT_IDS order, so
+    two mice of one id are one. A G502 X PLUS and a G305 on separate receivers each have a
+    hidraw node with its own product id (measured 2026-09-22)."""
     return find_each_attached({product: model.interface for product, model in MODEL_OF.items()})
-
-
-def backup_name(product: int) -> str:
-    """The prefix of this model's backup files (MouseModel.backup_name)."""
-    return BACKUP_NAMES[product]

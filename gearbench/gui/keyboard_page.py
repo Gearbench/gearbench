@@ -10,12 +10,13 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, cast
 
 from gi.repository import Adw, Gdk, GLib, GObject, Gtk
 
-from ..config import PER_KEY, PROFILE_IDS, Profile, format_color, profile_label
+from ..config import HEADSET_KEYS, PER_KEY, PROFILE_IDS, format_color, profile_label
 from ..keyboard import (
+    BASE_BINDING_TOO,
     BOUND_KEY_CAPABILITIES,
     CABLED_IDS,
     MODEL_OF as KEYBOARDS,
@@ -23,6 +24,7 @@ from ..keyboard import (
     key_name,
     m_profiles_in_menu,
     model_named,
+    needs_base_binding,
 )
 from ..keycodes import ZONE_NAMES, by_zone
 from ..keycontrol import GAME_MODE_NOT_KNOWN, GAME_MODE_UNKNOWN, SHORTCUT_TURNS
@@ -34,13 +36,25 @@ from ..lighting import (
     DIRECTION_WORDS,
     SPEEDS,
     TWO_COLORED,
+    nearest_speed,
 )
-from ..profiles import GameProfile
+from ..profiles import key_layer_in_force, layer_in_force
 from ..settings_files import config_dir, shown_path
-from ..wording import M_PROFILE_NEEDS_A_NAME, capitalized
+from ..tray import ASLEEP_PROBLEMS
+from ..wording import M_PROFILE_NEEDS_A_NAME, RELOAD_LABEL, RELOAD_NOT_TAKEN, capitalized
 from .animation import MEDIA_LABELS, Animation, logo_steady
-from .board import NOT_BINDABLE, KeyBoard, bindable_span, shown_binding
-from .dialogs import CaptureDialog
+from .binding_labels import shown_binding
+from .binding_rows import (
+    BOUND,
+    SHIFT_CLEARED,
+    holds_g_shift,
+    layer_line,
+    layer_named,
+    layer_row,
+)
+from .board import NOT_BINDABLE, KeyBoard
+from .device_rows import show_gone, status_rows
+from .dialogs import EVDEV_OFFSET, CaptureDialog
 from .game_card import GameCard
 from .lighting_card import (
     AREA_LABEL,
@@ -57,23 +71,28 @@ from .style import (
     EFFECT,
     FOLLOW,
     KEYBOARD_ASLEEP,
+    KEYBOARD_SILENT_ON_CABLE,
     KEYBOARD_TAB,
     ON_CABLE,
     TEST_WAIT,
     DeviceView,
     EntryTexts,
+    NoticesRow,
     Styler,
     Switcher,
+    blank,
     confirm,
+    firmware_row,
     name_button,
     route_text,
     say_not_shown,
     set_dot,
     show_battery,
+    show_firmware,
     show_untested,
-    status_rows,
     stylesheet,
     untested_row,
+    watch_refused,
     weakly,
 )
 from .worker import LoadingGuard, named_layer
@@ -81,14 +100,11 @@ from .worker import LoadingGuard, named_layer
 if TYPE_CHECKING:                       # pragma: no cover
     from .window import Window
 
-    class SendSwitch(Protocol):
-        """`KeyboardPage._send_switch`, as the page hands it to a card."""
-
-        def __call__(self, row: Adw.SwitchRow, *, command: str, key: str) -> None: ...
-
-#: The board row's title while the loaded game profile's file cannot be read
-#: (Window.profile_unread), when the window holds its changes to the layer (Window.held):
-#: short, as ON_UNREAD_PROFILE, since the config banner says what to do and stays up.
+#: The board row's title while the window holds its changes to the layer (Window.held): while
+#: config.json cannot be read (ON_DEFAULTS), and while the loaded game profile's file cannot
+#: (Window.profile_unread). Short, as ON_DEFAULTS and ON_UNREAD_PROFILE are, since the config
+#: banner says what to do and stays up.
+UNREAD_CONFIG_BOARD = "Not sent: config.json could not be read"
 UNREAD_PROFILE_BOARD = "Not sent: the file of game profile {} could not be read"
 #: The status page's titles until a keyboard is first seen (DeviceView): before
 #: the first reply, with the spinner, and over the reason once one says it is missing.
@@ -122,17 +138,23 @@ NOT_PER_AREA = f"Switch {EFFECT} to {AREA_LABEL} to paint areas"
 FOLLOWING_BOARD = "Shows the {0}'s lighting; turn off " + FOLLOW.format("{0}") + " to paint keys"
 AREA_FOLLOWING_BOARD = ("Shows the {0}'s lighting; turn off " + FOLLOW.format("{0}")
                         + " to paint areas")
-#: The G-key toggle's label.
-BIND_G_KEYS = "Bind G keys"
+#: The toggle that binds the board's keys, by the bindable keys' letter (bound_letter): F on
+#: a board whose bindable keys are its F1 to F12, as their keycaps print them. Then its
+#: tooltip and the board row's title while it is on, with the letter's article (WITH_ARTICLE).
+BIND_KEYS = {"G": "Bind G keys", "F": "Bind F keys"}
+BIND_KEYS_HELP = "Click {} key to choose what it sends"
+BIND_IN = "Click {} key to bind it in {}"
+WITH_ARTICLE = {"G": "a G", "F": "an F"}
 #: The status group's rows for Game Mode, shown on a keyboard that has it, not known until
 #: an event gives it, and for custom assignments, shown on or off on a keyboard whose own keys
-#: bind through them (`assigned_keys`), with the shortcut that turns them the other way.
+#: bind through them (`assigned_keys`) or wait for a test to, with the shortcut that turns
+#: them the other way.
 GAME_MODE = "Game Mode"
 GAME_MODE_SHOWN = {"on": "On", "off": "Off",
                    GAME_MODE_UNKNOWN: capitalized(GAME_MODE_NOT_KNOWN)}
 CUSTOM_ASSIGNMENTS = "Custom assignments"
-#: Its line on a keyboard whose bindings wait for a test (the reply's `assignments_untested`),
-#: in the Read only row's words: shown, as a write held back is, where it was left out.
+#: The grayed toggle's tooltip and the board row's line on a keyboard whose bindings wait for
+#: a test (the reply's `assignments_untested`), in the Read only row's words.
 ASSIGNMENTS_UNTESTED = f"Bindings wait {TEST_WAIT}"
 #: Its line by the reply's `custom_assignments`, and with the shortcut: "On · FN+F1 turns
 #: them off".
@@ -141,9 +163,10 @@ ASSIGNMENTS_SHORTCUT = "{} · " + SHORTCUT_TURNS
 #: How both boards' help begins, the same on each.
 MOVE_HELP = "Arrow keys move between the keys. Space or Enter does what a click does."
 #: What the board says to a screen reader about its keys, which the board row says only for
-#: the pointer. Not shown. Set once, whatever the mode, so it names by their labels the mode
-#: and the toggle state in which Shift paints and Delete clears.
-BOARD_HELP = (f"{MOVE_HELP} Under {mode_label(PER_KEY)}, with {BIND_G_KEYS} off, "
+#: the pointer, with the toggle's label (BIND_KEYS). Not shown. Set once a board, whatever the
+#: mode, so it names by their labels the mode and the toggle state in which Shift paints and
+#: Delete clears.
+BOARD_HELP = (f"{MOVE_HELP} Under {mode_label(PER_KEY)}, with {{}} off, "
               "Shift with an arrow paints each key it reaches, and Delete or the Menu key "
               "clears a key.")
 #: The same for a board lit by areas, which has no G keys to map.
@@ -200,7 +223,7 @@ def quick_groups(board: Board) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
 
 def lit_names(board: Board) -> list[str]:
     """The zone names of the keys `board` draws with a light, in its order."""
-    return [ZONE_NAMES[key.zone] for key in board.keys if key.zone is not None]
+    return [ZONE_NAMES[zone] for zone in board.lit]
 
 
 #: The Groups row's buttons, over the keys the G915's board draws with a light. Another
@@ -227,10 +250,8 @@ def gives_way(picked: str | None, asked: str | None, shown: str | None,
 
 
 def plugged_in(status: dict) -> list[dict]:
-    """A status's `keyboards_attached`: each entry that names a model by its key."""
-    attached = status.get("keyboards_attached")
-    return [item for item in (attached if isinstance(attached, list) else ())
-            if isinstance(item, dict) and isinstance(item.get("model"), str)]
+    """A status's `keyboards_attached`: each keyboard model plugged in, by its key."""
+    return status.get("keyboards_attached") or []
 
 
 def keyboard_problem(status: dict, shown: str | None) -> dict | None:
@@ -244,22 +265,74 @@ def keyboard_problem(status: dict, shown: str | None) -> dict | None:
                 None if shown in plugged else next(iter(said), None))
 
 
-def binding_layer(overlay: GameProfile | None,
-                  profile: Profile) -> dict[str, str | None]:
-    """The G-key bindings in force: the loaded game profile's when one is
-    loaded, the M profile's own otherwise.
+def bound_letter(board: Board) -> str:
+    """The letter of `board`'s bindable keys, as their keycaps print it: F where they are its
+    F1 to F12, G otherwise, a board with none included."""
+    keys = board.bindable_keys
+    return "F" if keys and _numbered(keys[0].label, "F") else "G"
 
-    The daemon resolves a G key press and binds the same way, so the board
-    shows what a key sends and an edit lands where the daemon put it. The
-    board reads and writes through this one function so the two agree.
-    """
-    return profile.keys if overlay is None else overlay.bindings
+
+def bind_help(board: Board) -> str:
+    """The toggle's tooltip on `board`, for the letter of its bindable keys."""
+    return BIND_KEYS_HELP.format(WITH_ARTICLE[bound_letter(board)])
 
 
 def with_stroke(per_key: dict[str, int], stroke: dict[str, int | None]) -> dict[str, int]:
     """The painted keys after a drag: each key it painted in its color, and
     each it cleared (None) without one, back to the background."""
     return {name: color for name, color in {**per_key, **stroke}.items() if color is not None}
+
+
+def confirm_reload(win: Window) -> None:
+    """Reload from disk: ask first, and say what comes back (reload_now).
+
+    What it restores is not on screen, so the dialog names the profile:
+    the loaded game profile when there is one, since that is the layer
+    the editing commands write, and the M profile otherwise.
+    """
+    # The daemon's _cmd_reload reads config.json in both cases, and the
+    # game profile's own stages and rate follow its file (follow_tuning).
+    folder = shown_path(config_dir())
+    if win.overlay:
+        source = f"the game profile {win.overlay}"
+        where = (f"its file in {folder}/profiles/, the settings from "
+                 f"{folder}/config.json,")
+        mouse = (" In host mode the mouse takes the DPI stages and rate in the game "
+                 "profile's file.")
+    else:
+        source = profile_label(win.active, win.profile_names.get(win.active, ""))
+        where = f"{folder}/config.json"
+        mouse = ""
+    confirm(win, "Reload from disk?",
+            f"Reads the lighting and bindings of {source} again from {where} and "
+            f"the macros from {folder}/macros/. "
+            f"A setting such as mouse_host_mode takes effect.{mouse}",
+            "Reload", lambda: reload_now(win), destructive=False)
+
+
+def reload_now(win: Window) -> None:
+    """Send `reload`, read status and the files again either way, and toast the layer it
+    went back to."""
+    def done(reply: dict | None) -> None:
+        # Resync either way: it re-reads config.json and the library on
+        # the worker, which is what the daemon has just gone back to, and
+        # the Macros tab when the reload took a macro file anew.
+        win.resync()
+        if not reply:
+            return
+        if reply.get("overlay_error"):
+            # The banner gives the file's error.
+            win.toast(f"Kept {reply['overlay']}: its file could not be read")
+        elif reply.get("overlay"):
+            win.toast(f"Back to {reply['overlay']}")
+        else:
+            # As the profile row names it: "Profile 1" alone reads as the mouse's
+            # onboard profile 1.
+            win.toast(f"Back to {profile_label(reply['profile'], reply['profile_name'])}")
+        # A paint the keyboard did not show, or the idle times read again that it did not
+        # take: a layer change's line (NOT_SHOWN_LINE) says the first alone.
+        say_not_shown(win.toast, reply, RELOAD_NOT_TAKEN)
+    win.call({"command": "reload"}, done)
 
 
 class KeyboardPage:
@@ -278,6 +351,8 @@ class KeyboardPage:
     _in_menu = False
     #: The last status with capabilities said the tray icon shows (its `tray`'s `shown`).
     _tray_shown = False
+    #: The Layer row is on G-Shift: map mode shows and binds the G-Shift layer.
+    shift = False
 
     def __init__(self, window: Window) -> None:
         self.win = window
@@ -306,10 +381,9 @@ class KeyboardPage:
 
         #: The lighting rows over and under the board, and the Game profile group. A Speed
         #: move still settling goes out before the Game profile group changes the layer.
-        self.light = LightingCard(window, self.loading, self._unanswered, self._send_switch,
-                                  self.on_defaults, self.update_board, self.refresh_css)
-        self.game = GameCard(window, self.loading, self._unanswered, self._send_switch,
-                             self.light.flush_speed)
+        self.light = LightingCard(window, self.loading, self._unanswered, self.on_defaults,
+                                  self.update_board)
+        self.game = GameCard(window, self.loading, self._unanswered, self.light.flush_speed)
         self._build()
 
     # -- construction -----------------------------------------------------
@@ -360,12 +434,15 @@ class KeyboardPage:
         self.win.add_controller(away)
 
     def _status_group(self) -> Adw.PreferencesGroup:
-        """The same shape as the Mouse tab's: what it is, whether it is there, and for a
-        model not yet run on, the row that asks for a device report from it."""
+        """The status group: the Mouse tab's device rows, in its order, then Game Mode and Custom
+        assignments."""
         # The tab's noun until a status names the model.
         group = Adw.PreferencesGroup(title=KEYBOARD_TAB)
         self.state_row, self.state_dot, self.battery_row, self.battery_icon = status_rows(group)
         self.untested_row = untested_row(group, self.win.toast)
+        # After the untested note, which stays third (the owner's decision of 2026-10-22).
+        self.notices = NoticesRow(group, self.win.call)
+        self.firmware_row = firmware_row(group)
         self.game_mode_row = Adw.ActionRow(title=GAME_MODE, use_markup=False, visible=False)
         self.assignments_row = Adw.ActionRow(title=CUSTOM_ASSIGNMENTS, use_markup=False,
                                              visible=False)
@@ -376,16 +453,18 @@ class KeyboardPage:
     def take_status(self, connected: bool, device: str | None, battery: dict | None, *,
                     answering: bool = True, problem: dict | None = None,
                     name: str | None = None, product: str | None = None,
-                    battery_at: float | None = None) -> None:
+                    battery_at: float | None = None, preset: object = None) -> None:
         """What the status poll saw of the keyboard itself.
 
         `answering` is the daemon's word on an attached keyboard: switched
         off behind its receiver it stays attached. `problem` is the status's
-        keyboard problem for the shown keyboard (keyboard_problem); a node found that does
-        not answer (keyboard_no_answer), through a receiver or on a cable, is
-        amber, as an attached keyboard not answering is. `name` is the model,
+        keyboard problem for the shown keyboard (keyboard_problem); one of a keyboard
+        asleep or switched off (tray.ASLEEP_PROBLEMS), as a node found that does not
+        answer, through a receiver or on a cable, is amber, as an attached keyboard not
+        answering is. `name` is the model,
         for the banner. `battery_at` is when a kept reading was taken, None
-        while the reading is live (battery.kept_at).
+        while the reading is live (battery.kept_at). `preset` is the status's
+        battery_notices, which colors the Battery row.
 
         Until a status says a keyboard is connected, the tab is the status
         page (DeviceView), and the banner stays down: there is nothing on it
@@ -402,23 +481,33 @@ class KeyboardPage:
         self.away_banner.set_title(AWAY_BANNER.format(name or "keyboard"))
         self.away_banner.set_revealed(not here)
         self._show_switch(connected)
-        # The route, not /dev/hidrawN, whose number floats; the node is in the tooltip.
-        route = route_text(product, CABLED_IDS) if connected else None
-        if connected and not answering:
+        if not connected:
+            self._gone(message, ASLEEP if problem.get("code") in ASLEEP_PROBLEMS else False)
+            return
+        # The route, not /dev/hidrawN, whose number floats; the node is in the tooltip and the
+        # description (StatusRow).
+        route = route_text(product, CABLED_IDS)
+        if not answering:
             set_dot(self.state_dot, ASLEEP)
-            self.state_row.set_subtitle(KEYBOARD_ASLEEP)
-        elif connected:
+            self.state_row.set_subtitle(KEYBOARD_SILENT_ON_CABLE if route == ON_CABLE
+                                        else KEYBOARD_ASLEEP)
+        else:
             set_dot(self.state_dot, True)
             self.state_row.set_subtitle(route or str(device or ""))
-        else:
-            set_dot(self.state_dot,
-                    ASLEEP if problem.get("code") == "keyboard_no_answer" else False)
-            self.state_row.set_subtitle(capitalized(message))
-        self.state_row.set_tooltip_text(str(device) if connected and device else None)
+        self.state_row.show_node(str(device) if device else None)
         # A keyboard that does not answer keeps its last reading, with when it was taken.
-        show_battery(self.battery_row, self.battery_icon, battery if connected else None,
-                     battery_at, cabled=route == ON_CABLE,
-                     gone=not connected)
+        show_battery(self.battery_row, self.battery_icon, battery, battery_at,
+                     cabled=route == ON_CABLE, preset=preset)
+
+    def _gone(self, why: str, state: bool | str = False) -> None:
+        """The Status group of a keyboard gone, or of a daemon that did not answer, for the
+        reason `why`, the dot at `state` (show_gone), and no key control."""
+        show_gone(self.state_row, self.state_dot, self.battery_row, self.battery_icon,
+                  self.notices, why, state)
+        # The gone keyboard's, which the daemon forgets at its teardown; show_capabilities
+        # gives a connected one's.
+        show_firmware(self.firmware_row, None)
+        self.show_key_control({}, set())
 
     def daemon_gone(self, why: str) -> None:
         """The daemon did not answer, for the reason `why`. The row says so instead of
@@ -430,10 +519,7 @@ class KeyboardPage:
             return
         self.away_banner.set_revealed(False)
         self._show_switch(False)
-        set_dot(self.state_dot, False)
-        self.state_row.set_subtitle(capitalized(why))
-        self.state_row.set_tooltip_text(None)
-        show_battery(self.battery_row, self.battery_icon, None, gone=True)
+        self._gone(why)
 
     def take_keyboards(self, status: dict, asked: str | None) -> None:
         """A status's keyboard models plugged in, for the switcher: a button for each by name,
@@ -456,7 +542,7 @@ class KeyboardPage:
             # (Keyboards.shown_in): the leader's are read now, not at the next tick.
             self.win.keyboard_shown = None
             self.win.resync()
-        self.switcher.show([key_name(key) for key in self._attached],
+        self.switcher.show([capitalized(key_name(key)) for key in self._attached],
                            self._attached.index(shown) if shown in self._attached else None,
                            len(self._attached) >= 2, self._switched_off)
         self.light.show_leader(self._attached, self._switched_off, status)
@@ -477,9 +563,11 @@ class KeyboardPage:
         G213 share a protocol and little else (per-key and G keys, against five
         lighting areas). A section the keyboard lacks is hidden, not grayed out,
         which would say the feature is unavailable when it does not exist, and so
-        is the Battery row of a keyboard with no battery. The M profile group shows
-        for a keyboard with M keys or lighting, and says where its profiles switch
-        (_show_switch).
+        are the Battery and Battery notices rows of a keyboard with no battery, and the Firmware
+        row of one whose status gives no version. A keyboard whose bindings wait for a test
+        has its bind toggle (BIND_KEYS) grayed out, as a held write is: the feature exists.
+        The M profile group shows for a keyboard with M keys or lighting, and says where its
+        profiles switch (_show_switch).
         The board drawn is the model's, once the status names its product (show_board).
         """
         able = set(status.get("capabilities") or ())
@@ -487,8 +575,12 @@ class KeyboardPage:
         # A group's title is markup, and the name is the daemon's.
         self.status_group.set_title(GLib.markup_escape_text(name))
         show_untested(self.untested_row, status.get("untested"))
+        show_firmware(self.firmware_row, status.get("firmware"))
         self.light.show_capabilities(able, status.get("dims") is not False)
         self.battery_row.set_visible("battery" in able)
+        product = status.get("product")
+        self.notices.show({"keyboard": product} if "battery" in able and product else None,
+                          status)
         self._in_menu = m_profiles_in_menu(able)
         self._tray_shown = (status.get("tray") or {}).get("shown") is True
         self.profile_group.set_visible("m_keys" in able or self._in_menu)
@@ -498,24 +590,33 @@ class KeyboardPage:
         self.game_group.set_visible(bool(able & {"lighting", *BOUND_KEY_CAPABILITIES}))
         self.light_group.set_visible("lighting" in able)
         self.color_group.set_visible("lighting" in able)
-        board = board_of(status.get("product"))
+        board = board_of(product)
         # Whether G keys map is the keyboard's to say, on a board with a key to bind: the
         # G213's has none, whatever features a keyboard of its id lists.
         drawn = board if board is not None else self.board.board
         mappable = bool(able & BOUND_KEY_CAPABILITIES) and bool(drawn.bindable_keys)
+        # Bindings that wait for a test: the toggle grayed, with why on its row's line, as a
+        # held write is on the other pages.
+        held = (not mappable and status.get("assignments_untested") is True
+                and bool(drawn.bindable_keys))
         # The board is for painting keys or areas and binding G keys; with none it is hidden.
-        self.board_group.set_visible(bool(able & {"per_key", "areas"}) or mappable)
-        self.map_toggle.set_visible(mappable)
+        self.board_group.set_visible(bool(able & {"per_key", "areas"}) or mappable or held)
+        self.map_toggle.set_visible(mappable or held)
+        self.map_toggle.set_sensitive(not held)
+        self.board_row.set_subtitle(ASSIGNMENTS_UNTESTED if held else "")
         if not mappable:
-            # Hidden and left on, it would hold the board in map mode with no G key to map.
+            # Hidden or grayed and left on, it would hold the board in map mode with no G key
+            # a click may bind.
             self.map_toggle.set_active(False)
-        if board is not None and board is not self.board.board:
-            self.show_board(board)
+        if drawn is not self.board.board:
+            self.show_board(drawn)
+        self.map_toggle.set_tooltip_text(ASSIGNMENTS_UNTESTED if held
+                                         else bind_help(self.board.board))
 
     def show_key_control(self, status: dict, able: set[str]) -> None:
         """The Game Mode row, on a keyboard that has it, and the Custom assignments row, on or
         off as the status gives them on a keyboard able to do `able`, which binds its own keys
-        through them, or while its bindings wait for a test."""
+        through them, or whose bindings wait for a test to (show_capabilities says that)."""
         game = status.get("game_mode")
         shown = GAME_MODE_SHOWN.get(game) if isinstance(game, str) else None
         self.game_mode_row.set_visible(shown is not None)
@@ -523,13 +624,11 @@ class KeyboardPage:
         shortcut = status.get("assignment_shortcut")
         untested = status.get("assignments_untested") is True
         state = status.get("custom_assignments")
-        self.assignments_row.set_visible(untested or ("assigned_keys" in able
-                                                      and isinstance(state, bool)))
+        self.assignments_row.set_visible(isinstance(state, bool)
+                                         and (untested or "assigned_keys" in able))
         on = state is True
         self.assignments_row.set_subtitle(
-            ASSIGNMENTS_UNTESTED if untested
-            else ASSIGNMENTS_SHORTCUT.format(ASSIGNMENTS_SHOWN[on], shortcut,
-                                             "off" if on else "on")
+            ASSIGNMENTS_SHORTCUT.format(ASSIGNMENTS_SHOWN[on], shortcut, "off" if on else "on")
             if isinstance(shortcut, str)
             else ASSIGNMENTS_SHOWN[on])
 
@@ -563,6 +662,7 @@ class KeyboardPage:
         group.add(self.profile_row)
         # On apply, not per keystroke: each is a rename sent to the daemon, which owns the name.
         self.name_row = Adw.EntryRow(title="Name", show_apply_button=True)
+        watch_refused(self.name_row, blank)
         self.name_row.connect("apply", self.on_name)
         group.add(self.name_row)
 
@@ -571,8 +671,8 @@ class KeyboardPage:
         reload_row = Adw.ActionRow(
             title="Reload from disk",
             subtitle="Read the files again after editing one by hand")
-        reload = Gtk.Button(label="Reload…", valign=Gtk.Align.CENTER)
-        reload.connect("clicked", self.on_reload)
+        reload = Gtk.Button(label=RELOAD_LABEL, valign=Gtk.Align.CENTER)
+        reload.connect("clicked", lambda _b: confirm_reload(self.win))
         reload_row.add_suffix(reload)
         group.add(reload_row)
         return group
@@ -585,8 +685,8 @@ class KeyboardPage:
         # icon or a label, not both (the HIG's buttons).
         self.sample_button = Gtk.ToggleButton(
             label="Sample", valign=Gtk.Align.CENTER, visible=False,
-            tooltip_text="Take the color of the next key you click")
-        name_button(self.sample_button, "Sample a key's color into the brush")
+            tooltip_text="Give the brush the color of the next key you click")
+        name_button(self.sample_button, "Sample color")
         self.sample_button.connect("toggled", self.on_sample)
         return self.sample_button
 
@@ -621,9 +721,8 @@ class KeyboardPage:
     def _board_group(self) -> Adw.PreferencesGroup:
         # Keys, as the Mouse tab's group for the same job is Buttons: Keyboard names the tab.
         group = Adw.PreferencesGroup(title="Keys")
-        self.map_toggle = Gtk.ToggleButton(
-            label=BIND_G_KEYS, valign=Gtk.Align.CENTER,
-            tooltip_text="Click a G key to choose what it sends")
+        # Labeled by _put_board, for the keys of the board drawn.
+        self.map_toggle = Gtk.ToggleButton(valign=Gtk.Align.CENTER)
         self.map_toggle.connect("toggled", self.on_map_mode)
         # Which layer every edit on the board lands in (show_layer), a row of its own as
         # on the Mouse tab's Buttons. Not markup: it names profiles.
@@ -635,6 +734,11 @@ class KeyboardPage:
         self.board_row = Adw.ActionRow(title=NOT_PER_KEY, use_markup=False)
         self.board_row.add_suffix(self.map_toggle)
         group.add(self.board_row)
+        # Directly under Bind G keys (the owner's decision of 2026-10-28): the layer map mode
+        # shows and binds, hidden until map mode is on (update_board).
+        self.layer_row, self.layer_toggles = layer_row(self.on_layer)
+        self.layer_row.set_visible(False)
+        group.add(self.layer_row)
 
         self._put_board(G915_BOARD)
         # Not a focus stop: the row does nothing and has no name, so Tab goes
@@ -646,12 +750,17 @@ class KeyboardPage:
 
     def _put_board(self, board: Board) -> None:
         """The drawn keyboard of `board` as the page's `board`, laid out once the page holds
-        it, since its first layout calls back into the page."""
+        it, since its first layout calls back into the page, and the toggle named for the keys
+        it binds."""
+        toggle = BIND_KEYS[bound_letter(board)]
+        self.map_toggle.set_label(toggle)
+        self.map_toggle.set_tooltip_text(bind_help(board))
         self.board = KeyBoard(self.on_key_clicked, self.on_key_cleared, self.on_board_resize,
                               on_stroke_start=self.on_stroke_start,
                               on_stroke_key=self.on_stroke_key,
                               on_stroke_end=self.on_stroke_end,
-                              description=AREA_BOARD_HELP if board.areas else BOARD_HELP,
+                              description=AREA_BOARD_HELP if board.areas
+                              else BOARD_HELP.format(toggle),
                               board=board)
         self.board.place()
 
@@ -659,18 +768,17 @@ class KeyboardPage:
 
     def sync(self) -> None:
         """Show the window's state. Memory only: no disk, no daemon."""
-        win = self.win
         self.refresh_profile_row()
         self.light.refresh_brightness()
         with self.loading:
             self.game.sync_game_row()
             self.game.show_programs()
             self.show_layer()
-            self.game.show_unreadable(win.skipped_profiles)
+            self.game.show_unreadable(self.win.skipped_profiles)
             self.light.show_mode()
             self.update_board()
 
-    def refresh_profile_row(self, force: bool = False) -> None:
+    def refresh_profile_row(self) -> None:
         win = self.win
         labels = [profile_label(i, win.profile_names.get(i, "")) for i in PROFILE_IDS]
         name = win.profile_names.get(win.active, "")
@@ -684,44 +792,48 @@ class KeyboardPage:
                                   else PROFILE_IDS.index(win.active))
         # A name being typed was for the profile shown: a switch drops it,
         # or a rename would give the new profile a name meant for the old.
-        if (force or win.active != self._name_for
+        if (win.active != self._name_for
                 or not (self._texts.typing(win, self.name_row) or self._unanswered["rename"])):
             # No loading guard: set_text never emits `apply`, the row's only handler (on_name).
             self._texts.show(self.name_row, name)
             self._name_for = win.active
 
     def show_layer(self) -> None:
-        """Say which layer is edited, on the Editing row over the board, and have the Game
-        profile group show what holds that layer."""
+        """Say which layer is edited, on the Editing row over the board, with the Layer row's
+        line for this keyboard (layer_line), and have the Game profile group show what holds
+        that layer."""
         self.editing_row.set_title(self.win.editing())
+        self.layer_row.set_subtitle(self.layer_line())
         self.game.show_layer()
 
-    def _send_switch(self, row: Adw.SwitchRow, *, command: str, key: str) -> None:
-        """Send the switch as `command` and read it back either way: a refusal
-        puts it back once no other flip of it is out. `command` also names the
-        window's field and its count in `_unanswered`, which holds the row
-        while a flip is out; the reply carries the value under `key`. By
-        keyword, so CommandTableTests finds the name."""
-        if self.loading.active:
-            return
-        wanted = row.get_active()
-        if wanted == getattr(self.win, command) and not self._unanswered[command]:
-            return
-        self._unanswered[command] += 1
+    def layer_line(self, every: bool = False) -> str:
+        """The Layer row's line (binding_rows.layer_line): on this tab, by whether its board
+        has MR, since another keyboard's MR leaves its G keys alone; with `every`, for the
+        Mouse tab and a headset's G keys, which any keyboard's MR shifts, by whether any
+        keyboard plugged in has. A holder counts on the layer in force: a key of those boards,
+        since a keyboard's G key shifts no other keyboard (daemon.bindings.shifts) and one
+        unplugged is not held, a headset's key or a mouse button. None counts while the loaded
+        game profile's file is unread."""
+        win = self.win
+        boards = ([model.board for model in map(model_named, self._attached) if model]
+                  if every else [self.board.board])
+        mr = any(key.label == "MR" for board in boards for key in board.keys)
+        if win.profile_unread():
+            # The M profile's holders in its place would read as the loaded profile's, as its
+            # bindings would on the board (_draw_board).
+            return layer_line(mr, False)
+        overlay = win.game_profile(win.overlay)
+        own = {key.binds_as for board in boards for key in board.bindable_keys}
+        layer = key_layer_in_force(overlay, win.config.profile)
+        keys = {name: spec for name, spec in layer.items() if name in own or name in HEADSET_KEYS}
+        mice = layer_in_force(overlay, win.config.profile).mouse
+        return layer_line(mr, holds_g_shift(keys, mice))
 
-        def done(reply: dict | None) -> None:
-            self._unanswered[command] -= 1
-            if reply is None:
-                # A later flip still out is the user's last: its answer puts the row right.
-                if not self._unanswered[command]:
-                    with self.loading:
-                        row.set_active(bool(getattr(self.win, command)))
-            elif isinstance(reply.get(key), bool):
-                # Taken now: a change back before the read-back lands is
-                # compared with it.
-                setattr(self.win, command, reply[key])
-            self.win.resync()
-        self.win.call({"command": command, "value": wanted}, done)
+    def on_layer(self, shift: bool) -> None:
+        """The Layer row, shown in map mode alone (update_board), picked G-Shift, or Base:
+        the board shows that layer's bindings."""
+        self.shift = shift
+        self.update_board()
 
     def update_board(self) -> None:
         win = self.win
@@ -730,6 +842,9 @@ class KeyboardPage:
         # board takes neither a click nor a drag outside map mode (LightingCard.show_following).
         following = win.shown_on.follows
         self.board_holder.set_sensitive(self.map_mode or not following)
+        # The layer is for the bindings alone; shown while painting, it would push the board
+        # down from the Effect row.
+        self.layer_row.set_visible(self.map_mode)
         can_sample = win.lighting.mode == PER_KEY and not self.map_mode and not following
         self.sample_button.set_visible(can_sample)
         # The quick groups likewise, on a keyboard that paints single keys.
@@ -738,12 +853,27 @@ class KeyboardPage:
             self.sample_button.set_active(False)    # on_sample draws the rest
             return
         unread = win.profile_unread()
+        self._draw_board(unread)
+        self.board_row.set_title(self._board_title(unread, following))
+        self.light.show_picker(self.sampling)
+        self.board.set_sampling(self.sampling)
+        self.refresh_css()
+
+    def _draw_board(self, unread: bool) -> None:
+        """The board as update_board shows it: the bindings in map mode, else the lighting's
+        colors or animation."""
+        win = self.win
         if self.map_mode:
             # Nothing shown bound while the loaded profile is unread: the M
-            # profile's bindings in its place read as that profile's.
-            self.board.show_bindings({} if unread else
-                                     binding_layer(win.game_profile(win.overlay),
-                                                   win.config.profile))
+            # profile's bindings in its place read as that profile's. Nor what a key with no
+            # G-Shift binding sends, which the profile may give it.
+            overlay, profile = win.game_profile(win.overlay), win.config.profile
+            if unread:
+                self.board.show_bindings({})
+            else:
+                self.board.show_bindings(key_layer_in_force(overlay, profile, self.shift),
+                                         shift=self.shift,
+                                         outputs_off=win.outputs.balance_unheard)
         elif win.lighting.mode == PER_KEY:
             # A drag's keys too, or a redraw during one would take them off the
             # board until its release.
@@ -753,33 +883,38 @@ class KeyboardPage:
             self.board.show_animation(*self.shown_animation())
         else:
             self.board.show_colors({}, win.lighting.color)
+
+    def _board_title(self, unread: bool, following: bool) -> str:
+        """The board row's title, for the mode update_board shows. Sample sends nothing, so
+        nothing holds it."""
+        win = self.win
+        if win.config_error is not None and not self.sampling:
+            return UNREAD_CONFIG_BOARD
         if unread and not self.sampling:
-            title = UNREAD_PROFILE_BOARD.format(win.overlay)
-        elif self.map_mode:
+            return UNREAD_PROFILE_BOARD.format(win.overlay)
+        if self.map_mode:
             # Named because a game profile's layer and the M profile's look the same on
             # screen, and binding into the wrong one is the easy mistake here. The M profile as
             # the Editing row names it: "Profile 1" alone reads as the mouse's onboard profile 1.
             overlay = win.game_profile(win.overlay)
             where = (overlay.name if overlay is not None
                      else profile_label(win.active, win.profile_names.get(win.active, "")))
-            title = f"Click a G key to bind it in {where}"
-        elif following:
-            title = (AREA_FOLLOWING_BOARD if self.board.board.areas
-                     else FOLLOWING_BOARD).format(followed(win.shown_on.leader))
-        elif self.sampling:
-            title = f"{SAMPLE_HELP}, or press Escape"
-        elif win.lighting.mode == PER_KEY:
-            title = AREA_PAINT_HELP if self.board.board.areas else PAINT_HELP
-        elif win.lighting.mode in ANIMATIONS:
+            return BIND_IN.format(WITH_ARTICLE[bound_letter(self.board.board)], where)
+        if following:
+            return (AREA_FOLLOWING_BOARD if self.board.board.areas
+                    else FOLLOWING_BOARD).format(followed(win.shown_on.leader))
+        if self.sampling:
+            return f"{SAMPLE_HELP}, or press Escape to cancel"
+        if win.lighting.mode == PER_KEY:
+            return AREA_PAINT_HELP if self.board.board.areas else PAINT_HELP
+        if win.lighting.mode in ANIMATIONS:
             # The board draws the animation, a likeness of it (show_animation): this says the
-            # keyboard runs it, and that a click paints nothing.
-            title = f"{mode_label(win.lighting.mode)} runs on the keyboard. {self.not_painted()}"
-        else:
-            title = self.not_painted()
-        self.board_row.set_title(title)
-        self.light.show_picker(self.sampling)
-        self.board.set_sampling(self.sampling)
-        self.refresh_css()
+            # keyboard runs it, and that a click paints nothing. One line, joined by a
+            # semicolon as the following titles are; the sentence keeps its capital for the toast.
+            switch = self.not_painted()
+            return (f"{mode_label(win.lighting.mode)} runs on the keyboard; "
+                    f"{switch[:1].lower()}{switch[1:]}")
+        return self.not_painted()
 
     def not_painted(self) -> str:
         """What the board says of a click outside Per-key: Per-area's words on a board lit by
@@ -802,8 +937,9 @@ class KeyboardPage:
         way = f", {DIRECTION_WORDS[state.direction].lower()}" if mode == "wave" else ""
         pace = f", {speed_text(mode, period)}" if mode in SPEEDS else ""
         # An M profile's params can give a period outside SPEEDS' range, 0 among them, which a
-        # frame divides by: the board draws at the nearest end, where the Speed slider sits.
-        drawn = min(max(period, SPEEDS[mode][0]), SPEEDS[mode][1]) if mode in SPEEDS else period
+        # frame divides by: the board draws at the nearest end, where the Speed slider sits
+        # (nearest_speed).
+        drawn = nearest_speed(mode, period) if mode in SPEEDS else period
         return (Animation(mode, state.color, state.second_color, drawn, state.direction,
                           logo_steady(mode, model_named(self.win.shown_on.model))),
                 f"Shows {mode_label(mode)} in {colors}{way}{pace}.")
@@ -813,7 +949,7 @@ class KeyboardPage:
         """A key pressed or let go anywhere in the window, `down` for a press: under ripple the
         drawn board ripples from it, as the keyboard does (KeyBoard.typed). Never taken: the key
         goes on to the widget it was typed in."""
-        self.board.typed(keycode - 8, down)     # GDK's hardware keycode is evdev's + 8
+        self.board.typed(keycode - EVDEV_OFFSET, down)
         return False
 
     def on_keyboard_left(self, _controller: Gtk.EventControllerFocus) -> None:
@@ -830,7 +966,7 @@ class KeyboardPage:
 
     def refresh_css(self) -> None:
         state = self.win.lighting
-        colors = {state.color, state.background, *self.win.saved_colors, *state.per_key.values()}
+        colors = {state.color, state.background, *state.per_key.values()}
         self._css.update(stylesheet(self.board.unit, colors))
         self.light.show_background()
 
@@ -873,7 +1009,6 @@ class KeyboardPage:
         name = row.get_text().strip()
         if not name:
             self.win.toast(capitalized(M_PROFILE_NEEDS_A_NAME))
-            self.refresh_profile_row(force=True)
             return
         self._texts.took(row)
         if (name == self.win.profile_names.get(self.win.active)
@@ -891,53 +1026,6 @@ class KeyboardPage:
             self.win.resync()
         self.win.call({"command": "rename", "value": name}, done)
 
-    def on_reload(self, _b: Gtk.Button | None) -> None:
-        """Ask first, and say what comes back.
-
-        What it restores is not on screen, so the dialog names the profile:
-        the loaded game profile when there is one, since that is the layer
-        the editing commands write, and the M profile otherwise. Also the
-        config banner's button and the main menu's Reload from disk….
-        """
-        # The daemon's _cmd_reload reads config.json in both cases, and the
-        # game profile's own stages and rate follow its file (follow_tuning).
-        folder = shown_path(config_dir())
-        if self.win.overlay:
-            source = f"the game profile {self.win.overlay}"
-            where = (f"its file in {folder}/profiles/, the settings from "
-                     f"{folder}/config.json,")
-            mouse = " In host mode the mouse takes the DPI stages and rate in its file."
-        else:
-            source = profile_label(self.win.active,
-                                   self.win.profile_names.get(self.win.active, ""))
-            where = f"{folder}/config.json"
-            mouse = ""
-        confirm(self.win, "Reload from disk?",
-                f"Reads the lighting and bindings of {source} again from {where} and "
-                f"the macros from {folder}/macros/. "
-                f"A setting such as mouse_host_mode takes effect.{mouse}",
-                "Reload", self._do_reload, destructive=False)
-
-    def _do_reload(self) -> None:
-        def done(reply: dict | None) -> None:
-            # Resync either way: it re-reads config.json and the library on
-            # the worker, which is what the daemon has just gone back to, and
-            # the Macros tab when the reload took a macro file anew.
-            self.win.resync()
-            if not reply:
-                return
-            if reply.get("overlay_error"):
-                # The banner gives the file's error.
-                self.win.toast(f"Kept {reply['overlay']}: its file could not be read")
-            elif reply.get("overlay"):
-                self.win.toast(f"Back to {reply['overlay']}")
-            else:
-                # As the profile row names it: "Profile 1" alone reads as the mouse's
-                # onboard profile 1.
-                self.win.toast(f"Back to {profile_label(reply['profile'], reply['profile_name'])}")
-            say_not_shown(self.win.toast, reply)
-        self.win.call({"command": "reload"}, done)
-
     # -- the board --------------------------------------------------------
 
     def on_defaults(self) -> bool:
@@ -949,12 +1037,12 @@ class KeyboardPage:
         and every lighting command is built from them and saved at once: one
         mode switch or paint stroke would replace the real per-key layout. This
         repeats the config banner's advice at the moment it matters. Held at
-        the window's close, it keeps the window up (Window.held_back).
+        the window's close, it keeps the window up (Window.kept_up).
         """
-        why = self.win.held()
-        if why is None:
+        if (why := self.win.held()) is None:
             return False
-        self.win.held_back(why)
+        self.win.kept_up()
+        self.win.toast(why)
         return True
 
     def on_map_mode(self, button: Gtk.ToggleButton) -> None:
@@ -1008,17 +1096,22 @@ class KeyboardPage:
     def on_key_clicked(self, key: Key) -> None:
         if self.map_mode:
             if not key.bindable:
-                self.win.toast(f"{key.label} {NOT_BINDABLE}; only "
-                               f"{bindable_span(self.board.board)} can")
+                labels = [each.label for each in self.board.board.bindable_keys]
+                self.win.toast(f"{key.label} {NOT_BINDABLE}; only {labels[0]} to {labels[-1]} can")
                 return
             if self.on_defaults():
                 return
-            # The worker lets the dialog list the macros as well as capture a key.
-            dialog = CaptureDialog(self.win, key.label, worker=self.win.worker)
-            # The layer the board named at the click: the polls go on while the dialog is
-            # open, and an M key, the tray or a program can move the window's meanwhile.
-            layer = named_layer(self.win.layer)
-            dialog.run(lambda spec: self._bind(key, spec, layer))
+            # The worker lets the dialog list the macros, and `actions` G-Shift and the balance,
+            # as well as capture a key. Named with the layer it binds on, as the toast is.
+            named = layer_named(key.label, self.shift)
+            dialog = CaptureDialog(self.win, named, worker=self.win.worker, actions=True,
+                                   outputs_off=self.win.outputs.balance_unheard,
+                                   shift=self.shift)
+            # The layer the board named at the click, and the Layer row's pick: the polls go
+            # on while the dialog is open, and an M key, the tray or a program can move the
+            # window's meanwhile.
+            layer, shift = named_layer(self.win.layer), self.shift
+            dialog.run(lambda spec: self._bind(key, spec, layer, shift))
             return
         if key.zone is None:                # reserved: the board passes on no such key
             return
@@ -1122,17 +1215,18 @@ class KeyboardPage:
         self.light.push_lighting()
         self.update_board()
 
-    def _bind(self, key: Key, spec: str | None, layer: dict) -> None:
-        """Bind G key `key` under its `binds_as`, G515-F1 for a G515's F1, and mirror what
-        the daemon says it wrote. The toast names the keycap, as the capture dialog does.
+    def _bind(self, key: Key, spec: str | None, layer: dict, shift: bool = False) -> None:
+        """Bind G key `key` under its `binds_as`, G515-F1 for a G515's F1, on the G-Shift
+        layer with `shift`, and mirror what the daemon says it wrote.
 
         `layer` is the one the click was made on, laid over the window's
         (Window.on_layer), so the daemon refuses the bind once the keyboard
         has left it (layer_changed). The mirror's layer comes from the reply
         rather than from `win.overlay`, which a file read can move between
-        the click and the reply: the daemon names the profile it bound in.
+        the click and the reply.
         """
         binds_as = key.binds_as
+        named = layer_named(key.label, shift)
 
         def done(reply: dict | None) -> None:
             if reply is None:
@@ -1140,21 +1234,28 @@ class KeyboardPage:
             written = reply["binding"]
             name = reply.get("overlay")
             overlay = self.win.game_profile(name)
-            mirrored = not name or overlay is not None
+            profile = self.win.config.profile
+            # With no game profile loaded the daemon bound in the M profile the click named, as
+            # it refuses another (layer_changed); a file read since can have moved the window's
+            # copy to another M profile, whose keys were not bound.
+            mirrored = (overlay is not None if name
+                        else layer["profile"] == self.win.config.active)
             # What the key did, which Undo binds again on the same layer whenever the bind
             # replaced or cleared it, as on the Mouse tab and the G keys.
-            was = (binding_layer(overlay, self.win.config.profile).get(binds_as)
-                   if mirrored else None)
-            self.win.toast(f"{key.label} → {shown_binding(written)}" if written
-                           else f"{key.label} unbound",
-                           undo=(lambda: self._bind(key, was, layer))
+            was = key_layer_in_force(overlay, profile, shift).get(binds_as) if mirrored else None
+            cleared = SHIFT_CLEARED.format(key.label) if shift else f"{key.label} unbound"
+            self.win.toast(BOUND.format(named, shown_binding(written)) if written else cleared,
+                           undo=(lambda: self._bind(key, was, layer, shift))
                            if was and was != written else None)
             if not mirrored:
-                # The daemon bound a profile this window has not read yet,
-                # so read the files again rather than guess at the mirror.
+                # The daemon bound a profile this window has not read yet, or an M profile
+                # its copy has left, so read the files again rather than guess at the mirror.
                 self.win.resync()
                 return
-            binding_layer(overlay, self.win.config.profile)[binds_as] = written
+            key_layer_in_force(overlay, profile, shift)[binds_as] = written
+            if needs_base_binding(binds_as, key_layer_in_force(overlay, profile).get(binds_as),
+                                  key_layer_in_force(overlay, profile, True).get(binds_as)):
+                self.win.toast(BASE_BINDING_TOO.format(key.label))
             self.update_board()
-        self.win.call({"command": "bind", "key": binds_as, "value": spec, "shift": False,
+        self.win.call({"command": "bind", "key": binds_as, "value": spec, "shift": shift,
                        "layer": layer}, done)

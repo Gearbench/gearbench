@@ -8,7 +8,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from . import pipewire_client, pipewire_unit, runtime_folder, spatial
+from . import (
+    headset_audio,
+    outputs,
+    pipewire_client,
+    pipewire_unit,
+    runtime_folder,
+    spatial,
+)
 from .g432 import MODELS, HeadsetModel
 
 #: The models whose equalizer runs here: those G HUB gives none of their own (the owner's
@@ -27,9 +34,7 @@ class Words:
     is said."""
 
     unit: str
-    #: The name in the journal of the unit that watches for the headset's return while
-    #: `unit` runs, and that unit.
-    watch_name: str
+    #: The unit that watches for the headset's return while `unit` runs.
     watch_unit: str
     sink: str
     output: str
@@ -61,7 +66,8 @@ class Words:
     #: the level in GNOME's percent.
     not_put_back: str
     #: not_put_back's for a put-back that carried a mute too: the equalizer's, or with its
-    #: volume unread the headset's own from before the hold.
+    #: volume unread the headset's own from before the hold; and for an off that read nothing
+    #: while the record keeps that mute.
     not_put_back_muted: str
     #: Why there is nothing to hold: the headset's card gives no route of the shape
     #: find_route reads.
@@ -99,12 +105,19 @@ class Words:
     watch_held: str
     watch_unread: str
     watch_ended: str
+    watch_folder_refused: str
     watch_back: str
     watch_no_chain: str
     watching: str
     #: update's failure after its save, with the cause: said as saved, so a retry does not
     #: make the change again, as a second --save-as would save a second preset.
     not_set_live: str
+    #: switch_off's notes for the Outputs unit's streams through the equalizer: one still
+    #: there after pipewire_client.SETTLE, one not moved, with why, and one aimed off it whose
+    #: leaving PipeWire could not show by then, with why.
+    outputs_stayed: str
+    outputs_not_moved: str
+    outputs_unread: str
     #: render's refusal of the headset's output's node name.
     not_named: str
     #: summary's words while the unit runs: the headset unplugged or with no output, its
@@ -120,35 +133,37 @@ def words(model: HeadsetModel) -> Words:
     key, name, short = model.key, model.name, model.short
     eq, unit = f"{name} Equalizer", f"gearbench-{key}-eq.service"
     watch = WATCH_NAME_OF.format(key)
-    again = f"switch {eq} off and on again to try once more."
+    again = f"switch {eq} off and on again."
+    settings = "GNOME's Sound settings or KDE Plasma's"
+    paused = "if a player on them paused, press play again."
     put_back = (f"The {short}'s own volume may still be at 0 dB. Putting it back failed ({{}}); "
                 "set it to {}%")
     return Words(
-        unit=unit, watch_name=watch, watch_unit=f"{watch}.service",
+        unit=unit, watch_unit=f"{watch}.service",
         sink=f"gearbench-{key}-eq", output=f"gearbench-{key}-eq.output", description=eq,
         conf_name=f"gearbench-{key}-eq.conf", record_name=f"gearbench-{key}-eq.json",
         no_headset=(f"the {short}'s output is not in PipeWire: plug in the headset's "
                     f"{model.plugged_by}, then switch {eq} on again"),
-        no_output=(f"the {short}'s Configuration in GNOME's Sound settings has no output: "
-                   f"pick one that has, then switch {eq} on again"),
+        no_output=(f"the {short}'s {headset_audio.CARD_PROFILE}, has no output: pick one "
+                   f"that has, then switch {eq} on again"),
         no_runtime=runtime_folder.not_set(f"{eq}'s files have"),
         not_carried=(f"The {short}'s own volume stayed where it was. Setting {eq}'s volume to "
                      f"match it failed ({{}}), so both volumes apply; {again}"),
-        no_sink=f"{eq} did not show in PipeWire within {pipewire_client.SETTLE:g} s",
+        no_sink=f"the equalizer did not show in PipeWire within {pipewire_client.SETTLE:g} s",
         stopped=pipewire_unit.STOPPED.format(eq, unit),
         not_held=(f"The {short}'s own volume stayed where it was. Setting it to 0 dB failed "
                   f"({{}}), so {eq}'s volume and the {short}'s both apply."),
-        not_put_back=f"{put_back} in GNOME's Sound settings.",
-        not_put_back_muted=f"{put_back} and mute it in GNOME's Sound settings.",
+        not_put_back=f"{put_back} in {settings}.",
+        not_put_back_muted=f"{put_back} and mute it in {settings}.",
         no_route=f"PipeWire gives no volume for the {short}'s output",
         moved=f"The {short}'s own output is the default output now.",
         not_moved=(f"The default output did not move to the {short}'s own output. Picking it "
-                   "failed ({}); pick an output in GNOME's Sound settings."),
+                   f"failed ({{}}); pick an output in {settings}."),
         moved_nowhere=(f"{eq} was the default output. With the {short}'s own output gone, "
                        "PipeWire picks another."),
         reselected=f"{eq} is the default output again.",
         not_reselected=(f"{eq} did not become the default output again. Picking it failed "
-                        "({}); pick it in GNOME's Sound settings."),
+                        f"({{}}); pick it in {settings}."),
         selected=f"{eq} is the default output now.",
         not_selected=(f"{eq} did not become the default output. Picking it failed ({{}}), so "
                       f"the {short} keeps its own volume; {again}"),
@@ -169,12 +184,19 @@ def words(model: HeadsetModel) -> Words:
         watch_unread=pipewire_client.UNREAD.format(watch),
         watch_ended=(f"{watch}: pw-dump --monitor ended ({{}}), so a {short} plugged back in "
                      "stays at its own volume"),
+        watch_folder_refused=(f"{watch}: it ends, so a {short} plugged back in stays at its "
+                              "own volume: {}"),
         watch_back=f"{watch}: the {short} is back. {{}}",
-        watch_no_chain=(f"{watch}: {eq}'s unit was not read ({{}}), so it watches for the "
-                        f"{short} {spatial.DESCRIPTION} plays to"),
+        watch_no_chain=(f"{watch}: {eq}'s unit was not read ({{}}), so it watches the "
+                        f"{short} plugged in last"),
         watching=f"{eq}, watching for the {short}",
         not_set_live=(f"the change is saved, but was not set on {eq} ({{}}); it applies at its "
                       "next start"),
+        outputs_stayed=(f"{outputs.DESCRIPTION} still played through {eq} after "
+                        f"{pipewire_client.SETTLE:g} s; {paused}"),
+        outputs_not_moved=f"{outputs.DESCRIPTION} were not moved off {eq} ({{}}); {paused}",
+        outputs_unread=(f"Whether {outputs.DESCRIPTION} left {eq} could not be read ({{}}); "
+                        f"{paused}"),
         not_named=f"the {short}'s output '{{}}' cannot be named in the chain's conf",
         waiting=f"on, waiting for the {short}",
         unlinked=f"on, but not linked to the {short}",

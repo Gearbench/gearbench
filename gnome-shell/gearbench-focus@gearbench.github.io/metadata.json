@@ -2,7 +2,7 @@
   "uuid": "gearbench-focus@gearbench.github.io",
   "name": "Gearbench focus",
   "description": "Tells Gearbench which program's window has focus, so a game profile can follow a native Wayland window as well as an X11 one. It sends the window's process id and nothing else.",
-  "shell-version": ["50"],
+  "shell-version": ["50", "51"],
   "session-modes": ["user", "unlock-dialog"],
   "url": "https://github.com/gearbench/gearbench"
 }

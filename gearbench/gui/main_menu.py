@@ -1,9 +1,5 @@
-"""The window's primary menu: Game profiles, Import from G HUB, Import pack, Reload from disk,
-the Tray icon check and About.
-
-This part owns the menu, the button that opens it, the Tray icon action with the daemon's
-switch behind it, and the About dialog. Its window builds it, puts the button in its header
-and hands it each status reply's `tray`.
+"""The window's primary menu and the button that opens it, its Tray icon check with the
+daemon's switch behind it, and the About dialog.
 """
 
 from __future__ import annotations
@@ -17,6 +13,7 @@ from ..sni import REGISTERING
 from ..wording import home_shortened, reason
 from . import import_dialog, pack_dialog
 from .about import about_dialog, gather
+from .keyboard_page import confirm_reload
 from .style import toast_note
 
 if TYPE_CHECKING:                       # pragma: no cover
@@ -30,12 +27,7 @@ MAIN_MENU = "Main menu"
 
 
 class MainMenu:
-    """The header's menu and what its items do.
-
-    `window` takes the menu's actions, and its Game profiles dialog, its worker, its `call`,
-    its `resync` and its Keyboard tab's reload are the ones the items use; the import's file
-    chooser, the pack and the About dialog open over it.
-    """
+    """The header's menu and what its items do."""
 
     def __init__(self, window: Window) -> None:
         self.win = window
@@ -62,12 +54,12 @@ class MainMenu:
             ("import-ghub", lambda *_a: import_dialog.choose_file(self.win)),
             ("import-pack", lambda *_a: pack_dialog.open_pack(self.win)),
             # The files serve every device, so the menu has it for a window with no keyboard.
-            ("reload", lambda *_a: self.win.keyboard.on_reload(None)),
+            ("reload", lambda *_a: confirm_reload(self.win)),
             ("about", lambda *_a: self.about()),
         ])
         self.win.add_action(self.tray_action)
         self.model = Gio.Menu()
-        self.model.append("Game profiles…", "win.game-profiles")
+        self.model.append("Game profiles", "win.game-profiles")
         self.model.append("Import from G HUB…", "win.import-ghub")
         self.model.append("Import pack…", "win.import-pack")
         self.model.append("Reload from disk…", "win.reload")
@@ -97,7 +89,7 @@ class MainMenu:
                      else "")
             # Pasted into a public issue, as debug_info's text is: no login in a path.
             dialog.set_debug_info(home_shortened(
-                f"The debugging information could not be gathered: {where}{reason(result)}."))
+                f"The debugging information could not be gathered: {where}{reason(result)}"))
         self.win.worker.run(gather, gathered)
         dialog.present(self.win)
 
@@ -132,9 +124,9 @@ class MainMenu:
     def on_tray(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
         """Send the check and read it back, so a refusal puts it back. A click is
         compared with the check as shown, not the daemon's last word, so a second click
-        before the readback is sent too; the worker's order makes the last one win. A status
-        read before a click lands, and the refusal of one with a later click unanswered, leave
-        the check as clicked: the readback after the last click sets it."""
+        before the readback is sent too; the worker's order makes the last one win. A refusal
+        with a later click unanswered leaves the check as clicked: the readback after the last
+        click sets it."""
         wanted = value.get_boolean()
         # Disabled until the first status (show_tray). A state: __init__ made the action with one.
         if (not action.get_enabled()

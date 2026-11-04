@@ -19,6 +19,7 @@ from ...mouse import (
 from ...onboard import entry_job
 from ...profiles import mouse_color_json
 from ...report import untested
+from ...sensor import MouseError
 from ...wording import product_route
 from ..shared import attached_entry
 from .attached import MOUSE_POLL_RETRY, AttachedMouse, effect_names
@@ -50,10 +51,11 @@ class MouseReply:
 
     def status_entries(self) -> list[dict]:
         """`status`'s `mice_attached`: each mouse attached (shared.attached_entry), with its
-        route by its product id."""
-        return [attached_entry(m.name, str(m.dev.path), product_route(m.product, CABLED_IDS),
-                               m.battery, m.battery_at, answering=not m.silent,
-                               battery_found="battery" in m.mouse.capabilities)
+        route by its product id, and its firmware version as its connect read it."""
+        return [{**attached_entry(m.name, str(m.dev.path),
+                                  product_route(m.product, CABLED_IDS), m.battery, m.battery_at,
+                                  self.mice.battery.notices_of(m), answering=not m.silent),
+                 "firmware": m.mouse.firmware}
                 for m in self.mice.attached]
 
     def _cmd_mouse(self, request: dict) -> dict:
@@ -61,9 +63,13 @@ class MouseReply:
         # reconnects, pulled forward (poll_for_mouse). `ask` false is a client's request for
         # the last reading with nothing sent (reading_for). `device` answers for the attached
         # mouse it names by model or product id (named_in) and leaves the selection as it is;
-        # one naming no attached mouse is a MouseError (asked).
-        current = (self.mice.current if request.get("device") is None
-                   else self.mice.mouse_for(request, write=False))
+        # one naming no attached mouse is a MouseError (asked), and pulls the retry forward too.
+        try:
+            current = (self.mice.current if request.get("device") is None
+                       else self.mice.mouse_for(request, write=False))
+        except MouseError:
+            self.mice.poll_for_mouse()
+            raise
         if current is None:
             self.mice.poll_for_mouse()
             # The selected mouse's bindings, kept while it is away (Mice.selected), so the Mouse
@@ -79,6 +85,7 @@ class MouseReply:
             "read_at": current.read_wall,
             "battery": current.battery,
             "battery_at": current.battery_at,
+            **self.mice.battery.notices_of(current).notices_reply(),
             "ok": True,
             "device": str(current.dev.path),
             "name": current.name,
@@ -89,10 +96,15 @@ class MouseReply:
             "flash_refused": current.mouse.flash_refusal,
             # Why the enable write is refused, for the front ends to leave it out.
             "enable_refused": current.enable_refused,
+            # Why the daemon never switches this mouse to profile 1 (Mouse.switch_refusal), for
+            # `mouse`'s running line, or None; None too where profile 1 was never read.
+            "switch_refused": current.mouse.switch_refusal() if profile is not None else None,
             # Whether `mouse_rate` sets the rate live alone (Dpi.live_rate).
             "rate_live": current.sets_rate_live,
             # A model not yet run on, whose note asks for a device report (report.untested).
             "untested": untested(current.product),
+            # As its connect read it: nothing is sent for it here (Mouse.firmware).
+            "firmware": current.mouse.firmware,
             # Every attached mouse, for a choice, keyed by product id as the CLI reads it: two of
             # one model would collide.
             "devices": [{"product": f"{m.product:04x}", "name": m.name,
@@ -142,9 +154,12 @@ class MouseReply:
 
     def model_bindings(self, product: int) -> dict:
         """The `mouse` reply's `bindings` of mouse `product`'s model, each model's buttons bound
-        apart, and that model (mouse.model_key) as `bindings_model`."""
+        apart, its `shift_bindings`, those of its buttons bound on the G-Shift layer alone, and
+        that model (mouse.model_key) as `bindings_model`."""
         model = model_key(product)
-        return {"bindings": self.d.games.mouse_bindings(model), "bindings_model": model}
+        return {"bindings": self.d.games.mouse_bindings(model),
+                "shift_bindings": self.d.games.mouse_shift_bindings(model),
+                "bindings_model": model}
 
     def button_table(self, attached: AttachedMouse) -> dict | None:
         """The `mouse` reply's `button_table`: the model's buttons in display order, each with
@@ -205,11 +220,14 @@ class MouseReply:
                 or attached.mouse.flash_unknown)
 
     def keep_reading(self, attached: AttachedMouse, fresh: dict) -> None:
-        """Keep what one reading of a mouse said, for `mouse` to answer from."""
+        """Keep what one reading of a mouse said, for `mouse` to answer from, and its DPI, where
+        it has one, for known_dpi (AttachedMouse.on_dpi)."""
         attached.reading = {key: fresh.get(key) for key in MOUSE_READINGS}
         attached.reading["mode"] = (fresh.get("onboard") or {}).get("mode")
         # The mode the daemon counted it in (reading_due).
         attached.reading["host"] = attached.host
+        if fresh.get("dpi") is not None:
+            attached.on_dpi(fresh["dpi"])
         attached.read_at = time.monotonic()
         attached.read_wall = round(time.time())
         if fresh.get("battery") is not None:

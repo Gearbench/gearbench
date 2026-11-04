@@ -13,8 +13,10 @@ from .setting import SWITCH, Setting
 ID = 0x0618
 WORDS = "eco mode"
 READ, WRITE = 0, 1
+#: Its key, the socket's word for it.
+KEY = "eco_mode"
 
 
 def setting() -> Setting:
-    return Setting("eco_mode", WORDS, ID, read=READ, at=0, write=WRITE, before=b"",
+    return Setting(KEY, WORDS, ID, read=READ, at=0, write=WRITE, before=b"",
                    wire=(0x00, 0x01), names=SWITCH)

@@ -1,20 +1,21 @@
-"""The mouse tab. It polls the daemon on its own 5 s timer, with its own re-entry guard."""
+"""The Mouse tab. The window's 5 s mouse poll (polls.Polls) calls tick, which reads the mouse
+unless a drag is under way or its last read is still out."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from functools import partial
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol
 
 from gi.repository import Adw, GLib, GObject, Gtk
 
 from ..battery import kept_at
-from ..config import MOUSE_ACTIONS, MOUSE_BUTTONS, MOUSE_LABELS, format_color, parse_color
+from ..config import MOUSE_ACTIONS, MOUSE_BUTTONS, MOUSE_LABELS, NOTHING, format_color, parse_color
 from ..keyboard import followed
 from ..mouse import (
     CABLED_IDS,
     DPI_WRITE_WAIT,
     GEARBENCH_LIGHTING,
+    HOST_SWITCH_WAIT,
     OWN_LIGHTING,
     PROFILE_WRITE_WAIT,
     WIDEST_DPI_RANGE,
@@ -26,9 +27,16 @@ from ..mouse import (
 from ..sensor import range_words, reply_range
 from ..settings_files import ConfigError
 from ..wording import capitalized
-from .binding_rows import binding_row, binding_words, read_pick, show_binding
+from .binding_labels import NOTHING_ACTION, SHARED_ACTIONS, SHARED_TIPS
+from .binding_rows import (
+    LayerRows,
+    binding_words,
+    bound_toast,
+    title_binding_row,
+    undo_offered,
+)
 from .color import ColorPicker, SavedColors
-from .dialogs import CaptureDialog
+from .device_rows import show_gone, status_rows
 from .onboard_card import OnboardCard
 from .stages_card import StagesCard
 from .style import (
@@ -38,9 +46,11 @@ from .style import (
     EFFECT,
     FOLLOW,
     GEARBENCH_LIGHTING_SHOWN,
+    LIGHTING_HOLDS,
     LIGHTS_OWN,
     MOUSE_ASLEEP,
     MOUSE_TAB,
+    NOT_FOUND,
     NOT_READ,
     OWN_LIGHTING_SHOWN,
     SAVING_GAME,
@@ -48,24 +58,28 @@ from .style import (
     SYNC_HELP,
     WRITING_PROFILE,
     DeviceView,
+    NoticesRow,
     Switcher,
     effect_label,
     effect_tips,
     explain,
+    firmware_row,
     header_spinner,
     holds_focus,
+    no_color_line,
     offer,
     route_text,
     set_dot,
     show_battery,
+    show_firmware,
     show_header_spinner,
     show_untested,
-    status_rows,
     toast_note,
     untested_row,
 )
 from .tips import explain_choices
 from .worker import (
+    SPIN_SETTLE_MS,
     Call,
     DaemonWorker,
     LoadingGuard,
@@ -95,25 +109,34 @@ if TYPE_CHECKING:                       # pragma: no cover
                      appearance: Adw.ResponseAppearance, request: dict,
                      layer: dict | None = None, group: str = "onboard") -> None: ...
 
-#: The binding of a button that does nothing: what the row's Nothing sends.
-UNBOUND = "none"
-#: A button row's built-in actions, in config.MOUSE_ACTIONS order.
-MOUSE_CHOICES = [(UNBOUND, "Nothing"), ("back", "Back"), ("forward", "Forward"),
+#: A button row's built-in actions, in config.MOUSE_ACTIONS order, then
+#: binding_labels.SHARED_ACTIONS.
+MOUSE_CHOICES = [NOTHING_ACTION, ("back", "Back"), ("forward", "Forward"),
                  ("dpi-shift", "DPI shift"), ("dpi-up", "DPI up"),
-                 ("dpi-down", "DPI down"), ("dpi-cycle", "DPI cycle")]
-#: One tooltip line per entry, in the rows' order: MOUSE_CHOICES, then binding_rows.CHOICES.
-MOUSE_TIPS = ("The button does nothing.",
-              "Browser back, sent through the virtual mouse.",
-              "Browser forward, sent through the virtual mouse.",
-              "Drops to the shift stage while held.",
-              "Steps up through the mouse's DPI stages.",
-              "Steps down through the mouse's DPI stages.",
-              "Steps up through the mouse's DPI stages, from the last back to the first.",
+                 ("dpi-down", "DPI down"), ("dpi-cycle", "DPI cycle"), *SHARED_ACTIONS]
+#: The tooltip line of each of MOUSE_CHOICES, by its binding.
+_ACTION_TIPS = {NOTHING: "The button does nothing.",
+                "back": "Browser back, sent through the virtual mouse.",
+                "forward": "Browser forward, sent through the virtual mouse.",
+                "dpi-shift": "Goes to the shift stage while held.",
+                "dpi-up": "Steps up through the mouse's DPI stages.",
+                "dpi-down": "Steps down through the mouse's DPI stages.",
+                "dpi-cycle": ("Steps up through the mouse's DPI stages, from the last back to "
+                              "the first."),
+                **SHARED_TIPS}
+#: One tooltip line per entry, in the rows' order: MOUSE_CHOICES', then binding_rows.CHOICES'.
+#: Looked up by binding, so a reorder keeps each tip on its action, and an action added
+#: with no tip fails at import.
+MOUSE_TIPS = (*(_ACTION_TIPS[value] for value, _label in MOUSE_CHOICES),
               "Pick a key or a combination for this button.",
               "Pick one of your macros for this button.")
 
-#: The DPI row's (low, high) while the shown mouse has not reported its sensor's.
-DPI_RANGE = WIDEST_DPI_RANGE
+#: The Color picker's line under an effect that takes a color; under one that takes none it is
+#: grayed out with the Keyboard tab's line (style.no_color_line).
+PICKER_HELP = "Live on the mouse as you drag"
+#: The DPI row's subtitle while it holds the mouse's DPI: where the DPI goes, as the Report
+#: rate row's says where its rate goes (stages_card.RATE_HELP).
+DPI_HELP = "Set live, not written to profile 1"
 #: The DPI row's step while the shown mouse has not reported its sensor's, in DPI: that of
 #: the G502 X PLUS's and the G305's sensors, which list one step throughout, and of the G203
 #: LIGHTSYNC's in G HUB's description.
@@ -121,9 +144,6 @@ DPI_STEP = 50
 #: How many steps Page Up and Page Down move the DPI row, as they move the A50's frequency
 #: rows ten.
 DPI_PAGE_STEPS = 10
-#: The DPI row's wait after its last change before it writes, in milliseconds: a run of clicks
-#: on + or of arrow keys is one write to the mouse, as on the A50's band rows.
-DPI_SETTLE_MS = 600
 #: The toast after a DPI write the daemon snapped to the sensor's step: the DPI it took.
 DPI_SNAPPED = "DPI snapped to {}"
 
@@ -136,10 +156,10 @@ FACTORY_BINDINGS_DONE_FOR = "The {}'s buttons are back to their factory bindings
 
 #: The Host mode row's subtitle, by state. On, the Onboard profile 1 group's description
 #: says what the mouse runs once Gearbench stops; on a model whose writes the daemon refuses,
-#: that writes to profile 1 wait for a test (style.PROFILE_WRITES_WAIT).
+#: that writes to onboard profile 1 wait for a test (style.PROFILE_WRITES_WAIT).
 HOST_ON = "Gearbench drives the buttons, stages and rate while it runs"
-HOST_OFF = ("The mouse runs onboard profile 1; G4 to G9 reach Gearbench if it has them "
-            "enabled, below")
+HOST_OFF = ("The mouse runs onboard profile 1; G4 to G9 reach Gearbench if enabled under "
+            "Programmable buttons, below")
 #: In place of HOST_OFF on a mouse whose event node is not read, whose buttons reach Gearbench
 #: in host mode alone: the Buttons group says what they do meanwhile.
 HOST_OFF_ALONE = "The mouse runs onboard profile 1"
@@ -175,12 +195,15 @@ BUTTONS_HELP = "What G4 to G9 do while Gearbench runs"
 #: The same on a mouse whose buttons reach Gearbench in host mode alone.
 BUTTONS_HOST_HELP = "The bindings work in host mode only"
 #: The Lighting group's description for a mouse that waits to claim its lighting, by whose
-#: lighting it shows (`mouse`'s `lighting_shown`); none for another mouse.
+#: lighting it shows (`mouse`'s `lighting_shown`); LIGHTING_HOLDS for another mouse.
 LIGHTING_SHOWN_HELP = {OWN_LIGHTING: OWN_LIGHTING_SHOWN,
                        GEARBENCH_LIGHTING: GEARBENCH_LIGHTING_SHOWN}
 #: The tooltip of Show its own lighting, which such a mouse has under Lighting: its color
 #: and effect go, as color sync turned off gives them back with none set.
 LIGHTS_OWN_HELP = "The lighting the mouse shows without Gearbench"
+#: The toast after the follow switch (sync_row) turned on while no mouse with lighting is
+#: attached (`mouse_sync`'s `mouse_lights` false): the daemon saved the switch.
+SYNC_SAVED = "Saved; the mouse follows once it is connected"
 #: The status page's titles until a mouse is seen: before the first reply, and after the
 #: daemon refuses `mouse`, over its reason (DeviceView).
 LOOKING = "Looking for the mouse…"
@@ -193,7 +216,7 @@ SET_LIVE = "Report rate set live; the onboard profile keeps its own"
 WRITTEN_LINES = {"game_profile": PROFILE_SAVED, "live": SET_LIVE}
 #: The toast of a rate the mouse took live whose reply has no note (Mouse.set_report_rate's
 #: "live"), by the rate.
-RATE_TAKEN_LIVE = "Report rate set to {} Hz live (the mouse is in host mode)"
+RATE_TAKEN_LIVE = "Report rate set to {} Hz live"
 
 
 class MousePage:
@@ -243,12 +266,14 @@ class MousePage:
         #: Each effect's tooltip on the Effect row, changed in place with the list
         #: (explain_choices reads it as an entry is drawn).
         self._effect_tips = effect_tips(self._effects)
-        self.rows: dict[str, Adw.ComboRow] = {}
-        #: Each button row's Change… button, shown while the row is on Keystroke… or Macro…: an
-        #: Adw.ComboRow only notifies a change, so picking the entry again does nothing.
-        self.change_buttons: dict[str, Gtk.Button] = {}
-        #: Each button's binding as the daemon last said it, to put a row back by at once.
-        self._bindings: dict[str, str] = {}
+        #: The Buttons group's rows: each button's binding as the daemon last said it, to put
+        #: a row back by at once, and its binding on the G-Shift layer, only where it has one
+        #: (the reply's `shift_bindings`). `rows` and `change_buttons` are its own.
+        self.bindings = LayerRows(self._loading, MOUSE_CHOICES, MOUSE_TIPS,
+                                  "Pick another key or macro for this button", self._bind,
+                                  self._capture, lambda: self._parent.outputs.balance_unheard,
+                                  self._idle_line)
+        self.rows, self.change_buttons = self.bindings.rows, self.bindings.change_buttons
         #: Each button's label and default binding on the shown mouse's model, from the reply's
         #: `button_table`, and the model's name.
         self._labels: dict[str, str] = dict(MOUSE_LABELS)
@@ -266,7 +291,7 @@ class MousePage:
         #: The DPI the mouse has: the one a reply last put in the row, or a DPI write's answer
         #: that found the row the user's (_send_dpi); None while it is Not read.
         self._dpi_shown: int | None = None
-        #: The DPI row's write once its changes settle (DPI_SETTLE_MS), and how many of its
+        #: The DPI row's write once its changes settle (SPIN_SETTLE_MS), and how many of its
         #: writes are unanswered: either holds the row (_dpi_held).
         self._dpi_settle = Settle(self._send_dpi)
         self._dpi_unanswered = 0
@@ -287,6 +312,10 @@ class MousePage:
         #: of it are unanswered, which hold the switch (show_dpi_notices).
         self.dpi_notices = False
         self._notices_unanswered = 0
+        #: How many clicks of Host mode and of the follow switch are unanswered, which hold
+        #: their switch (show_host, _show_lighting).
+        self._host_unanswered = 0
+        self._sync_unanswered = 0
         #: The product ids behind the switcher's buttons, in their order.
         self._devices: list[str] = []
         #: The DPI stages group with the Report rate row, and the Onboard profile 1 group.
@@ -324,12 +353,15 @@ class MousePage:
         return toolbar
 
     def _status_group(self) -> Adw.PreferencesGroup:
-        """Which mouse this is and whether it is there, for a model not yet run on the row
-        that asks for a device report from it, and the Host mode switch."""
+        """The mouse's name and state, its battery, the note for a model not yet tested,
+        its battery notices, its firmware version, and the Host mode switch."""
         # Retitled from the reply: which mouse this is is unknown until one answers.
         status = self.status_group = Adw.PreferencesGroup(title=MOUSE_TAB)
         self.state_row, self.state_dot, self.battery_row, self.battery_icon = status_rows(status)
         self.untested_row = untested_row(status, self._toast)
+        # After the untested note, which stays third (the owner's decision of 2026-10-22).
+        self.notices = NoticesRow(status, self._call)
+        self.firmware_row = firmware_row(status)
         # The daemon's mouse_host_mode, shown for a mouse whose button spy HOST mode drives
         # (show_host). A daemon setting, so not a device row: it stays usable while the
         # mouse does not answer, which gets the switch once it does. Not markup: the subtitle
@@ -355,9 +387,9 @@ class MousePage:
         # with GTK 4.22.4, the owner's decision of 2026-10-23). One typed outside the range,
         # or a word, puts back the DPI shown (IF_VALID), where GTK's default would send the
         # nearer end, and for a word the lowest.
-        low, high = DPI_RANGE
+        low, high = WIDEST_DPI_RANGE
         self.dpi_row = Adw.SpinRow(
-            title="DPI", update_policy=Gtk.SpinButtonUpdatePolicy.IF_VALID,
+            title="DPI", subtitle=DPI_HELP, update_policy=Gtk.SpinButtonUpdatePolicy.IF_VALID,
             adjustment=Gtk.Adjustment(lower=low, upper=high, value=low, step_increment=DPI_STEP,
                                       page_increment=DPI_STEP * DPI_PAGE_STEPS))
         self.dpi_row.connect("notify::value", self.on_dpi)
@@ -384,7 +416,7 @@ class MousePage:
         self.effect_row.connect("notify::selected", self.on_effect)
         light.add(self.effect_row)
         self.picker = ColorPicker(self._preview, self._commit, self._toast,
-                                  subtitle="Live on the mouse as you drag")
+                                  subtitle=PICKER_HELP)
         self.saved = SavedColors(self.picker, self._parent)
         light.add(self.picker.row)
         # No undo sign: it hands the lights over and puts no value back, as the headset's row.
@@ -398,18 +430,16 @@ class MousePage:
         """What G4 to G9 do, a row each."""
         buttons = self.buttons_group = Adw.PreferencesGroup(title="Buttons",
                                                             description=BUTTONS_HELP)
-        # Which layer a binding is written to, as the Keyboard tab says it:
-        # the loaded game profile's, or the M profile's. Not markup.
-        self.editing_row = Adw.ActionRow(title="Editing", use_markup=False)
+        # The Layer row first in the group, where the Keyboard tab's sits under Bind G keys:
+        # no row of this group turns the bindings on (the owner's decision of 2026-10-28).
+        # The Editing row under it says which layer a binding is written to, as the Keyboard
+        # tab says it: the loaded game profile's, or the M profile's.
+        self.layer_row, self.editing_row = self.bindings.layer_rows()
+        self.layer_toggles = self.bindings.layer_toggles
+        buttons.add(self.layer_row)
         buttons.add(self.editing_row)
         for name in MOUSE_BUTTONS:
-            row, change = binding_row(MOUSE_LABELS[name], MOUSE_CHOICES, MOUSE_TIPS,
-                                      "Pick another key or macro for this button",
-                                      partial(self.on_change, name))
-            row.connect("notify::selected", self.on_binding, name)
-            self.rows[name] = row
-            self.change_buttons[name] = change
-            buttons.add(row)
+            buttons.add(self.bindings.add(name, MOUSE_LABELS[name]))
         self.defaults_row = Adw.ButtonRow(title=FACTORY_BINDINGS,
                                           start_icon_name="edit-undo-symbolic",
                                           tooltip_text=FACTORY_BINDINGS_HELP)
@@ -432,9 +462,10 @@ class MousePage:
             self.profile_banner.set_title("\n".join(lines))
         self.profile_banner.set_revealed(bool(lines))
 
-    def set_editing(self, text: str) -> None:
-        """Say which layer the button bindings are written to."""
-        self.editing_row.set_title(text)
+    def set_editing(self, text: str, line: str) -> None:
+        """Say which layer the button bindings are written to, and how G-Shift is held, the
+        Layer row's `line` (LayerRows.set_editing)."""
+        self.bindings.set_editing(text, line)
 
     def on_bind_defaults(self, _row: Adw.ButtonRow | None) -> None:
         """Put every button back, behind a confirmation: it discards the lot."""
@@ -448,8 +479,8 @@ class MousePage:
         explain(dialog, paragraphs=(
             f"In {where}, the {self._name}'s buttons return to their factory bindings"
             + (f": {defaults}." if defaults else "."),
-            ("Anything bound to them, macros included, is replaced. Another mouse model's "
-             "buttons keep theirs."),
+            ("Anything bound to them, macros included, is replaced. The G-Shift layer and "
+             "another mouse model's buttons keep theirs."),
         ))
         layer, product = named_layer(win.layer), self._product
         offer(dialog, "factory", "Use factory bindings", Adw.ResponseAppearance.DESTRUCTIVE,
@@ -552,13 +583,11 @@ class MousePage:
         tab says it: a toast would repeat it.
         """
         self.ok = False
-        set_dot(self.state_dot, False)
         # A mouse gone has nothing to come back to, as on the Keyboard tab.
         self.away_banner.set_revealed(False)
-        self.state_row.set_subtitle(capitalized(detail))
-        # The node and the battery reading were the gone mouse's, as the Keyboard tab has it.
-        self.state_row.set_tooltip_text(None)
-        show_battery(self.battery_row, self.battery_icon, None, gone=True)
+        show_gone(self.state_row, self.state_dot, self.battery_row, self.battery_icon,
+                  self.notices, detail)
+        show_firmware(self.firmware_row, None)
         self.dpi_row.set_sensitive(False)
         self._set_writing(self.writing)
         self._apply_sync_state()
@@ -580,7 +609,7 @@ class MousePage:
             self._failed(unreachable(info), DAEMON_WAIT)
             return
         if not info.get("ok"):
-            self._refusal = str(info.get("error", "not connected"))
+            self._refusal = str(info.get("error") or NOT_FOUND)
             self._failed(self._refusal)
             # The mice the last answer listed may be gone, every one when no mouse is attached:
             # the next answer lists them again.
@@ -590,7 +619,7 @@ class MousePage:
             # profile. Taken for the model the rows show alone.
             shown = model_key(int(self._product, 16)) if self._product else None
             if isinstance(info.get("bindings"), dict) and info.get("bindings_model") == shown:
-                self._refresh_bindings(info["bindings"])
+                self._refresh_bindings(info["bindings"], info.get("shift_bindings"))
             return
         self.view.found()
         previous, self._product = self._product, str(info.get("product") or "") or None
@@ -609,7 +638,7 @@ class MousePage:
         # keeps some off. A poll during a write leaves them off until it ends.
         self._set_writing(self.writing)
         self.show_button_table(info.get("button_table"))
-        self._refresh_bindings(info.get("bindings") or {})
+        self._refresh_bindings(info.get("bindings") or {}, info.get("shift_bindings"))
         self._apply_sync_state()
 
     def _show_answering(self, info: dict) -> None:
@@ -627,20 +656,21 @@ class MousePage:
     def _show_status(self, info: dict) -> None:
         """The Status row's route and node, and the Battery row."""
         # The route rather than /dev/hidrawN, whose number floats; the node
-        # goes in the tooltip.
+        # goes in the tooltip and the description (StatusRow).
         device = info.get("device")
         self.state_row.set_subtitle(
             (route_text(info.get("product"), CABLED_IDS) or str(device)) if self.answering
             else MOUSE_ASLEEP)
-        self.state_row.set_tooltip_text(str(device) if device else None)
+        self.state_row.show_node(str(device) if device else None)
         # Its last reading, and while the mouse does not answer, when it was taken.
-        show_battery(self.battery_row, self.battery_icon, info.get("battery"), kept_at(info))
+        show_battery(self.battery_row, self.battery_icon, info.get("battery"), kept_at(info),
+                     preset=info.get("battery_notices"))
 
     def _show_dpi(self, info: dict, force: bool) -> None:
         """The DPI row: the reply's DPI over the sensor's range and step, unless the row is
         the user's (_dpi_held), and sensitive while the mouse answers and its DPI was read.
         A reading the reply leaves out is kept for the mouse the row shows, and cleared for
-        another mouse or on `force`: the range is DPI_RANGE, and the DPI Not read."""
+        another mouse or on `force`: the range is WIDEST_DPI_RANGE, and the DPI Not read."""
         if not self._dpi_held(force):
             fresh = force or self._product != self._dpi_for
             shown = reply_range(info.get("dpi_range"))
@@ -666,12 +696,12 @@ class MousePage:
                 and row.get_text() != f"{row.get_value():.0f}")
 
     def _show_dpi_range(self, shown: tuple[int, int, list[int]] | None) -> None:
-        """The DPI row's range and step: the sensor's range (sensor.reply_range), or DPI_RANGE
-        where the reply gives none, in its coarsest step, or DPI_STEP for no step above 0. On
-        a sensor whose step grows with the DPI, a click on + by the finest step would snap back
-        to the DPI it left in a coarser band (sensor.DpiRange.clamp); a DPI typed between the
-        row's steps is sent as typed, and the daemon snaps it."""
-        low, high, steps = shown or (*DPI_RANGE, [])
+        """The DPI row's range and step: the sensor's range (sensor.reply_range), or
+        WIDEST_DPI_RANGE where the reply gives none, in its coarsest step, or DPI_STEP for no
+        step above 0. On a sensor whose step grows with the DPI, a click on + by the finest
+        step would snap back to the DPI it left in a coarser band (sensor.DpiRange.clamp); a
+        DPI typed between the row's steps is sent as typed, and the daemon snaps it."""
+        low, high, steps = shown or (*WIDEST_DPI_RANGE, [])
         step = max(steps, default=0) or DPI_STEP
         # The range and the sensor's steps in a tooltip: the row shows neither.
         self.dpi_row.set_tooltip_text(range_words(shown) if shown else None)
@@ -685,11 +715,11 @@ class MousePage:
                 adjustment.set_page_increment(step * DPI_PAGE_STEPS)
 
     def _put_dpi(self, dpi: int | None) -> None:
-        """`dpi` in the DPI row as the mouse's, or for None Not read, with no number: one left
-        there would be the last mouse's."""
+        """`dpi` in the DPI row as the mouse's, under DPI_HELP, or for None Not read in
+        DPI_HELP's place, with no number: one left there would be the last mouse's."""
         row = self.dpi_row
         self._dpi_shown = dpi
-        row.set_subtitle(NOT_READ if dpi is None else "")
+        row.set_subtitle(NOT_READ if dpi is None else DPI_HELP)
         if dpi is None:
             row.set_text("")
             return
@@ -717,11 +747,12 @@ class MousePage:
         # An effect the list lacks leaves the row as it is: a ComboRow cannot select nothing.
         if current and effect in self._effects:
             self._loading.put_selected(self.effect_row, self._effects.index(effect))
-        if isinstance(info.get("sync_color"), bool):
+        # Not while a click of the switch is out: a reply asked for before it says the old value.
+        if isinstance(info.get("sync_color"), bool) and not self._sync_unanswered:
             self.set_sync(info["sync_color"])
         if current:
             shown = info.get("lighting_shown", "")
-            self.light_group.set_description(LIGHTING_SHOWN_HELP.get(shown))
+            self.light_group.set_description(LIGHTING_SHOWN_HELP.get(shown, LIGHTING_HOLDS))
             self._lighting_shown = shown if shown in LIGHTING_SHOWN_HELP else None
         # What the daemon last wrote to the mouse, unless a color was sent
         # since the reply was asked for, a drag is under way, a color is
@@ -757,7 +788,8 @@ class MousePage:
                    lambda reply: self.refresh(force=True) if reply else None)
 
     def show_capabilities(self, info: dict) -> None:
-        """Show the sections this device has, and hide the others.
+        """Show the sections this device has, and hide the others, the Firmware row among them
+        where the reply gives no version.
 
         The tab is built with every section, since which mouse is attached is unknown until one
         answers. Hidden, not insensitive: a grayed-out Lighting group on a mouse with no lights
@@ -768,6 +800,7 @@ class MousePage:
         # A group's title is markup, and the name is the daemon's.
         self.status_group.set_title(GLib.markup_escape_text(name))
         show_untested(self.untested_row, info.get("untested"))
+        show_firmware(self.firmware_row, info.get("firmware"))
         self.light_group.set_visible("lighting" in able)
         self.buttons_group.set_visible("buttons" in able)
         self.stages.show_able(able)
@@ -775,6 +808,8 @@ class MousePage:
         self.tuning_group.set_visible("dpi" in able or "report_rate" in able)
         self.dpi_row.set_visible("dpi" in able)
         self.battery_row.set_visible("battery" in able)
+        self.notices.show({"device": info.get("product")} if "battery" in able else None,
+                          info)
 
     def show_host(self, host: object, running: object = None, event_node: bool = True) -> None:
         """The Host mode row, from the reply's `host` as mouse.host_state reads it: shown for a
@@ -782,11 +817,14 @@ class MousePage:
         took, what waits for a mouse not answering, or, switched off, whether the mouse has
         left host mode. `running`, the reply's onboard.running_profile, names a profile other
         than 1 in place of profile 1, outside host mode. `event_node` False: the mouse's buttons
-        reach Gearbench in host mode alone, the reply's button_table.event_node."""
+        reach Gearbench in host mode alone, the reply's button_table.event_node. The switch
+        and its line stay as they are while a click of it is unanswered: a reply asked for
+        before the click gives the old value, and the read after the click says where it
+        landed."""
         host = host if isinstance(host, dict) else {}
         capable = bool(host.get("capable"))
         self.host_row.set_visible(capable)
-        if not capable:
+        if not capable or self._host_unanswered:
             return
         wanted, error = bool(host.get("wanted")), host.get("error")
         self._adopt(self.host_row, wanted)
@@ -818,19 +856,24 @@ class MousePage:
         if self._adopting:
             return
         wanted = row.get_active()
+        self._host_unanswered += 1
 
         def done(reply: dict | None) -> None:
+            self._host_unanswered -= 1
             if reply and reply.get("note"):
-                toast_note(self._toast, reply["note"], "Host mode did not take" if wanted
-                           else "Host mode did not end")
+                # Capitalized, as the banner and the tray say it: short_note does a cut line alone.
+                toast_note(self._toast, capitalized(reply["note"]),
+                           "Host mode did not take" if wanted else "Host mode did not end")
             self.refresh(force=True)
-        self._call({"command": "mouse_host_mode", "value": wanted}, done)
+        self._call({"command": "mouse_host_mode", "value": wanted}, done,
+                   timeout=HOST_SWITCH_WAIT)
 
     def show_button_table(self, table: object) -> None:
         """The button rows as the shown mouse's model has them (the reply's `button_table`):
-        a row for each of its buttons alone, under its label; and where their bindings do
-        nothing now (`idle`), each row grayed out with what profile 1 has the button do, and
-        the reason as the group's description. Without a table the rows stay as they
+        a row for each of its buttons alone, under its label, which names its Change… too
+        (title_binding_row); and where their bindings do nothing now (`idle`), each row
+        grayed out with what profile 1 has the button do, and the reason as the group's
+        description. Without a table the rows stay as they
         are: the group is hidden then (show_capabilities)."""
         if not isinstance(table, dict):
             return
@@ -839,35 +882,35 @@ class MousePage:
         idle = table.get("idle")
         self._idle = str(idle) if idle else None
         self._jobs = {name: str(b.get("onboard") or "") for name, b in shown.items()}
-        self._defaults = {name: str(b.get("default") or UNBOUND) for name, b in shown.items()}
+        self._defaults = {name: str(b.get("default") or NOTHING) for name, b in shown.items()}
         for name, row in self.rows.items():
             row.set_visible(name in shown)
             if name in shown:
                 self._labels[name] = str(shown[name].get("label") or MOUSE_LABELS[name])
-                row.set_title(self._labels[name])
+                title_binding_row(row, self.change_buttons[name], self._labels[name],
+                                  self.bindings.shift)
             row.set_sensitive(self._idle is None)
         # A group's description is markup, and the idle reason is the daemon's, naming the
         # mouse.
         self.buttons_group.set_description(
-            GLib.markup_escape_text(capitalized(self._idle) + ".")
+            GLib.markup_escape_text(capitalized(self._idle))
             if self._idle
             else BUTTONS_HELP if table.get("event_node") else BUTTONS_HOST_HELP)
 
-    def _refresh_bindings(self, bindings: dict[str, str]) -> None:
-        """Keep the daemon's bindings, and put each button's row on its binding (_show_held)."""
-        self._bindings = dict(bindings)
-        for name in self.rows:
-            self._show_held(name)
+    def _refresh_bindings(self, bindings: dict[str, str], shifted: object = None) -> None:
+        """Keep the daemon's bindings, and those on the G-Shift layer, `shifted`, unless it
+        is not an object of them, and put each button's row on its binding
+        (LayerRows.show_all)."""
+        self.bindings.base = dict(bindings)
+        if isinstance(shifted, dict):
+            self.bindings.shifted = {str(name): str(spec) for name, spec in shifted.items()}
+        self.bindings.show_all()
 
-    def _show_held(self, name: str) -> None:
-        """Put one button's row on what the daemon last said it holds (show_binding); on a
-        mouse whose bindings do nothing now, its subtitle says what profile 1 has it do."""
-        row = self.rows[name]
-        show_binding(self._loading, row, self.change_buttons[name],
-                     self._bindings.get(name, UNBOUND), MOUSE_CHOICES)
+    def _idle_line(self, name: str) -> str | None:
+        """The line under a button's row on a mouse whose bindings do nothing now: what
+        profile 1 has it do (LayerRows' `subtitle`); None elsewhere."""
         job = self._jobs.get(name)
-        if self._idle is not None and job:
-            row.set_subtitle(f"In profile 1: {job}")
+        return f"In profile 1: {job}" if self._idle is not None and job else None
 
     # -- writes -----------------------------------------------------------
 
@@ -878,9 +921,10 @@ class MousePage:
         or rate, or sets the report rate live alone, from a row of `group`: "tuning", "stages"
         or "onboard".
 
-        Locks the rows that could start a second write and spins the group's header until the
-        reply lands, then toasts its note, or the rate of a live write without one, and
-        re-reads the mouse: a stage edit can move its live DPI. `callback` gets the reply if
+        Locks the rows that could start a second write and spins the group's header; once the
+        reply lands it toasts its note, or the rate of a live write without one, and re-reads
+        the mouse: a stage edit can move its live DPI. The rows and the spinner wait for that
+        read; a round trip that raised gives them back at once. `callback` gets the reply if
         the write succeeded.
 
         The request names the mouse the last reply was about, or `product` for an input built
@@ -896,7 +940,10 @@ class MousePage:
             request = {**request, "layer": layer}
 
         def done(reply: dict | None) -> None:
-            self._set_writing(False)
+            # The rows and the spinner wait for the next `mouse` reply (_on_info): until it
+            # lands the stage dropdowns list the stages from before the write, and a pick
+            # there would send those back. The one worker sends that read after this write.
+            self.writing = False
             if reply is None:
                 # Refused, and said by the window: the rows go back to what the mouse holds.
                 self.refresh(force=True)
@@ -926,11 +973,11 @@ class MousePage:
 
     def on_dpi(self, _row: Adw.SpinRow, _p: GObject.ParamSpec) -> None:
         """The DPI changed, by a click, an arrow key or a number typed and taken: written once
-        the changes settle (DPI_SETTLE_MS), but not for a DPI a reply put there, or one typed
+        the changes settle (SPIN_SETTLE_MS), but not for a DPI a reply put there, or one typed
         that GTK takes as the window is destroyed, after the close (worker.take_typed)."""
         if self._loading.active or self._closed:
             return
-        self._dpi_settle.restart(DPI_SETTLE_MS)
+        self._dpi_settle.restart(SPIN_SETTLE_MS)
 
     def _send_dpi(self) -> None:
         """Write the DPI the row shows, to the mouse it was filled for (`_dpi_for`); nothing
@@ -968,58 +1015,30 @@ class MousePage:
         offer(dialog, key, label, appearance,
               lambda: self._write(request, product=product, layer=layer, group=group))
 
-    def on_binding(self, row: Adw.ComboRow, _p: GObject.ParamSpec, name: str) -> None:
-        if self._loading.active:
-            return
-        action, macros = read_pick(row, MOUSE_CHOICES)
-        if action is not None:
-            self._bind(name, action)
-            return
-        self._capture(name, macros=macros)
-
-    def on_change(self, name: str) -> None:
-        """Change… on a row already bound to a key or a macro, opened on the macro list for a
-        macro: picking the row's entry again does nothing (change_buttons)."""
-        self._capture(name, macros=read_pick(self.rows[name], MOUSE_CHOICES)[1])
-
     def _capture(self, name: str, macros: bool) -> None:
-        """Ask for a key or a macro for one button, and bind what comes back on the layer
-        the window was on when the dialog opened, for the mouse it showed: the polls go on
-        while it is open, and an M key, the tray or a program can move the window's
-        meanwhile, as another mouse's selection can move the rows. The dialog has no Unbind:
-        Nothing in the row clears a button."""
-        # The worker fills the dialog's macro list; a mouse button takes a macro as a G key does.
-        dialog = CaptureDialog(self._parent, self._labels[name], worker=self._worker,
-                               can_unbind=False)
-        picked = False
-        layer = named_layer(self._parent.layer)
-        product = self._product
+        """Ask for a key or a macro for one button (LayerRows.capture), and bind what comes
+        back on the layer the window was on when the dialog opened, for the mouse it showed:
+        another mouse's selection can move the rows meanwhile. A mouse button takes a macro
+        as a G key does."""
+        layer, product = named_layer(self._parent.layer), self._product
 
-        def done(picked_spec: str | None) -> None:
-            nonlocal picked
-            picked = True
-            # Set, a key or a macro picked: with no Unbind, the dialog hands on no None.
-            spec = cast("str", picked_spec)
+        def bind(spec: str, shift: bool) -> None:
             # The keyboard's Back and Forward keys capture as `back` and `forward`, which
             # a mouse binding reads as the mouse's back and forward: `key_back` is the key.
             if spec.lower() in MOUSE_ACTIONS:
                 spec = f"key_{spec.lower()}"
-            self._bind(name, spec, layer, product)
+            self._bind(name, spec, layer, product, shift)
+        # The bind is queued before the read at the close, so the read sees it.
+        self.bindings.capture(self._parent, self._worker, name, self._labels[name], macros,
+                              bind, self.refresh)
 
-        def closed(_dialog: Adw.Dialog) -> None:
-            # Canceling leaves the dropdown on "Keystroke…" or "Macro…" with
-            # nothing bound; put it back to what the daemon has. The bind is
-            # queued before this read, so the read sees it.
-            if not picked:
-                self._show_held(name)
-            self.refresh()
-        dialog.run(done, macros=macros)
-        dialog.connect("closed", closed)
-
-    def _bind(self, name: str, spec: str, layer: dict | None = None,
-              product: str | None = None) -> None:
-        """Bind one button of the mouse model the rows show, or `product`'s; the daemon
-        persists it.
+    def _bind(self, name: str, spec: str | None, layer: dict | None = None,
+              product: str | None = None, shift: bool | None = None) -> None:
+        """Bind one button of the mouse model the rows show, or `product`'s, on the G-Shift
+        layer with `shift` True, on Base with False, and with None on the one the Layer row
+        is on; the daemon persists it. On G-Shift `spec` None, Same as Base, clears its
+        binding, so it sends its base binding; any other binding, Nothing and the base
+        binding included, is bound there.
 
         `layer`, the one a capture dialog was opened on, or else the window's at the pick, is
         laid over the window's (Window.on_layer), so the daemon refuses the bind, and its
@@ -1028,6 +1047,7 @@ class MousePage:
         rather than at the next poll.
         """
         target = product or self._product
+        shift = self.bindings.shift if shift is None else shift
         if layer is None:
             # Named at the pick: an Undo sent after an M key or a game profile moved the
             # window's layer would put this layer's binding on that one.
@@ -1035,30 +1055,33 @@ class MousePage:
 
         def done(reply: dict | None) -> None:
             if reply is None:
-                self._show_held(name)
+                self.bindings.show_held(name)
                 self.refresh()
                 return
+            # What the layer holds now: a clear's reply is the base binding it falls to.
+            now = None if spec is None else reply["binding"]
             # A bind for a model the rows no longer show leaves them, and names it.
-            moved = not self._shows_model(target)
-            # What the button did, which Undo binds again on the same layer whenever the
-            # bind replaced or cleared it, as on the Keyboard tab and the G keys.
-            bound = reply["binding"]
-            was = None if moved else self._bindings.get(name)
-            if not moved:
-                self._bindings[name] = bound
-            self._show_held(name)
+            if moved := not self._shows_model(target):
+                was = None
+                self.bindings.show_held(name)
+            else:
+                # What the button did, which Undo binds again on the same layer whenever the
+                # bind replaced or cleared a binding, as on the Keyboard tab and the G keys.
+                was = self.bindings.take(name, shift, now)
             button = f"{reply['mouse']} {name.upper()}" if moved else self._labels[name]
-            self._toast(f"{button} unbound" if bound == UNBOUND
-                        else f"{button} → {binding_words(bound, MOUSE_CHOICES)}",
-                        undo=(lambda: self._bind(name, was, layer, target))
-                        if was not in (None, UNBOUND) and was != bound else None)
+            # Nothing picked on Base says Nothing, the entry's own word, as the G432's G keys do.
+            self._toast(bound_toast(button, shift, now, MOUSE_CHOICES),
+                        undo=(lambda: self._bind(name, was, layer, target, shift))
+                        if undo_offered(was, now, shift) else None)
         request = self._for_shown({"command": "mouse_bind", "key": name, "value": spec},
                                   target)
-        self._call({**request, "layer": layer}, done)
+        self._call({**request, "layer": layer, **({"shift": True} if shift else {})}, done)
 
     def on_effect(self, row: Adw.ComboRow, _p: GObject.ParamSpec) -> None:
         """Send the effect picked, and read the mouse back if it is refused:
-        the row stayed on what was refused."""
+        the row stayed on what was refused. The picker is grayed out or not for it at once,
+        a reply's pick included."""
+        self._show_picker()
         if self._loading.active:
             return
         index = row.get_selected()
@@ -1132,11 +1155,23 @@ class MousePage:
         lighting appears on a mouse that waits to claim its lighting alone (the reply's
         `lighting_shown`), and works with those controls while the mouse shows Gearbench's."""
         own = self.ok and self.answering and not self.sync
-        self.picker.row.set_sensitive(own)
+        self._show_picker()
         self.effect_row.set_sensitive(own)
         self.own_row.set_visible(self._lighting_shown is not None)
         self.own_row.set_sensitive(own and self._lighting_shown == GEARBENCH_LIGHTING)
         self.follow_keyboard()
+
+    def _show_picker(self) -> None:
+        """The picker on with the mouse's own color controls (_apply_sync_state) under an
+        effect that takes a color; under Off or one with no color of its own grayed out with
+        the Keyboard tab's line saying why (style.no_color_line), where a color would turn
+        the mouse to Static, unless the mouse follows the keyboard, whose color it shows."""
+        index = self.effect_row.get_selected()
+        effect = self._effects[index] if 0 <= index < len(self._effects) else None
+        no_color = None if self.sync else no_color_line(effect)
+        self.picker.row.set_subtitle(no_color or PICKER_HELP)
+        self.picker.row.set_sensitive(no_color is None and self.ok and self.answering
+                                      and not self.sync)
 
     def on_own(self, _row: Adw.ButtonRow) -> None:
         """Give the mouse its own lighting back, then read it again for whose it shows."""
@@ -1166,21 +1201,27 @@ class MousePage:
             self.refresh(ask=ask())
 
     def on_sync(self, row: Adw.SwitchRow, _p: GObject.ParamSpec) -> None:
-        """Send the switch; a refusal puts it back. Every click is sent, with
-        no loading guard, as on_dpi_notices does."""
+        """Send the switch and take the reply's value; a refusal puts it back. Every click is
+        sent, with no loading guard, and the switch stays as clicked while a later click is
+        unanswered, as on_dpi_notices does."""
         if self._adopting:
             return
         wanted = row.get_active()
+        self._sync_unanswered += 1
 
         def done(reply: dict | None) -> None:
+            self._sync_unanswered -= 1
+            if reply is not None:
+                self.sync = bool(reply.get("mouse_sync_color"))
+            # A later click still out is the user's last: its answer puts the switch right.
+            if not self._sync_unanswered:
+                self.set_sync(self.sync)        # a refusal puts the switch back
             if reply is None:
-                self.set_sync(self.sync)        # refused: put the switch back
                 return
-            self.set_sync(bool(reply.get("mouse_sync_color")))
             if not self.sync:
                 # Synced, the picker showed the keyboard's color; the mouse's
                 # own is only in a `mouse` reply.
                 self.refresh()
             if wanted and not reply.get("mouse_lights"):
-                self._toast("Saved; the mouse follows once it is connected")
+                self._toast(SYNC_SAVED)
         self._call({"command": "mouse_sync", "value": wanted}, done)

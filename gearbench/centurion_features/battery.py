@@ -6,7 +6,7 @@ event when it changes, in the same layout: a percent, a second percent, and a st
 HeadsetControl issue 581; Solaar's decipher_battery_centurion).
 
 The status is 0x1004's (battery.unified): 0 on battery, 1 and 2 charging, 3 full by
-Solaar's reading, which the A50 X answered docked and charging at 85 % in G HUB's captures.
+Solaar's reading, which the A50 X answered docked and charging at 85 % in G HUB's traffic.
 The first percent is the one read; the G325's owner found G HUB showing the second, 90 %
 where the first was 89 (issue 581), and the A50 X's base answered `52 55` where G HUB
 showed 85 %. Which is the one to show waits on a first connect.

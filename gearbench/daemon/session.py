@@ -17,6 +17,7 @@ from .shared import switch_value
 
 if TYPE_CHECKING:
     from . import Daemon
+    from .keyboard import Keyboard
 
 log = logging.getLogger("gearbench")
 
@@ -49,6 +50,15 @@ LOCKED_DARK_MS = 60_000
 #: Input this soon after the lights go down is the tail of what locked the
 #: screen (letting go of Super+L), not someone coming back.
 LOCK_SETTLE = 1.0
+
+#: What lights off when locked loses without python3-gi, logind or GNOME's idle monitor.
+NO_GI_FOR_LOCK = ("python3-gi is not installed, so the lights do not follow the screen lock "
+                  "or a suspend")
+NO_LOGIND_FOR_LOCK = ("logind is not reachable, so the lights do not follow the screen lock "
+                      "or a suspend")
+NO_IDLE_MONITOR_FOR_LOCK = ("GNOME's idle monitor is not reachable, so input while the screen "
+                            "is locked does not light the keyboard; a G, M or MR key or the "
+                            "unlock does")
 
 #: The two groups of waits on the desktop's idle time, each armed and dropped on its own, with
 #: its own user-active watch in Mutter: the lock's (input while locked, its dim and dark) and
@@ -102,7 +112,7 @@ class TransientNotice:
         # From the send: the Shell starts the banner's time when the post reaches it, later.
         replace_until = now + DPI_NOTICE_REPLACE
 
-        def done(notice: int | None) -> None:
+        def done(notice: int | None, _refused: bool) -> None:
             self._sending = False
             if notice is not None:
                 self._shown = notice
@@ -163,8 +173,8 @@ class Session:
         self._idle_serial = 0
         #: The whole desktop's idle level, keyboard and mouse alike: dim after idle_dim_after
         #: without input, dark idle_off_after later, lit at the next input; a synced mouse or
-        #: headset goes by it (Keyboard.mouse_level). And the (idle_dim_after, idle_off_after)
-        #: it follows, None while sync is off or never dim is on.
+        #: headset goes by it (Keyboard.mouse_level_from). And the (idle_dim_after, idle_off_after)
+        #: it follows, None while sync is off or the keyboards never dim (Daemon.never_dims).
         self.idle_level = LIT
         self._idle_times: tuple[int, int] | None = None
         #: Started in run(), so a Daemon built and not run connects to nothing.
@@ -172,8 +182,6 @@ class Session:
                                sleeping=self.on_sleeping, user_active=self.on_watched_input,
                                focus=lambda pid: self.d.games.focus.shell_focus(pid),
                                active=self.on_active)
-        #: The notice at a DPI button's step, and the one at a keyboard's custom assignments
-        #: turned on or off, each on the desktop above.
         self.dpi_notice = DpiNotice(self.desktop, lambda: self.d.config.dpi_notices)
         self.assignments_notice = AssignmentsNotice(self.desktop, lambda: True)
         self._desktop_started = False
@@ -210,17 +218,13 @@ class Session:
         if not self._desktop_started:
             return None
         if not self.desktop.available:
-            return ("python3-gi is not installed, so the lights do not follow the screen "
-                    "lock or a suspend")
+            return NO_GI_FOR_LOCK
         up = self.desktop.status()
         missing = []
         if not up["logind"]:
-            missing.append("logind is not reachable, so the lights do not follow the screen "
-                           "lock or a suspend")
+            missing.append(NO_LOGIND_FOR_LOCK)
         if not up["idle_monitor"]:
-            missing.append("GNOME's idle monitor is not reachable, so input while the screen "
-                           "is locked does not light the keyboard; a G, M or MR key or the "
-                           "unlock does")
+            missing.append(NO_IDLE_MONITOR_FOR_LOCK)
         return "; ".join(missing) or None
 
     def tend_desktop(self) -> None:
@@ -434,18 +438,18 @@ class Session:
             level, f"{ms // 1000} s without input while the screen is {self.away_word()}")
         self.desktop.add_user_active_watch(LOCK_WATCHES)
 
-    def note_key_input(self, paint: bool = True) -> bool:
+    def note_key_input(self, paint: bool = True) -> list[Keyboard]:
         """A G, M or MR key pressed while locked, which Mutter never sees: lit,
         with dim and dark due again from the press. `paint` False leaves the
-        repaint to the caller. True when the leader's lights came back
+        repaint to the caller. The keyboards whose lights came back
         (Keyboards.set_lights)."""
         if not (self.d.config.lights_off_when_locked and self.away) or self._asleep:
-            return False
+            return []
         now = time.monotonic()
         self._idle_owed = {ms: now + ms / 1000 for ms in (LOCKED_DIM_MS, LOCKED_DARK_MS)}
         self.desktop.add_user_active_watch(LOCK_WATCHES)
         if self.d.keyboards.lock_lights == LIT:
-            return False
+            return []
         return self.d.keyboards.set_lights(
             LIT, f"a key pressed while the screen is {self.away_word()}", paint=paint)
 
@@ -458,18 +462,19 @@ class Session:
 
     def watch_idle_for_both(self, paint: bool) -> None:
         """Follow the desktop's idle level while a mouse's or a headset's color sync is on and
-        never dim off: dim at idle_dim_after of idle time, dark idle_off_after later. A new
-        idle_dim_after or never dim, or sync turned on for the first of the two or off for the
+        the keyboards dim (Daemon.never_dims): dim at idle_dim_after of idle time, dark
+        idle_off_after later. A new idle_dim_after, never dim, a game profile loaded or
+        unloaded under its switch, or sync turned on for the first of the two or off for the
         last, starts it over lit, and from dim or dark paints the mouse and the headset unless
         `paint` is False. Times already followed change nothing; a new idle_off_after alone
         moves only the dark, and takes the desktop's level, dark already, back to dim while the
         new dark is still ahead (the owner's decision of 2026-10-07). A synced mouse or headset
         shows that dim only while the keyboard's own idle level is not known
-        (Keyboard.mouse_level)."""
+        (Keyboard.mouse_level_from)."""
         config = self.d.config
         synced = config.mouse_sync_color or config.headset_sync_color
         times = ((config.idle_dim_after, config.idle_off_after)
-                 if synced and not config.never_dim else None)
+                 if synced and self.d.never_dims() is None else None)
         before, self._idle_times = self._idle_times, times
         if times == before:
             return
@@ -491,7 +496,9 @@ class Session:
         while dark (idle_read): dim at idle_dim_after, dark idle_off_after later, until the next
         input (on_input_after_idle). A synced mouse or headset shows the keyboard's own idle
         level, this one while the keyboard's own is not known, or the lock's when that is as dark
-        or darker (Keyboard.mouse_level)."""
+        or darker; with mouse sync on and a mouse with lights attached, the journal says which
+        as the desktop goes idle, and at each later step while the keyboard's own is not known
+        (Keyboard.mouse_level_from, synced_mouse_with_lights)."""
         # The times are there: watch_idle_for_both drops this group's reads when it stops
         # following them.
         dark = sum(cast("tuple[int, int]", self._idle_times)) * 1000
@@ -504,24 +511,23 @@ class Session:
         if self.idle_level == DIM:
             self.read_idle_at(MOUSE_WATCHES, dark, time.monotonic() + (dark - ms) / 1000)
         own = self.d.keyboard.idle_level_known()
-        # Said only for a mouse with lights; the level is followed without one, for a mouse
-        # attached later.
-        if self.d.mice.color.mouse_with_lights() and (before == LIT or not own):
-            # A lock's level down without a lock or a blank is the suspend's dark
-            # (going_to_sleep), held until the resume.
-            lock = self.d.keyboards.lock_lights
-            shown = self.d.keyboard.mouse_level()
-            if lock != LIT and shown == lock:
+        if self.synced_mouse_with_lights() and (before == LIT or not own):
+            shown, source = self.d.keyboard.mouse_level_from()
+            if source == "lock":
+                # A lock's level down without a lock or a blank is the suspend's dark
+                # (going_to_sleep), held until the resume.
                 follows = ("a synced mouse follows the lock until the unlock"
                            if self.session_locked else
                            "a synced mouse follows the blank until the screen comes back"
                            if self.screen_blanked else
                            "a synced mouse stays dark until the machine wakes up")
             else:
-                follows = ("a synced mouse follows the keyboard's idle level" if own else
+                follows = ("a synced mouse follows the keyboard's idle level"
+                           if source == "own" else
                            "the keyboard's own idle level is not known (away, no idle notices, "
-                           "or no report from it since it stopped answering), so a synced mouse "
-                           "follows the keyboard's idle times") + f", now {LEVEL_WORDS[shown]}"
+                           "or no report from it and no new setup since it stopped answering), "
+                           "so a synced mouse follows the keyboard's idle times"
+                           ) + f", now {LEVEL_WORDS[shown]}"
             log.info("the desktop has been idle %d s; %s", ms // 1000, follows)
         self.d.sync_to_leader()
 
@@ -529,18 +535,22 @@ class Session:
         """Input after the desktop went idle: lit, a synced mouse or headset with it, and
         idle_dim_after counted from now. The keyboard is lit by its own wake notice, which only
         a key brings."""
-        if self.idle_level == LIT:
-            return
         self.idle_level = LIT
         self.drop_idle_reads(MOUSE_WATCHES)
-        # The times are there: watch_idle_for_both sets the level lit when it stops following
-        # them.
+        # The times are there: the watch is asked for only as the desktop goes idle, and
+        # watch_idle_for_both removes it when it stops following them.
         dim = cast("tuple[int, int]", self._idle_times)[0]
         self.read_idle_at(MOUSE_WATCHES, dim * 1000, time.monotonic() + dim)
-        if self.d.mice.color.mouse_with_lights():
+        if self.synced_mouse_with_lights():
             log.info("input after the desktop went idle; a synced mouse no longer dims or "
                      "darkens for the desktop's idleness")
         self.d.sync_to_leader()
+
+    def synced_mouse_with_lights(self) -> bool:
+        """Whether the journal says the desktop went idle and that input ended it: with mouse
+        sync on and a mouse with lights attached. The level is followed without one, for a
+        mouse attached later, and for a synced headset, which the lines do not name."""
+        return self.d.config.mouse_sync_color and self.d.mice.color.mouse_with_lights()
 
     # -- suspend -------------------------------------------------------------
 

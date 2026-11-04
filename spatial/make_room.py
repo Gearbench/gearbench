@@ -31,7 +31,8 @@ BAND_GAIN = (1.0, 1.0, 0.5)  # high band 6 dB down
 SEED = 20260927
 
 
-def biquad(x: list[float], kind: str, f0: float, q: float = 1 / math.sqrt(2)) -> list[float]:
+def biquad(x: list[float], kind: str, f0: float) -> list[float]:
+    q = 1 / math.sqrt(2)  # Butterworth: two in series make a Linkwitz-Riley crossover
     w = 2 * math.pi * f0 / RATE
     cw, alpha = math.cos(w), math.sin(w) / (2 * q)
     if kind == "lp":
@@ -151,12 +152,18 @@ def main() -> None:
                         help="the noise's seed (default: %(default)s)")
     args = parser.parse_args()
     out, seed = args.out, args.seed
+    if seed < 0:
+        # random.Random takes a negative seed's absolute value: -1 would make seed 1's room.
+        parser.error(f"argument --seed: {seed} is negative; a seed is 0 or more")
     chans = room(seed)
     try:
         write(out, wav(chans))
     except OSError as err:
         sys.exit(f"{parser.prog}: cannot write {out}: {err.strerror}")
-    print(out, len(chans[0]), "frames,", out.stat().st_size, "bytes, seed", seed)
+    # A name that is not UTF-8 comes from argv as surrogates, which a strict stdout refuses
+    # after the room is written: backslashed here, as stderr writes them.
+    shown = str(out).encode(errors="backslashreplace").decode()
+    print(shown, len(chans[0]), "frames,", out.stat().st_size, "bytes, seed", seed)
 
 
 if __name__ == "__main__":

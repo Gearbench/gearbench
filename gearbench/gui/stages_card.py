@@ -13,8 +13,10 @@ from typing import TYPE_CHECKING
 
 from gi.repository import Adw, GObject, Gtk
 
-from ..onboard import DPI_STAGES
+from ..onboard import DPI_STAGES, stage_position
+from ..wording import capitalized
 from .style import (
+    NOT_READ,
     PROFILE_WRITES_WAIT,
     EntryTexts,
     Styler,
@@ -22,8 +24,10 @@ from .style import (
     explain,
     header_spinner,
     holds_focus,
+    name_button,
     show_header_spinner,
     take_color_class,
+    watch_refused,
 )
 
 if TYPE_CHECKING:                       # pragma: no cover
@@ -33,6 +37,9 @@ if TYPE_CHECKING:                       # pragma: no cover
 #: The report rate row's usual subtitle. On the row, not a tooltip: an Adw.ComboRow keeps its
 #: tooltip out of the accessibility tree. A profile 1 write takes effect at its commit.
 RATE_HELP = "Written to onboard profile 1 at once"
+#: Its subtitle on a mouse without onboard profiles (a reply with no `onboard`), whose rate
+#: Mouse.set_report_rate sets live.
+RATE_NO_PROFILE = "Set live; the mouse has no onboard profiles"
 #: Its subtitle on a mouse in host mode whose onboard profile Gearbench does not write: the
 #: daemon sets the rate live alone (the reply's `rate_live`).
 RATE_LIVE_HELP = "Set live in host mode; the onboard profile keeps its own"
@@ -42,34 +49,30 @@ RATE_REFUSED = "Set live in host mode only"
 #: A report rate kept for a model whose onboard profile is not written, in force in place of
 #: profile 1's in host mode (kept_in_force), with the mouse's name.
 KEPT_RATE = "the report rate kept for the {}"
-#: The Shift stage row's note: the pick is written to flash and the paddle uses it at once.
-#: Where it went in Report rate's words.
-STAGE_NOTE = RATE_HELP
+#: The Default stage row's note, after its help: picking a default stage writes at once, but
+#: the mouse stays on its current stage (measured 2026-09-24 on the G502 X PLUS). On a game
+#: profile the rows edit, the daemon keeps it on its stage too (Dpi.retune).
+DEFAULT_STAGE_NOTE = "changing it keeps the current DPI"
 #: The Default stage row's subtitle. Measured 2026-09-24: a switch to a profile starts on its
 #: default stage (G502 X PLUS), and a power cycle on the stage last used (both mice; in host
 #: mode, the default). The row leaves the power cycle out for brevity (2026-10-02).
-DEFAULT_STAGE_HELP = "Where the mouse starts on profile 1"
-#: Picking a default stage writes at once, but the mouse stays on its current stage
-#: (measured 2026-09-24 on the G502 X PLUS). On a game profile the rows edit, the daemon
-#: keeps it on its stage too (Dpi.retune).
-DEFAULT_STAGE_NOTE = "Changing it keeps the current DPI"
-#: The Default and Shift stage rows while a game profile is loaded in host mode, where they
-#: edit the profile's own and leave onboard profile 1 alone. The Default row's note stays
-#: DEFAULT_STAGE_NOTE.
-GAME_STAGE_NOTE = "Saved to the game profile at once"
-GAME_DEFAULT_HELP = "Where the mouse starts on the game profile, unless a DPI was chosen under it"
+DEFAULT_STAGE_HELP = f"Where the mouse starts on profile 1; {DEFAULT_STAGE_NOTE}"
+#: The Default stage row while a game profile is loaded in host mode, where the rows edit the
+#: profile's own and leave onboard profile 1 alone.
+GAME_DEFAULT_HELP = ("Where the mouse starts on the game profile, unless a DPI was chosen "
+                     f"under it; {DEFAULT_STAGE_NOTE}")
 #: The DPI stages group's description, for profile 1 and for a game profile the rows edit, and
-#: the Shift stage row's first sentence. They name no button: the G305 has one DPI button and
-#: none of G6 to G8, and a binding moves the G502 X PLUS's DPI shift and steps to any of G4 to G9.
+#: the Shift stage row's help. They name no button: the G305 has one DPI button and none of
+#: G6 to G8, and a binding moves the G502 X PLUS's DPI shift and steps to any of G4 to G9.
+#: "Goes": the shift stage can be any stage, a higher one too.
 STAGES_HELP = "What the DPI buttons step through; written to onboard profile 1, backed up first"
-GAME_STAGES_HELP = ("What the DPI buttons step through while the game profile is loaded; "
-                    "saved to the game profile")
-SHIFT_HELP = "Where the DPI shift button drops to while held"
+GAME_STAGES_HELP = "What the DPI buttons step through; saved to the game profile"
+SHIFT_HELP = "Where the DPI goes while the DPI shift button is held"
 #: What a game profile can hold of its own, in the order the Game profile row names it
 #: and Remove its own… removes it: the reset's request, the `game_profile` key, the words.
 GAME_OWN = (({"command": "mouse_dpi_stages", "reset": True}, "dpi_stages", "DPI stages"),
             ({"command": "mouse_rate", "reset": True}, "report_rate", "report rate"))
-FACTORY_HELP = "The stages, default and shift in the mouse's ROM"
+FACTORY_HELP = "The mouse's ROM stages, with their default and shift stage"
 #: The Game profile row's button: its dialog asks whether to remove them, and where a kept
 #: rate is in force the mouse then takes that rate, not profile 1's.
 REMOVE_OWN = "Remove its own…"
@@ -79,16 +82,27 @@ HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 DOT_PREFIX = "g915-stage-dot-"
 #: What a stage dot says, in its tooltip and to a screen reader: the color's name from the
 #: reply's `stage_color_names`, never its hex value (the owner's decision of 2026-10-05), and
-#: for a color the daemon sends no name for.
-DOT_NAMED = "The mouse flashes {} on this stage"
-DOT_UNNAMED = "The color the mouse flashes on this stage"
+#: for a color the daemon sends no name for. Neither says the light flashes: a mouse whose
+#: DPI write carries no stage (sensor.ExtendedDpi.stage_level) is sent none.
+DOT_NAMED = "The mouse's DPI light is {} on this stage"
+DOT_UNNAMED = "The color of the mouse's DPI light on this stage"
 #: An apply's refusal of a saved stage's emptied row, by its number.
-STAGE_EMPTIED = "Stage {} is empty. Its trash button removes it."
+STAGE_EMPTIED = "Stage {} is empty; its trash button removes it"
 #: The stage remove dialog's body, by the layer the rows were filled for: a game profile's own
 #: stages, by its name, or onboard profile 1.
 REMOVE_FROM_GAME = "The rest are saved as {}'s own DPI stages; onboard profile 1 is unchanged."
 REMOVE_FROM_PROFILE_1 = ("Onboard profile 1 is rewritten without it, after a backup; Restore "
                          "profile backup… undoes it.")
+
+
+def not_a_number(text: str) -> bool:
+    """True for a stage row's text that int() does not take, which _send_stages refuses:
+    the row is red while it holds it (watch_refused). A blank row is no stage."""
+    try:
+        int(text or "0")
+    except ValueError:
+        return True
+    return False
 
 
 def kept_in_force(game: dict) -> bool:
@@ -161,7 +175,7 @@ class StagesCard:
     def show_able(self, able: set[str]) -> None:
         """Show the group for a mouse with `dpi_stages`, the Report rate row for one with
         `report_rate`, and the Shift stage row for one with `buttons`: the shift stage is where
-        a button bound to DPI shift drops to, and only a mouse with the button table has one to
+        a button bound to DPI shift goes to, and only a mouse with the button table has one to
         bind. Hidden, the row keeps its pick, which an edit of the stages or the default sends."""
         self.group.set_visible("dpi_stages" in able)
         self.rate_row.set_visible("report_rate" in able)
@@ -215,15 +229,20 @@ class StagesCard:
         for index in range(DPI_STAGES):
             entry = Adw.EntryRow(title=f"Stage {index + 1}", visible=False,
                                  show_apply_button=True)
+            watch_refused(entry, not_a_number)
             entry.connect("apply", self.on_dpi_stages)
-            # An image to a screen reader, which show_stage_colors names with the tooltip's words.
+            # An image to a screen reader, which show_stage_colors names with the tooltip's words;
+            # named here too, since it names only the dots of the stages the rows hold.
             dot = Gtk.Box(valign=Gtk.Align.CENTER, visible=False,
-                          css_classes=["g915-stage-dot"],
+                          css_classes=["g915-stage-dot"], tooltip_text=DOT_UNNAMED,
                           accessible_role=Gtk.AccessibleRole.IMG)
+            dot.update_property([Gtk.AccessibleProperty.LABEL], [DOT_UNNAMED])
             dot.set_size_request(14, 14)
             entry.add_prefix(dot)
             remove = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER,
-                                tooltip_text="Remove this stage", css_classes=["flat"])
+                                tooltip_text=f"Remove stage {index + 1}", css_classes=["flat"])
+            # Named as the Game profiles dialog names its trash buttons, not by the tooltip.
+            name_button(remove, f"Remove stage {index + 1}")
             remove.connect("clicked", lambda _b, n=index: self.on_remove_stage(n))
             entry.add_suffix(remove)
             self.stage_rows.append(entry)
@@ -235,14 +254,13 @@ class StagesCard:
         self.add_stage_row.connect("activated", self.on_add_stage)
         stages.add(self.add_stage_row)
         self.default_stage_row = Adw.ComboRow(
-            title="Default stage", subtitle=f"{DEFAULT_STAGE_HELP}. {DEFAULT_STAGE_NOTE}",
+            title="Default stage", subtitle=DEFAULT_STAGE_HELP,
             model=Gtk.StringList.new(["—"]))
         self.default_stage_row.connect("notify::selected", lambda r, _p: self._stage_choice())
         stages.add(self.default_stage_row)
-        self.shift_stage_row = Adw.ComboRow(
-            title="Shift stage",
-            subtitle=f"{SHIFT_HELP}. {STAGE_NOTE}",
-            model=Gtk.StringList.new(["—"]))
+        # Where a pick is written, the group's description says, for both layers.
+        self.shift_stage_row = Adw.ComboRow(title="Shift stage", subtitle=SHIFT_HELP,
+                                            model=Gtk.StringList.new(["—"]))
         self.shift_stage_row.connect("notify::selected", lambda r, _p: self._stage_choice())
         stages.add(self.shift_stage_row)
         self.factory_row = Adw.ButtonRow(title="Use factory stages…",
@@ -294,7 +312,8 @@ class StagesCard:
 
     def _show_rate(self, info: dict, onboard: dict, edited: dict, fresh: bool) -> None:
         """The Report rate row: the mouse's rates, on the game profile's own, profile 1's or
-        the live one, or a dash where none listed is in force, and a subtitle saying whose."""
+        the live one, or a dash where none listed is in force, and a subtitle saying whose, or
+        Not read on profile 1's rows where the reply gives neither rate."""
         # A reply that names none keeps the rates named before, unless it is fresh: a forced
         # read shows the mouse as it is now, and another mouse would be offered the last one's.
         rates = [int(r) for r in info.get("report_rates") or []] or ([] if fresh else self._rates)
@@ -324,6 +343,12 @@ class StagesCard:
             whose = (f"Kept for the {self._mouse_name}" if kept_in_force(edited)
                      else "Onboard profile 1's")
             self.rate_row.set_subtitle(f"{whose}; a change is saved as {edited['name']}'s own")
+        elif self._dash and stored is None and live is None:
+            # The DPI row's words for a value not read. A rate read but not listed keeps the dash
+            # and, like a reply that left the row on a rate, takes a subtitle below.
+            self.rate_row.set_subtitle(NOT_READ)
+        elif not onboard:
+            self.rate_row.set_subtitle(RATE_NO_PROFILE)
         else:
             self.rate_row.set_subtitle(
                 f"Onboard profile 1 stores {stored} Hz; the mouse is running at {live} Hz"
@@ -332,10 +357,10 @@ class StagesCard:
     def _show_stage_list(self, onboard: dict, edited: dict, force: bool) -> None:
         """The stage rows, left as typed while being edited unless `force`, and the Default
         stage and Shift stage dropdowns, from profile 1's stages or the game profile's own,
-        with the subtitles that say whose."""
+        with the Default stage subtitle and the group description that say whose."""
         stages = [int(s) for s in onboard.get("dpi_stages") or []]
-        default = min(int(onboard.get("default_dpi_index", 0)), max(len(stages) - 1, 0))
-        shift = min(int(onboard.get("shift_dpi_index", 0)), max(len(stages) - 1, 0))
+        default = stage_position(stages, int(onboard.get("default_dpi_index", 0)))
+        shift = stage_position(stages, int(onboard.get("shift_dpi_index", 0)))
         own = [int(s) for s in edited.get("dpi_stages") or []]
         if own:
             stages = own
@@ -357,10 +382,7 @@ class StagesCard:
         if stages:
             self._loading.put_selected(self.default_stage_row, default)
             self._loading.put_selected(self.shift_stage_row, shift)
-        self.default_stage_row.set_subtitle(
-            f"{GAME_DEFAULT_HELP if edited else DEFAULT_STAGE_HELP}. {DEFAULT_STAGE_NOTE}")
-        self.shift_stage_row.set_subtitle(
-            f"{SHIFT_HELP}. {GAME_STAGE_NOTE if edited else STAGE_NOTE}")
+        self.default_stage_row.set_subtitle(GAME_DEFAULT_HELP if edited else DEFAULT_STAGE_HELP)
         self.group.set_description(GAME_STAGES_HELP if edited else STAGES_HELP)
 
     def _show_stages(self, stages: list[int], default: int, shift: int) -> None:
@@ -395,12 +417,12 @@ class StagesCard:
     def show_stage_colors(self, colors: object, names: object = None) -> None:
         """Each stage's dot in its indicator color, from the reply's `stage_colors` (HEX_COLOR),
         saying the color's name from its `stage_color_names` (DOT_NAMED); no dots for a model
-        without them. The colors are per slot: a dot takes its stage's slot's (_dot_slots), and
-        one past those, a row Add a stage showed, the slot of its position, where a write of the
-        rows puts it."""
+        without them. The colors are per slot: a dot takes its stage's slot's (_dot_slots) or,
+        for a game profile's own, its position's; a row Add a stage showed has none until it is
+        applied."""
         colors = colors if isinstance(colors, list) else []
         names = names if isinstance(names, list) else []
-        slots = [*self._dot_slots, *range(len(self._dot_slots), len(colors))]
+        slots = self._dot_slots or range(len(colors))
         # Paired before the colors are checked, so a name stays with its color.
         wanted = [(colors[slot], names[slot] if slot < len(names) else None)
                   for slot in slots
@@ -411,9 +433,12 @@ class StagesCard:
         self._dot_css.update("".join(
             f".{DOT_PREFIX}{color[1:]} {{ background-color: {color}; }}"
             for color in dict.fromkeys(color for color, _name in wanted)))
+        # A row Add a stage showed has no dot: the write puts the list lowest first
+        # (place_stages), so its slot is known only once it is applied.
+        shown = min(len(wanted), self._stage_count)
         for index, dot in enumerate(self.stage_dots):
-            dot.set_visible(index < len(wanted))
-            if index < len(wanted):
+            dot.set_visible(index < shown)
+            if index < shown:
                 color, name = wanted[index]
                 take_color_class(dot, DOT_PREFIX, DOT_PREFIX + color[1:])
                 # In words too: the class carries the color to the eye alone.
@@ -432,14 +457,15 @@ class StagesCard:
         if not (edits or own):
             return
         # One short line each, the owner's window-text standard: the Host mode row above
-        # says whether Gearbench drives the mouse.
+        # says whether Gearbench drives the mouse, and the group's description and the rate
+        # row where a change below is saved.
         if not edits:
             said = f"{name} has its own {' and '.join(own)}, used in host mode"
         elif not own:
             rate = KEPT_RATE.format(self._mouse_name) if kept_in_force(game) else "report rate"
-            said = f"{name} uses profile 1's DPI stages and {rate}; a change below gives it its own"
+            said = f"{name} uses profile 1's DPI stages and {rate}"
         else:
-            said = f"{name} has its own {' and '.join(own)}; a change below is saved to it"
+            said = f"{name} has its own {' and '.join(own)}"
         self.game_row.set_subtitle(said)
 
     def on_game_reset(self, _b: Gtk.Button | None) -> None:
@@ -503,8 +529,8 @@ class StagesCard:
             try:
                 stages.append(int(text))
             except ValueError:
-                self._toast(f"Stage {self.stage_rows.index(row) + 1} is not a number. "
-                            "Type a DPI like 1600.")
+                self._toast(f"Stage {self.stage_rows.index(row) + 1} is not a number; "
+                            "type a DPI like 1600")
                 return
         for row in rows:
             self._shown.took(row)
@@ -518,11 +544,11 @@ class StagesCard:
             shift = self._selected_stage(self.shift_stage_row)
 
         def moved(reply: dict) -> None:
-            notes = [f"The {what} stage is now {reply[what]} DPI."
+            notes = [f"the {what} stage is now {reply[what]} DPI"
                      for what, before in (("default", default), ("shift", shift))
                      if before is not None and before not in stages]
             if notes:
-                self._toast(" ".join(notes))
+                self._toast(capitalized("; ".join(notes)))
 
         self._write({"command": "mouse_dpi_stages", "value": stages,
                      "default": default if default in stages else None,
@@ -548,8 +574,11 @@ class StagesCard:
         # empty row Add a stage showed is beside it.
         if self._stage_count < 2:
             return
-        # An emptied row, which an apply refuses, is named by the stage the page showed.
-        text = rows[index].get_text().strip() or self._shown.last(rows[index])
+        # A row an apply refuses, emptied or holding no number, is named by the stage the page
+        # showed.
+        text = rows[index].get_text().strip()
+        if not text or not_a_number(text):
+            text = self._shown.last(rows[index])
         # The layer the rows were filled for, which Remove writes to: rows kept while being
         # typed into can be another mouse's or layer's than the last poll's. A game profile
         # with no stages of its own shows profile 1's, and the write gives it its own.
@@ -608,7 +637,7 @@ class StagesCard:
         else:
             where = "They are written to onboard profile 1, backed up first."
         explain(dialog, paragraphs=(
-            f"{FACTORY_HELP} replace the current ones.",
+            f"{FACTORY_HELP}, replace the current ones.",
             where))
         # Destructive, as Remove on a stage and Restore on a backup: each replaces what the
         # user set (the owner's decision of 2026-10-22).

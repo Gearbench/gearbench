@@ -2,9 +2,11 @@
 
 An app the user opened runs in a systemd scope under the user's app.slice: GNOME names it
 after the desktop entry, and a snap gets snap.<snap>.<app>-<uuid>.scope. A background
-service gets a .service unit instead. A game launched from Steam runs in Steam's scope, so
-each process in a scope is listed, helpers left out. That scope is whatever started Steam:
-with Steam closed, a game's shortcut or a browser's steam:// link starts it in theirs.
+service gets a .service unit instead, except under KDE Plasma, which starts an app as
+app-<id>@<uuid>.service. A game launched from Steam runs in Steam's scope (under KDE
+Plasma, its service), so each process in one is listed, helpers left out. That unit is
+whatever started Steam: with Steam closed, a game's shortcut or a browser's steam:// link
+starts it in theirs.
 
 The daemon's reads of /proc are here too: the names a game profile matches a process by,
 and the walk of every process (walk_processes), which also finds the other programs that
@@ -104,20 +106,19 @@ def is_helper(comm: str) -> bool:
     )
 
 
-def launcher(name: str) -> str | None:
-    """The launcher `name` would match, by the name it goes by, or None, under
-    names_match's rule: "Steam" is Steam, "team" is nothing."""
-    return next((shown for process, shown in LAUNCHERS.items()
-                 if names_match(name.strip(), process)), None)
-
-
 def launcher_warning(name: str) -> str | None:
-    """What to say when `name` is picked or typed, when it is a launcher."""
-    found = launcher(name)
+    """What to say when `name` is picked or typed, when it is a launcher under
+    names_match's rule: "Steam" is Steam, "team" is nothing."""
+    found = next((shown for process, shown in LAUNCHERS.items()
+                  if names_match(name.strip(), process)), None)
     return LAUNCHER_WARNING.format(found) if found else None
 
 
-_SCOPE = re.compile(r"^app-(?:gnome-|flatpak-)?(?P<app>.+?)-(?P<pid>\d+)\.scope$")
+#: GNOME and Flatpak end an app's scope with a pid, KDE Plasma's KIO with a UUID of 32 hex
+#: digits; with systemd 250 or later KIO starts a service instead, app-<id>@<uuid>.service.
+#: xdg-autostart's app-<id>@autostart.service does not match.
+_SCOPE = re.compile(r"^app-(?:gnome-|flatpak-)?(?P<app>.+?)-(?:\d+|[0-9a-f]{32})\.scope$")
+_KDE_SERVICE = re.compile(r"^app-(?P<app>[^@]+)@[0-9a-f]{32}\.service$")
 #: snap run moves a snap into its own scope: snap.discord.discord-<uuid>.scope. An app
 #: name can hold hyphens (snap-store), so the UUID's shape ends it; a hook's scope,
 #: snap.<snap>.hook.<hook>-<uuid>, has a dot there and does not match.
@@ -175,10 +176,16 @@ ARGV0_MAX = 128 * 1024
 MAX_PROGRAM_BYTES = 255
 
 
+def program_bytes(name: str) -> int:
+    """`name`'s length in UTF-8 bytes, a lone surrogate counted as its replacement's, as a
+    program name is measured against MAX_PROGRAM_BYTES."""
+    return len(name.encode(errors="replace"))
+
+
 def _fits(name: str) -> bool:
     """Whether `name` is no longer than a file's name may be. Any process can make its argv[0]
     128 KiB long, and each name taken is made printable and lowercased at every scan."""
-    return len(name.encode(errors="replace")) <= MAX_PROGRAM_BYTES
+    return program_bytes(name) <= MAX_PROGRAM_BYTES
 
 
 def _cut(name: str) -> str:
@@ -231,46 +238,29 @@ def process_name(pid: int) -> str | None:
     and so is one from argv[0] longer than a file's name may be (_fits).
     """
     proc = PROC / str(pid)
-    try:
-        target = os.readlink(proc / "exe")
-        # A binary whose file was replaced or removed gets this suffix.
-        name: str | None = Path(target.removesuffix(" (deleted)")).name
-        if name and not is_interpreter(name):
-            return printable(name)
-    except OSError:
-        pass
+    if (name := _exe_name(proc)) is not None:
+        return name
     try:
         argv0 = read_argv0(proc)
     except OSError:
         argv0 = ""
     # A Windows program under Wine whose exe could not be read, as in the service: its
     # argv[0] is its Windows path, and Path splits only at slashes, so below it would go
-    # by comm, cut at 15 bytes.
-    if "\\" in argv0:
+    # by comm, cut at 15 bytes. A backslash first found after a flag is in a rewritten
+    # argv's flag, "<path> --data=C:\x\z.exe", whose .exe names no program.
+    if "\\" in argv0 and not re.search(r" -\S", argv0.split("\\", 1)[0]):
         try:
             name = windows_name(argv0, read_comm(proc))
         except OSError:
             return None         # gone since its cmdline was read
         if name:
             return name
-    # A path with spaces, a Steam game's, is taken whole where its last part is comm: cut
-    # at the first space, cs2 would be "Counter-Strike". A rewritten argv, "<path> --flags",
-    # is cut before the flag within PATH_MAX, and "<path> <link>" at the first space, where
-    # the path's last part is comm.
     if " " in argv0:
         try:
             comm = read_comm(proc)
         except OSError:
             return None         # gone since its cmdline was read
-        # A flag that starts within PATH_MAX ends by PATH_MAX + 2.
-        ends = [flag.start() for flag in re.finditer(r" -\S", argv0[:PATH_MAX + 2])]
-        for end in [*ends, len(argv0), argv0.index(" ")]:
-            name = Path(argv0[:end]).name
-            if name and not is_interpreter(name) and _cut(name) == comm and _fits(name):
-                return printable(name)
-        # No cut's last part is comm, so the first space may be in a folder's name, "My" for
-        # "/opt/My Game/game": a program that renamed its main thread goes by comm.
-        return comm or None
+        return _spaced_name(argv0, comm)
     name = Path(argv0).name
     # A backslash left in it is a Windows path windows_name did not believe, which goes by
     # comm, as own_name has it where exe can be read.
@@ -280,6 +270,42 @@ def process_name(pid: int) -> str | None:
         return read_comm(proc) or None
     except OSError:
         return None
+
+
+def _exe_name(proc: Path) -> str | None:
+    """The name of the file /proc/<pid>/exe links to; None where it cannot be read, names
+    no file or names an interpreter."""
+    try:
+        target = os.readlink(proc / "exe")
+    except OSError:
+        return None
+    # A binary whose file was replaced or removed gets this suffix.
+    name = Path(target.removesuffix(" (deleted)")).name
+    return printable(name) if name and not is_interpreter(name) else None
+
+
+def _spaced_name(argv0: str, comm: str) -> str | None:
+    """The name an argv[0] holding a space gives, read against `comm`; None for no name.
+
+    A path with spaces, a Steam game's, is taken whole where its last part is comm: cut at
+    the first space, cs2 would be "Counter-Strike". A rewritten argv, "<path> --flags", is
+    cut before the flag within PATH_MAX, and "<path> <link>" at the first space, where the
+    path's last part is comm.
+    """
+    # A flag that starts within PATH_MAX ends by PATH_MAX + 2.
+    ends = [flag.start() for flag in re.finditer(r" -\S", argv0[:PATH_MAX + 2])]
+    for end in [*ends, len(argv0), argv0.index(" ")]:
+        name = Path(argv0[:end]).name
+        if name and not is_interpreter(name) and _cut(name) == comm and _fits(name):
+            return printable(name)
+    # No cut's last part is comm. A path with no flag that names an .exe is one Wine was
+    # given, "Program Files" and all, as windows_name has it: Unreal renames comm.
+    name = Path(argv0).name
+    if not ends and name.lower().endswith(".exe") and _fits(name):
+        return printable(name)
+    # Otherwise the first space may be in a folder's name, "My" for "/opt/My Game/game":
+    # a program that renamed its main thread goes by comm.
+    return comm or None
 
 
 def windows_name(argv0: str, comm: str) -> str | None:
@@ -350,29 +376,37 @@ class Process(NamedTuple):
 
 
 class OtherTool(NamedTuple):
-    """What an OTHER_TOOLS entry's problem names: the tool, what it does and the fix."""
+    """What an OTHER_TOOLS entry's problem names: the tool, what it does and the fix, and
+    `seen`, "ran" for a tool that runs one command and exits: a walk finds it only during that
+    command, and the problem stays until the next walk."""
     name: str
     does: str
     fix: str
+    seen: str = "is running"
 
 
 #: Other programs that talk to Logitech devices, by comm, checked against Ubuntu 26.04's
 #: packages: solaar 1.1.19-1's /usr/bin/solaar (`#!/usr/bin/python3`) is comm `solaar`
 #: (measured); ratbagd 0.18-1build1's /usr/sbin/ratbagd and openrgb 0.9+git20251009+ds-1's
 #: /usr/bin/openrgb are binaries that keep their names. A Solaar run from its source tree
-#: (`#!/usr/bin/env python3`) is comm python3 and is not seen.
+#: (`#!/usr/bin/env python3`) is comm python3 and is not seen. HeadsetControl, which Ubuntu
+#: 26.04 does not package, is the binary /usr/bin/headsetcontrol in Arch's headsetcontrol
+#: 4.1.0-1 and Fedora 44's 3.0.0 (read 2026-10-28); it runs one command and exits, so a walk
+#: finds it only while a command of it runs.
 OTHER_TOOLS = {
     "solaar": OtherTool(
-        "Solaar", "talks HID++ to Logitech devices too",
+        "Solaar", "drives Logitech devices too",
         "quit it and uninstall it: its package starts it at every login"),
     "ratbagd": OtherTool(
-        "ratbagd", "talks HID++ to Logitech devices too",
+        "ratbagd", "drives Logitech devices too",
         "stop it (`sudo systemctl stop ratbagd`) and uninstall it, or Piper starts it again"),
     "openrgb": OtherTool(
-        "OpenRGB", "may drive Logitech devices too: which of its drivers are on cannot be "
-                   "seen from here",
+        "OpenRGB", "may drive Logitech devices too",
         "quit it, and stop the server its package starts at every login "
         "(`systemctl --user mask --now openrgb`)"),
+    "headsetcontrol": OtherTool(
+        "HeadsetControl", "drives Logitech and Astro headsets too",
+        "stop what runs it, such as a tray icon that reads the headset's battery", seen="ran"),
 }
 
 
@@ -416,7 +450,7 @@ def other_tool_problem(comm: str, pids: list[int]) -> str:
     """The problem an OTHER_TOOLS entry running as `pids` is."""
     tool, shown = OTHER_TOOLS[comm], first_of([str(pid) for pid in pids], SHOWN_PIDS)
     which = f"pid {pids[0]}" if len(pids) == 1 else f"pids {shown}"
-    return f"{tool.name} is running ({which}) and {tool.does}; {tool.fix}"
+    return f"{tool.name} {tool.seen} ({which}) and {tool.does}; {tool.fix}"
 
 
 def names_match(wanted: str, running: str) -> bool:
@@ -455,7 +489,7 @@ def wanted_forms(wanted: str) -> frozenset[str]:
     forms = set()
     for name in (base, f"{base}.exe") if base else (wanted,):
         forms.add(running_form(name))
-        if len(name.encode(errors="replace")) > COMM_MAX:
+        if program_bytes(name) > COMM_MAX:
             forms.add(_cut(name).lower())
     return frozenset(forms)
 
@@ -488,8 +522,9 @@ def running_apps() -> list[RunningApp]:
     uid = os.getuid()
     root = CGROUP_ROOT / "user.slice" / f"user-{uid}.slice" / f"user@{uid}.service" / "app.slice"
     found: dict[RunningApp, None] = {}
-    for scope in sorted(root.glob("*.scope")):
-        match = _SCOPE.match(scope.name) or _SNAP_SCOPE.match(scope.name)
+    for scope in sorted([*root.glob("*.scope"), *root.glob("app-*@*.service")]):
+        match = (_SCOPE.match(scope.name) or _SNAP_SCOPE.match(scope.name)
+                 or _KDE_SERVICE.match(scope.name))
         if match is None:
             continue
         app_id = _unescape(match.group("app"))

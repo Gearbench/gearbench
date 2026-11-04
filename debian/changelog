@@ -1,8 +1,13 @@
-gearbench (1.2.1) resolute; urgency=medium
+gearbench (1.3.0) resolute; urgency=medium
 
-  * install.sh runs again as ./install.sh: 1.2.0 shipped it without its
-    execute bit, so a checkout install stopped at "Permission denied".
-  * Some code comments reworded. The package works as 1.2.0's does.
+  * Gearbench Game, Chat and Media: three outputs for games, voice chat and
+    music, and a balance between game and chat.
+  * Noise suppression for headset microphones, with a microphone test.
+  * G-Shift on keyboards, mice and headsets' G keys; low-battery notices
+    set per device; a Firmware row on the Keyboard and Mouse tabs.
+  * Settings move to format 4, which 1.2.1 and earlier refuse: each file's
+    copy as it was is kept in the settings folder's backup/.
+  * Packages for Fedora (.rpm) and Arch Linux beside the .deb.
 
- -- wmuschetto <113629853+wmuschetto@users.noreply.github.com>  Wed, 28 Oct 2026 15:17:29 +0000
+ -- wmuschetto <113629853+wmuschetto@users.noreply.github.com>  Wed, 04 Nov 2026 02:31:16 +0000
 

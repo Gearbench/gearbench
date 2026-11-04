@@ -95,9 +95,12 @@ def group_denied(path: Path | str) -> str | None:
         # The group lists its members by name, and usermod takes one: neither works on a uid.
         return (f"uid {os.getuid()} has no name this service can look up: run "
                 f"`sudo usermod -aG {GROUP} $USER`, then {then}")
+    # The name stays out of the reason: the Debugging Information page, pasted into a public
+    # issue, carries it, and the shell fills in `$USER`.
     if user in members:
-        return f"{user} joined the {GROUP} group after this service's user manager started: {then}"
-    return (f"{user} is not in the {GROUP} group: run `sudo usermod -aG {GROUP} {user}`, "
+        return (f"this account joined the {GROUP} group after this service's user manager "
+                f"started: {then}")
+    return (f"this account is not in the {GROUP} group: run `sudo usermod -aG {GROUP} $USER`, "
             f"then {then}")
 
 
@@ -112,13 +115,14 @@ def parse_events(buffer: bytes) -> Iterator[tuple[int, int, int]]:
 def states_at_drops(kept: list[tuple[int, int, int] | None],
                     now: set[int]) -> dict[int, set[int]]:
     """The keys down at each drop (a None) in `kept`, by its index: `now`, the kernel's
-    state, with each press and release read after the drop undone, the last first (an
-    autorepeat changes nothing). The kernel queues a press or release only when the key
-    changes (input_get_disposition), so a change the events do not account for was lost in
-    a drop, or made after the drain's last read and thrown away by the key-state read
-    (EventReader._resync). Nothing tells which drop lost it, or whether one did, so it shows
-    at the first drop after the key's last press or release before the change (for one made
-    after the drain, its last in the batch)."""
+    state, with each press, release and autorepeat read after the drop undone, the last
+    first. A key is down before a release and before an autorepeat, which the kernel sends
+    only while the key is held (input_repeat_key). The kernel queues a press or release only
+    when the key changes (input_get_disposition), so a change the events do not account for
+    was lost in a drop, or made after the drain's last read and thrown away by the key-state
+    read (EventReader._resync). Nothing tells which drop lost it, or whether one did, so it
+    shows at the first drop after the key's last press, release or autorepeat before the
+    change (for one made after the drain, its last in the batch)."""
     down = set(now)
     states: dict[int, set[int]] = {}
     for index, entry in reversed(list(enumerate(kept))):
@@ -126,7 +130,7 @@ def states_at_drops(kept: list[tuple[int, int, int] | None],
             states[index] = set(down)
         elif entry[0] == EV_KEY and entry[2] == 1:
             down.discard(entry[1])
-        elif entry[0] == EV_KEY and entry[2] == 0:
+        elif entry[0] == EV_KEY and entry[2] in (0, 2):
             down.add(entry[1])
     return states
 
@@ -187,8 +191,8 @@ class EventReader:
         reported (`states_at_drops`). Reading the key state also throws away the key events
         still queued (evdev_handle_get_val), so a change made after the drain's last read is
         only in that state. Nothing tells it from one a drop lost, so it goes in the place of
-        the first drop no press or release of its key follows, and at the end only where one
-        follows the last drop."""
+        the first drop no press, release or autorepeat of its key follows, and at the end only
+        where one follows the last drop."""
         kept: list[tuple[int, int, int] | None] = []  # None in each drop's place
         skipping = False
         for event in events:

@@ -1,11 +1,11 @@
 """The runtime folder, XDG_RUNTIME_DIR, and its rule: no file is read or written there, the
-daemon's socket and the equalizer's and the noise suppression's confs included, where another
-account could put a folder or a file of its own in their place, as far as stat can tell that
-account from root (open_to_others). The daemon's unit runs the rule before each start outside
-its user namespace, where stat can, and makes a missing runtime folder there (main,
-`python3 -m gearbench.runtime_folder`). And each
-folder Gearbench makes, the runtime folder, the settings folder and the folders in it, is its
-owner's alone (make_private). The standard library and wording alone.
+sockets of the daemon and of Outputs and the equalizer's and the noise suppression's confs
+included, where another account could put a folder or a file of its own in their place, as far
+as stat can tell that account from root (open_to_others). The daemon's unit runs the rule before
+each start outside its user namespace, where stat can, and makes a missing runtime folder there
+(main, `python3 -m gearbench.runtime_folder`). And each folder Gearbench makes, the runtime
+folder, the settings folder and the folders in it, is its owner's alone (make_private). The
+standard library and wording alone.
 """
 
 from __future__ import annotations
@@ -130,7 +130,8 @@ def problem_with(folder: Path, at_fault: Path | None) -> str | None:
     return words.format(at_fault=escaped(at_fault), uid=os.geteuid())
 
 
-#: private_runtime's refusal, `problem` being shared_problem's.
+#: A runtime folder's refusal for `what`'s files, `problem` being shared_problem's, or
+#: unseen_problem's where a stat fails.
 SHARED_RUNTIME = "{what} uses no file in {folder}: {problem}"
 
 
@@ -146,31 +147,46 @@ def private_runtime(error: type[Exception], unset: str, what: str) -> Path:
     full path (runtime_home), and with shared_problem's words where another account could put a
     folder of its own in its place (open_to_others), as Daemon.listen refuses it, since that
     account could swap a conf before PipeWire reads it, or put its own file, or a link, where
-    one is read or written. A stat on the way raises its OSError, as a write in it would."""
+    one is read or written. A stat on the way that fails is `error` too, in UNSEEN_FOLDER's
+    words (unseen_problem)."""
     folder = runtime_home()
     if folder is None:
         raise error(unset)
-    if (problem := shared_problem(folder)) is not None:
+    try:
+        problem = shared_problem(folder)
+    except OSError as exc:
+        problem = unseen_problem(exc)
+    if problem is not None:
         raise error(SHARED_RUNTIME.format(what=what, folder=escaped(folder), problem=problem))
     return folder
 
 
+#: The daemon's refusal of a file, or a link to one, where its runtime folder `folder` should
+#: be: mkdir's own words, "File exists", name neither which path nor what to do.
+NOT_A_FOLDER = ("Gearbench daemon cannot listen: a file is at {folder}, where its runtime "
+                "folder should be; remove the file, or set XDG_RUNTIME_DIR to a folder, then "
+                "start the daemon again")
 #: The daemon's refusal of its runtime folder, `problem` shared_problem's words, UNSEEN_FOLDER
 #: or UNMADE_FOLDER.
 LISTEN_REFUSED = ("Gearbench daemon cannot listen in {folder}: {problem}, then start the "
                   "daemon again")
-#: main's `problem` where a stat on the way to the runtime folder fails, `reason` its words
+#: The `problem` where a stat on the way to the runtime folder fails, `reason` its words
 #: (wording.reason): what it could not see may be another account's.
 UNSEEN_FOLDER = f"{{reason}}, looking at it or a folder on the way to it; {OWN_FOLDER_BELOW}"
-#: main's `problem` where making the runtime folder or a missing folder above it fails,
+#: listen_problem's `problem` where making the runtime folder or a missing folder above it fails,
 #: `reason` its words (wording.reason).
 UNMADE_FOLDER = f"{{reason}}, making it or a folder above it; {OWN_FOLDER_BELOW}"
 
 
+def unseen_problem(error: OSError) -> str:
+    """UNSEEN_FOLDER's words for `error`, a stat on the way to the runtime folder that
+    failed."""
+    return UNSEEN_FOLDER.format(reason=reason(error), uid=os.geteuid())
+
+
 def unmade_problem(folder: Path) -> str | None:
-    """Make the runtime folder `folder` and the missing folders above it, as Daemon.listen
-    makes them (make_private): None once they are made, UNMADE_FOLDER's words where a mkdir
-    fails."""
+    """Make the runtime folder `folder` and the missing folders above it (make_private): None
+    once they are made, UNMADE_FOLDER's words where a mkdir fails."""
     try:
         make_private(folder, missing_folders(folder))
     except OSError as error:
@@ -178,34 +194,45 @@ def unmade_problem(folder: Path) -> str | None:
     return None
 
 
-def main() -> int:
-    """The runtime folder's rule as Daemon.listen keeps it, which the daemon's unit runs
-    before each start outside its user namespace: under PrivateUsers=yes stat shows root's
-    files and every other account's as one id, so listen cannot tell another account's
-    folder or link on the way from root's, and here stat can. A missing folder is made here,
-    once nothing on the way to the deepest folder there is at fault, and then checked as one
-    that is there. 1, with listen's words on stderr, for a folder listen would refuse, for a
-    missing one below a folder or link that on_the_way finds, for one that cannot be made
-    and for one stat cannot look at; 0 otherwise, an unset XDG_RUNTIME_DIR included, whose
-    /run/user/<uid> is below root's folders alone."""
-    folder = runtime_home()
-    if folder is None:
-        return 0
+def listen_problem(folder: Path) -> str | None:
+    """Make the runtime folder `folder` where it is not there, and give the daemon's refusal
+    of it: NOT_A_FOLDER's words for a file in its place, LISTEN_REFUSED's for a missing one
+    below a folder or link on the way that on_the_way finds at fault, which is left unmade,
+    for one that cannot be made (UNMADE_FOLDER), for one another account could put a folder
+    of its own in place of (shared_problem) and for one a stat cannot look at
+    (UNSEEN_FOLDER); None where the daemon may listen there. A missing folder is made once
+    nothing on the way to the deepest folder there is at fault, and then checked as one that
+    is there."""
+    if os.path.exists(folder) and not os.path.isdir(folder):
+        # Refused first: others_may_write reads a file's mode as a folder's.
+        return NOT_A_FOLDER.format(folder=escaped(folder))
     there = next(place for place in (folder, *folder.parents) if os.path.lexists(place))
     problem = None
     try:
         if there != folder:
-            # Left to listen, another account could make it first in a folder others may make
-            # folders in, sticky or not, as /tmp, and listen under PrivateUsers=yes would take
-            # that account's folder for root's. Made here, it is this account's, and the check
-            # below finds one another account made before this mkdir.
+            # Left to a later mkdir, another account could make it first in a folder others
+            # may make folders in, sticky or not, as /tmp, and listen under PrivateUsers=yes
+            # would take that account's folder for root's. Made here, it is this account's,
+            # and the check below finds one another account made before this mkdir.
             problem = problem_with(folder, on_the_way(there)) or unmade_problem(folder)
         problem = problem or shared_problem(folder)
     except OSError as error:
-        problem = UNSEEN_FOLDER.format(reason=reason(error), uid=os.geteuid())
-    if problem is None:
+        problem = unseen_problem(error)
+    return None if problem is None else LISTEN_REFUSED.format(folder=escaped(folder),
+                                                              problem=problem)
+
+
+def main() -> int:
+    """The runtime folder's rule as Daemon.listen keeps it (listen_problem), which the
+    daemon's unit runs before each start outside its user namespace: under PrivateUsers=yes
+    stat shows root's files and every other account's as one id, so listen cannot tell
+    another account's folder or link on the way from root's, and here stat can. 1, with
+    listen's words on stderr, for a folder listen would refuse; 0 otherwise, an unset
+    XDG_RUNTIME_DIR included, whose /run/user/<uid> is below root's folders alone."""
+    folder = runtime_home()
+    if folder is None or (problem := listen_problem(folder)) is None:
         return 0
-    print(LISTEN_REFUSED.format(folder=escaped(folder), problem=problem), file=sys.stderr)
+    print(problem, file=sys.stderr)
     return 1
 
 

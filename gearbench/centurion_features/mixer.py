@@ -1,6 +1,6 @@
 """0x0800, G HUB's FeatureC0800MixerAudio: on the A50 X the stream port's mix, the sound
-its Stream Out sends, and the state of the microphone's boom (G HUB's captures of
-2026-10-21, B3, B4-12, B5 and B6b).
+its Stream Out sends, and the state of the microphone's boom (measured on it against G HUB,
+2026-10-21).
 
 The mix, read with function 5 and the byte 00, is the stream port's level, a byte G HUB
 sends back as it read it (00), a count, then for each source its id, its level and 01 for
@@ -12,7 +12,7 @@ Voice, as G HUB's sliders moved them; 00, the microphone's output, and 02, Bluet
 the two G HUB showed muted and disconnected, taken by elimination.
 
 The boom: the function 0 event, `00 00 00 0b` with the boom down and the microphone live,
-`00 00 00 0a` with it up and muted, bit 0 of its last byte (B5). Function 2, sent with no
+`00 00 00 0a` with it up and muted, bit 0 of its last byte. Function 2, sent with no
 parameter, answered `00 00 00 0a` at each of G HUB's starts, the boom up both times, the
 event's layout, which is how it is read here: assumed.
 """
@@ -37,7 +37,7 @@ OUTPUT = 0x00
 #: The boom's byte, and its bit that says the microphone is live.
 BOOM_AT, LIVE = 3, 0x01
 LEVELS = 32
-#: The sources by their ids, by the words the socket gives them.
+#: Each source's id by the word the socket gives it.
 SOURCES = {"mic_out": 0x00, "game": 0x01, "bluetooth": 0x02, "voice": 0x03}
 #: The sources in the order every view lists them, the window's rows' (a50x_page.MIX_TITLES),
 #: the GUIDE's and the man page's: Game, Voice, Mic, Bluetooth, after the stream port.
@@ -124,8 +124,12 @@ def mix_of(reply: bytes) -> Mix:
 
 def echoed(params: bytes) -> Mix:
     """The function 2 event's Mix, which echoes a write: the byte `written` puts first, then
-    the read's layout (mix_of)."""
-    return mix_of(params[1:])
+    the read's layout (mix_of); UnreadableAnswer quoting the event's own bytes for one
+    mix_of cannot read."""
+    try:
+        return mix_of(params[1:])
+    except UnreadableAnswer:
+        raise unreadable(WORDS, params) from None
 
 
 def written(mix: Mix) -> bytes:

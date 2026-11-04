@@ -35,11 +35,20 @@ from .import_plan import (
 )
 from .keyboard import own_entry, shown_lighting
 from .library_files import by_name, slug, unread_reason
-from .lighting import ANIMATIONS
+from .lighting import ANIMATIONS, OFF
 from .macros import Macro, MacroLibrary, macro_summary
 from .profiles import GameProfile, Library
 from .settings_files import ConfigError, read_json, unprefixed
-from .wording import DIRECTION_TURNS, LEFT_OUT, both_ends, counted, kind_of, reason, word_list
+from .wording import (
+    DIRECTION_TURNS,
+    LEFT_OUT,
+    both_ends,
+    counted,
+    kind_of,
+    quoted,
+    reason,
+    word_list,
+)
 
 #: Where the package installs the pack.
 PACKAGED = Path("/usr/share/gearbench/pack")
@@ -85,7 +94,7 @@ def read_pack(directory: Path | None = None) -> Pack:
     Raises PackError when there is no pack."""
     directory = data_dir() if directory is None else directory
     if not directory.is_dir():
-        raise PackError(f"there is no pack at {directory}")
+        raise PackError(f"there is no pack at {directory}; install Gearbench again")
     pack = Pack(directory)
     profiles, macros = Library(directory / PROFILES), MacroLibrary(directory / MACROS)
     for profile in profiles.all():
@@ -139,12 +148,13 @@ def _read_notes(pack: Pack) -> None:
         names = {slug(item.name) for item in items}
         for name, line in notes.items():
             if (fault := _note_fault(line)) is not None:
-                pack.broken.append((NOTES, f"the note on {name!r} {fault}"))
+                why = f"the note on the {CLASH_WORDS[kind].lower()} {quoted(name)} {fault}"
+                pack.broken.append((NOTES, why))
             elif slug(name) not in names:
-                why = f"names no {CLASH_WORDS[kind].lower()} {name!r} the pack can import"
+                why = f"names no {CLASH_WORDS[kind].lower()} {quoted(name)} the pack can import"
                 pack.broken.append((NOTES, why))
             elif (kind, slug(name)) in pack.notes:
-                why = f"a second note on the {CLASH_WORDS[kind].lower()} {name!r}"
+                why = f"a second note on the {CLASH_WORDS[kind].lower()} {quoted(name)}"
                 pack.broken.append((NOTES, why))
             else:
                 pack.notes[kind, slug(name)] = line.strip()
@@ -175,7 +185,7 @@ def _note_fault(line: object) -> str | None:
 #: What a pack profile may not hold, by GameProfile field, and why it is refused: every
 #: field but its name, its programs, its lighting and its mouse color.
 REFUSED_FIELDS = {"bindings": "binds a G key", "shift": "binds a G key",
-                  "mouse": "binds a mouse button",
+                  "mouse": "binds a mouse button", "mouse_shift": "binds a mouse button",
                   "mouse_tuning": "holds DPI stages or a report rate"}
 
 
@@ -199,7 +209,7 @@ def lighting_text(profile: GameProfile) -> str:
         return f"{light.effect.replace('-', ' ').capitalize()} effect"
     # Disabled darkens the board, and a per-key layout's keys still show over
     # it (Keyboard.shown_color).
-    dark = light.effect == "disabled"
+    dark = light.effect == OFF
     if light.mode == PER_KEY and (light.keys or not dark):
         rest = "dark" if dark else format_color(light.background)
         return f"Per-key colors on {counted(len(light.keys), 'key')}, the rest {rest}"
@@ -233,8 +243,8 @@ def listing(pack: Pack) -> list[str]:
     and what was left out (`broken`)."""
     lines = [f"Game profiles in {pack.directory / PROFILES}:"]
     for p in pack.profiles:
-        lines.append(f"    {p.name}: {lighting_text(p)[:1].lower()}{lighting_text(p)[1:]}; "
-                     f"{programs_text(p)}")
+        light = lighting_text(p)
+        lines.append(f"    {p.name}: {light[:1].lower()}{light[1:]}; {programs_text(p)}")
         if note := pack.note(PROFILE, p.name):
             lines.append(f"        {note}")
     if not pack.profiles:
@@ -273,7 +283,7 @@ def chosen_names(pack: Pack, names: Sequence[str]) -> tuple[list[str], list[str]
     for name in names:
         profile, macro = _find(pack.profiles, name), _find(pack.macros, name)
         if profile is None and macro is None:
-            raise PackError(f"the pack has no game profile or macro named {name!r}; "
+            raise PackError(f"the pack has no game profile or macro named {quoted(name)}; "
                             f"--list shows what it has")
         profiles.add(profile)
         macros.add(macro)
@@ -292,12 +302,12 @@ def replace_choices(pack: Pack, names: Iterable[str],
     for name in names:
         profile, macro = _find(pack.profiles, name), _find(pack.macros, name)
         if profile is None and macro is None:
-            raise PackError(f"--replace {name!r}: the pack has no game profile or macro "
+            raise PackError(f"--replace {quoted(name)}: the pack has no game profile or macro "
                             f"of that name; --list shows what it has")
         # _find matches by slug, so a name finds what a given one finds exactly
         # when the two slugs are equal.
         if given_slugs and slug(name) not in given_slugs:
-            raise PackError(f"--replace {name!r}: not among the names given; name it too")
+            raise PackError(f"--replace {quoted(name)}: not among the names given; name it too")
         for kind, found in ((PROFILE, profile), (MACRO, macro)):
             if found is not None:
                 choices[kind, found] = REPLACE

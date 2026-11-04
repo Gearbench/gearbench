@@ -13,7 +13,6 @@ key there is refused at save.
 from __future__ import annotations
 
 import logging
-import math
 import string
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -49,13 +48,16 @@ from .uinput import (
     BTN_SIDE,
     KEYCODES,
     MODIFIER_KINDS,
+    SYSRQ_ARMED,
     PointerNameError,
+    SysrqRefused,
     UinputError,
     VirtualKeyboard,
     VirtualMouse,
     binding_parts,
     parse_binding,
     shown_spec,
+    spec_for_keys,
 )
 from .wording import (
     MACRO_NEEDS_A_NAME,
@@ -86,12 +88,6 @@ REPEAT_WORDS = {mode: name.lower() for mode, name in REPEAT_NAMES.items()}
 #: `macro-run` say each state in the one sentence, the banner with its mode after it.
 MACRO_STARTS = "Macro {name} starts in {seconds:g} s. Click into the window it is for."
 MACRO_RUNNING = "Macro {name} is running"
-
-
-def countdown_seconds(left: float) -> int:
-    """The seconds a countdown shows with `left` to go, in every view: whole and rounded
-    up, so its last tenth reads 1 s, never 0."""
-    return math.ceil(left)
 
 #: One line saying what each repeat mode does, for a list of macros.
 REPEAT_SUMMARIES = {
@@ -205,11 +201,13 @@ def text_problem(text: str) -> str | None:
     if not text:
         return "a text step needs something to type"
     if len(text) > MAX_TEXT_LENGTH:
-        return (f"{len(text)} characters is longer than the {MAX_TEXT_LENGTH} "
-                f"a text step may carry")
-    bad = next((char for char in text if char not in TYPING), None)
-    if bad is not None:
-        return f"text steps send the keys of a US ANSI layout, which has no key for {bad!r}"
+        return (f"{len(text):,} characters is more than the {MAX_TEXT_LENGTH:,} "
+                f"a text step may hold")
+    # The place, never the character: the text can be a password, and the daemon's
+    # library logs this refusal of a file it skips (SkipWarnings).
+    place = next((i for i, char in enumerate(text, start=1) if char not in TYPING), None)
+    if place is not None:
+        return f"text steps send US ANSI keys, and none types character {place}"
     return None
 
 
@@ -265,7 +263,7 @@ def validate_step(raw: object, index: int, where: str) -> dict:
             raise ConfigError(
                 f"{at}.ms: a delay needs a whole number of milliseconds, {_not(raw, 'ms')}")
         if not 0 <= ms <= MAX_DELAY_MS:
-            raise ConfigError(f"{at}.ms: {ms} ms is outside 0 to {MAX_DELAY_MS}")
+            raise ConfigError(f"{at}.ms is 0 to {MAX_DELAY_MS:,} ms, not {ms}")
         return {"type": DELAY, "ms": ms}
 
     button = raw.get("button", "")
@@ -299,7 +297,7 @@ def validate_steps(raw: object, where: str) -> list[dict]:
         raise ConfigError(f"{where}.steps: a macro needs at least one step")
     if len(raw) > MAX_STEPS:
         raise ConfigError(
-            f"{where}.steps: {len(raw)} steps is more than the {MAX_STEPS} a macro may hold"
+            f"{where}.steps: {len(raw):,} steps is more than the {MAX_STEPS} a macro may hold"
         )
     return [validate_step(step, i, where) for i, step in enumerate(raw)]
 
@@ -407,9 +405,8 @@ class MacroLibrary(FolderLibrary[Macro]):
         folder could not be listed or a file would not load, which may hold it. A shadowed
         file is not one: its name is that of the file read in its place."""
         said = f"no macro named {quoted(name)}"
-        if self.unlisted_reason is not None:
-            # The one entry, under the folder's name, its path and reason in words.
-            return f"{said}: {self.skipped[0][1]}"
+        if self.unlisted is not None:
+            return f"{said}: {self.unlisted}"
         unread = [escaped(file) for file, _why in self.unread()]
         return f"{said}; {may_hold_it(unread)}" if unread else said
 
@@ -510,6 +507,9 @@ class MacroRunner:
         #: The key that started it, the only one whose release counts: a G key,
         #: `mouse:` and a button name, or PLAY_KEY.
         self.key: str | None = None
+        #: What started it, for a caller that stops the run of a device going away; None for
+        #: a play or a caller that gives none. Cleared with the macro.
+        self.source: object | None = None
         self.held = False
         #: The step to run next.
         self.index = 0
@@ -529,14 +529,16 @@ class MacroRunner:
         #: only for a macro played with a delay.
         self._starts_at = 0.0
 
-    def start(self, macro: Macro, key: str, now: float) -> None:
-        """Begin a macro under the key that was pressed; whatever ran stops first.
+    def start(self, macro: Macro, key: str, now: float, source: object | None = None) -> None:
+        """Begin a macro under the key that was pressed, kept as `source`'s; whatever ran
+        stops first.
 
         `now` is the caller's clock, the one it passes `tick`. A `toggle`
         macro's second press never gets here: `Bindings.run_macro` stops it
         first, matching by slug, before it reads the library.
         """
         self._begin(macro, key, held=True, at=now)
+        self.source = source
 
     def play(self, macro: Macro, now: float, delay: float = 0.0) -> None:
         """Begin a macro no key started (Run, `macro-run`), `delay` seconds from `now`.
@@ -551,7 +553,7 @@ class MacroRunner:
             log.debug("macro %r canceled by %r", self.macro.name, macro.name)
         self.cancel()
         self.macro, self.key, self.held = macro, key, held
-        self._due = self._cycle_start = self._starts_at = at
+        self._due = self._starts_at = at
 
     def starts_in(self, now: float) -> float | None:
         """Seconds until a played macro's first step while its delay counts
@@ -570,7 +572,7 @@ class MacroRunner:
     def cancel(self) -> None:
         """Stop and release everything the macro holds. Every stop goes through here."""
         self.release_held()
-        self.macro = self.key = None
+        self.macro = self.key = self.source = None
         self.held = False
         self.index = 0
         self._next_cycle = False
@@ -592,7 +594,13 @@ class MacroRunner:
             try:
                 self._write(device, code, False, target)
             except UinputError as exc:
-                log.warning("could not release %s code %d: %s", device, code, reason(exc))
+                # The reason names the virtual device; the key is named as a step spells it.
+                if device == self.POINTER:
+                    button = next(name for name, sent in CLICK_BUTTONS.items() if sent == code)
+                    held = f"the {CLICK_LABELS[button]} button"
+                else:
+                    held = spec_for_keys([code])
+                log.warning("could not release %s: %s", held, reason(exc))
         self._held = []
 
     def deadline(self) -> float | None:
@@ -717,10 +725,16 @@ class MacroRunner:
     def _type(self, keyboard: VirtualKeyboard, text: str) -> None:
         """One tap per character, through the virtual keyboard's own `tap`,
         which leaves a held shift down rather than letting it up after the
-        first capital."""
-        for char in text:
+        first capital. A tap refused as a SysRq command raises UinputError naming the
+        character's place in the text, never the character: the text can be a password,
+        and `_emit` warns of the refusal in the journal."""
+        for place, char in enumerate(text, start=1):
             shift, code = TYPING[char]
-            keyboard.tap([_SHIFT_CODE] if shift else [], code)
+            try:
+                keyboard.tap([_SHIFT_CODE] if shift else [], code)
+            except SysrqRefused:
+                raise UinputError(f"{keyboard.name} stopped at character {place} of the text: "
+                                  f"{SYSRQ_ARMED.format(key='it')}") from None
 
 
 # -- recording one ---------------------------------------------------------
@@ -951,18 +965,16 @@ class MacroRecorder:
             if identity[0] == self.KEY_DEVICE:
                 # The modifiers waiting are this key's combination.
                 self._waiting = []
-            if not self._commit():
-                return False
-            return self._press(when, identity, fields)
+            return self._commit() and self._press(when, identity, fields)
         hold = self._find(identity)
         if hold is None:
             return False            # nothing here pressed it, so nothing to record
-        # A modifier only this key took comes up with this key's release.
-        self._let_go = [(at, kind) for at, kind in self._let_go
-                        if any(taker is not hold for taker in self._takers(kind))]
-        if not self._commit():
-            return False
-        return self._release(when, hold)
+        # A modifier only this key took comes up with this key's release, unless a press
+        # waiting goes in first: then its own key_up goes in at the time it came up.
+        if not self._waiting:
+            self._let_go = [(at, kind) for at, kind in self._let_go
+                            if any(taker is not hold for taker in self._takers(kind))]
+        return self._commit() and self._release(when, hold)
 
     def _commit(self) -> bool:
         """Put in, in time order, each waiting modifier's press at the time it
@@ -1198,8 +1210,6 @@ def unbalanced(steps: list[dict], repeat: str) -> list[str]:
             keys = [(("button", step["button"]), step_summary(step)[1])]
         else:
             continue
-        # As the step's row shows it: the warnings share a label, one a line.
-        name = step_summary(step)[1]
         if kind in (KEY_DOWN, CLICK_DOWN):
             for identity, part in keys:
                 held.setdefault(identity, (index, part))
@@ -1208,8 +1218,9 @@ def unbalanced(steps: list[dict], repeat: str) -> list[str]:
         for identity in released:
             del held[identity]
         if not released:
-            orphans.append((index, name, [identity for identity, _part in keys
-                                          if identity not in named]))
+            # As the step's row shows it: the warnings share a label, one a line.
+            orphans.append((index, step_summary(step)[1],
+                            [identity for identity, _part in keys if identity not in named]))
         named.update(identity for identity, _part in keys)
     if repeat in (WHILE_HELD, TOGGLE):
         orphans = [orphan for orphan in orphans

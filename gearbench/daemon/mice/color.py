@@ -1,10 +1,9 @@
 """The mice's lighting: which a mouse has (`find_lighting`), the claim and its release, a
 mouse's own color or effect, the color a synced mouse takes from the leader
 (Daemon.synced_color) written to it (`sync_mouse_color`), black at a power-off (`go_dark`),
-the command that sets a game profile's mouse color (`profile_mouse_color`), and the lighting
-given back after a power-on, a silence or a DPI flash. A mouse that waits to claim
-(WAITS_TO_CLAIM) is released once at its attach when it has nothing to show, claimed with its
-first lighting write, and released once it has none to show again. A mouse that may be asleep
+and the lighting given back after a power-on, a silence or a DPI flash. A mouse that waits to
+claim (WAITS_TO_CLAIM) is released once at its attach when it has nothing to show, claimed with
+its first lighting write, and released once it has none to show again. A mouse that may be asleep
 is sent its lighting without waiting for the replies, one write in flight at a time, settled
 as they arrive (`check_mouse_write`), but for one whose lighting claims each effect, which
 gets a claim first and waited writes. With them is the read of a mouse's HID++ node
@@ -28,15 +27,14 @@ from ...mouse import (
     OWN_LIGHTING,
     WAITS_TO_CLAIM,
     ZONE_LIGHTING,
-    MouseError,
     lighting_shown_words,
 )
 from ...mouse_device import Mouse
 from ...mouse_lighting import MouseLights, ZoneLighting
-from ...profiles import mouse_color_json, read_mouse_color
-from ...wording import quoted, reason
+from ...sensor import MouseError
+from ...wording import reason
 from ..shared import (
-    NO_GAME_PROFILE_NAMED,
+    NO_LIGHTING,
     NOT_SYNCED,
     SYNC_ON,
     failure_reason,
@@ -91,7 +89,6 @@ class MouseLighting:
             "mouse_sync": self._cmd_mouse_sync,
             "mouse_color": self._cmd_mouse_color,
             "mouse_effect": self._cmd_mouse_effect,
-            "profile_mouse_color": self._cmd_profile_mouse_color,
         }
 
     @staticmethod
@@ -117,9 +114,9 @@ class MouseLighting:
 
     def lighting_shown_by_mouse(self) -> list[dict]:
         """Whose lighting each attached mouse that waits to claim shows (lighting_shown), by
-        name, for `status`."""
-        return [{"name": m.name, "shown": m.lighting_shown} for m in self.mice.attached
-                if m.lighting_shown is not None]
+        name and node, for `status`: two mice of one model share a name."""
+        return [{"name": m.name, "device": str(m.dev.path), "shown": m.lighting_shown}
+                for m in self.mice.attached if m.lighting_shown is not None]
 
     @staticmethod
     def claim_at_attach(mouse: Mouse, lighting: MouseLights | None) -> None:
@@ -151,9 +148,8 @@ class MouseLighting:
     def claim_first(self, target: AttachedMouse) -> bool:
         """Claim the lighting of a mouse that shows its own (own_lighting) before a lighting
         write, and of one whose lighting claims each effect (claims_each_effect) that may be
-        asleep: sent without waiting, that claim's refusal would go unseen and the effect after
-        it be stored. Once the claim lands the mouse is heard from, so its write waits. True
-        when the write may go. One not answering is sent nothing, and one that may be asleep
+        asleep. Once the claim lands the mouse is heard from, so its write waits. True when the
+        write may go. One not answering is sent nothing, and one that may be asleep
         and leaves the claim unanswered is sent no write: either answers False, and
         send_or_write owes the write, its claim with it (tend_mice), a drag's preview excepted.
         Any other failed claim raises mouse_call's MouseError."""
@@ -323,7 +319,7 @@ class MouseLighting:
         if target.may_be_asleep() and not claims_each_effect(target.its_lighting):
             replies = self.mice.mouse_call(send, target=target, answered=False)
             target.sent = SentColor(color, replies, time.monotonic() + MOUSE_WRITE_DEADLINE,
-                                    repeat)
+                                    repeat, preview=not owe)
             return False
         self.mice.mouse_call(write, target=target)
         return True
@@ -333,11 +329,12 @@ class MouseLighting:
 
         Answered, the mouse is answering and a committed color counts as shown. Unanswered at
         the deadline, or answered by its receiver that it is out of reach, it is marked not
-        answering and owed the lighting (tend_mice); one heard from since the send, a
-        notification read and still queued included, is awake and its reply was lost, so it is
-        owed but not marked here, and a queued link-down notice marks it as it is taken
-        (take_link_notice). An error reply is a refusal, logged
-        and not owed. An effect goes out with `repeat` False, so it never counts as shown.
+        answering and owed the lighting (tend_mice); one heard from since the send, a battery
+        report (`reported_at`) and a notification read and still queued included, is awake and
+        its reply was lost, so it is owed, a drag's preview excepted, but not marked here, and a
+        queued link-down notice marks it as it is taken (take_link_notice). An error reply is a
+        refusal, logged, at debug for a drag's preview, and not owed. An effect goes out with
+        `repeat` False, so it never counts as shown.
         """
         sent = attached.sent
         if sent is None:
@@ -358,13 +355,18 @@ class MouseLighting:
         attached.dev.forget(*sent.replies)
         attached.sent = None
         if refused is None and None in answers:
-            attached.owed_lighting = True
-            # A notification read since and still queued, which mouse_events takes next, is
-            # the mouse heard from too.
-            if attached.heard_at > sent.deadline - MOUSE_WRITE_DEADLINE or attached.dev.pending:
-                log.debug("%s did not answer its lighting, but was heard since; sent again",
-                          attached.name)
+            # A battery report taken since, which leaves heard_at as it was (take_report), and a
+            # notification read since and still queued, which mouse_events takes next, are the
+            # mouse heard from too.
+            heard = max(attached.heard_at, attached.reported_at)
+            if heard > sent.deadline - MOUSE_WRITE_DEADLINE or attached.dev.pending:
+                # A preview is dropped, as send_or_write drops one: owed, the stored color
+                # would go out between two previews.
+                attached.owed_lighting = attached.owed_lighting or not sent.preview
+                log.debug("%s did not answer its lighting, but was heard since; %s",
+                          attached.name, "dropped, a preview" if sent.preview else "sent again")
                 return
+            attached.owed_lighting = True
             log.info("%s did not answer its lighting within %.0f s; it is owed it",
                      attached.name, MOUSE_WRITE_DEADLINE)
             self.mice.mark_silent(attached)
@@ -377,7 +379,9 @@ class MouseLighting:
             return
         self.mice.mark_answering(attached)
         if refused is not None:
-            log.info("%s refused its lighting: %s", attached.name, refused)
+            # A drag sends many previews: one line each would fill the journal.
+            log.log(logging.DEBUG if sent.preview else logging.INFO,
+                    "%s refused its lighting: %s", attached.name, refused)
             return
         if sent.repeat:
             attached.showing = sent.color
@@ -406,14 +410,6 @@ class MouseLighting:
             self.mice.mark_answering(attached)
         return heard
 
-    def color_to_save(self, request: dict) -> int | None:
-        """The mouse color `save_profile` gives the game profile it saves: the request's
-        `mouse_color`, a null for none, else the layer's, the loaded game profile's or none
-        from an M profile, as its own DPI stages go (GameCommands._cmd_save_profile)."""
-        if "mouse_color" in request:
-            return read_mouse_color(request["mouse_color"], "save_profile.mouse_color")
-        return self.d.profile_color()
-
     def sync_mouse_color(self, color: int, repeat: bool = True,
                          target: AttachedMouse | None = None) -> bool:
         """Push `color` to every attached mouse with lighting, or only `target`, when sync is
@@ -421,10 +417,11 @@ class MouseLighting:
         the keyboard goes dark. Answers whether every write took. A mouse without lighting
         the daemon drives is left as it is, in NOT_SYNCED's words once an attach.
 
-        Never raises into the keyboard color paths that call it: a mouse missing or asleep
-        mid-write is skipped. A preview's effect writes are not waited for, so a push per
-        preview is cheap, except on a mouse whose lighting claims each effect. `repeat` False
-        is a preview (write_mouse_color).
+        Never raises into the keyboard color paths that call it: a mouse missing mid-write is
+        skipped, and one that stops answering is owed the color (tend_mice), a preview excepted.
+        A preview's effect writes are not waited for, so a push per preview is cheap, except on
+        a mouse whose lighting claims each effect. `repeat` False is a preview
+        (write_mouse_color).
         """
         if not self.d.config.mouse_sync_color:
             return True
@@ -453,6 +450,10 @@ class MouseLighting:
                     log.debug("mouse color sync skipped for %s: %s", attached.name, exc)
                 else:
                     log.info("could not give %s the synced color: %s", attached.name, reason(exc))
+                if repeat and attached.silent:
+                    # Not answering at this write: owed, as at the skip above. A mouse that was
+                    # only slow sends no power-on report to bring it.
+                    attached.owed_lighting = True
                 took = False
         return took
 
@@ -552,7 +553,7 @@ class MouseLighting:
         sync on, which only a mouse with lights follows."""
         target = self.mice.mouse_for(request)
         if target.lighting is None:
-            raise MouseError(f"the {target.name} has no lighting")
+            raise MouseError(NO_LIGHTING.format(target.name))
         if self.d.config.mouse_sync_color:
             raise MouseError(SYNC_ON.format(device="mouse", command="mouse-sync",
                                             leader=followed(self.d.per_keyboard.leader())))
@@ -567,8 +568,8 @@ class MouseLighting:
         if value or was:
             self.sync_changed(value, color)
         # `mouse_lights`, as status names it. `mouse` is the same fact under 1.1.0's name,
-        # which a mouse write's reply now gives the mouse written (aimed): kept through the
-        # next release for a script written for 1.1.0.
+        # which a mouse write's reply gives the mouse written (aimed): kept for a script
+        # written for 1.1.0.
         lights = self.mouse_with_lights()
         reply: dict = {"ok": True, "mouse_sync_color": value, "mouse_lights": lights,
                        "mouse": lights}
@@ -602,27 +603,3 @@ class MouseLighting:
                 mouse.name, name, effect_names(mouse.its_lighting.clusters))}
         return aimed(mouse, {"ok": True, "effect": name, "clusters": clusters})
 
-    def _cmd_profile_mouse_color(self, request: dict) -> dict:
-        """Set the color a synced mouse shows while game profile `value` is loaded, or with a
-        null `color` none, so that it shows the keyboard's (the owner's decision of
-        2026-10-23); on the daemon's own copy when it is the loaded one, whose synced mouse
-        takes it at once, as Games' commands edit a profile. With `if_none` true, as the pack's
-        fill sends it, a profile that has a color by then keeps it, refused."""
-        name = name_text(request["value"], "profile_mouse_color")
-        color = read_mouse_color(request["color"], "profile_mouse_color.color")
-        loaded, profile = self.d.games.loaded_copy(name)
-        if profile is None:
-            return {"ok": False, "error": NO_GAME_PROFILE_NAMED.format(quoted(name))}
-        if request.get("if_none") is True and profile.mouse_color is not None:
-            # Read after the import's 'game profile "X"'s mouse color: ' (import_plan._what).
-            return {"ok": False, "error": "one was set since the import read it; import again "
-                                          "to choose"}
-        previous, profile.mouse_color = profile.mouse_color, color
-        try:
-            profile.save()
-        except BaseException:
-            profile.mouse_color = previous
-            raise
-        if loaded:
-            self.d.sync_to_leader()
-        return {"ok": True, "profile": profile.name, "mouse_color": mouse_color_json(color)}

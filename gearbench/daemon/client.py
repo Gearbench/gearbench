@@ -1,5 +1,5 @@
 """The daemon's client, for the CLI and the window: the socket's path, whether a daemon
-accepts there (listening), the one round trip both make (send_command), and what a failed
+listens there (listening), the one round trip both make (send_command), and what a failed
 one means (failure). The daemon package's `__init__` gives the front ends the names they
 take from here, so they import the daemon alone.
 """
@@ -26,28 +26,58 @@ NO_DAEMON_STEP = {
     False: f"start it with `{service_command('start')}` or `gearbench-ctl daemon`",
     True: "run the command as yourself, not as root: the daemon runs as your own account"}
 
+#: send_command's next step where another account listens and root has no invoking user, which
+#: has no daemon of its own to point at, since the daemon never runs as root.
+FROM_THE_ACCOUNT = "run the command with sudo, run0 or pkexec from the account whose daemon it is"
+
+
+def logind_runtime(uid: int) -> Path:
+    """The runtime folder logind makes for the user `uid`, which the client takes for
+    XDG_RUNTIME_DIR while that is not set to a full path (runtime_home)."""
+    return Path(f"/run/user/{uid}")
+
 
 def socket_path() -> Path:
-    return (runtime_home() or Path(f"/run/user/{os.getuid()}")) / "gearbench.sock"
+    return (runtime_home() or logind_runtime(os.getuid())) / "gearbench.sock"
 
 
 def listening(path: Path) -> bool:
-    """Whether a daemon accepts on `path`; a file left by a killed daemon refuses."""
+    """Whether a daemon listens on `path`, one whose listen backlog is full included; a file
+    left by a killed daemon refuses."""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        # A blocking connect() to a full backlog waits, with no timeout, until the daemon
+        # accepts, which its start_up or a device job holds off; Linux refuses a non-blocking
+        # one with EAGAIN at once (measured 2026-11-01).
+        probe.setblocking(False)
         try:
             probe.connect(str(path))
+        except BlockingIOError:
+            return True
         except OSError:
             return False
     return True
 
 
+#: The most digits a user id has, a uid_t being 32 bits. A longer run of digits names no
+#: user, and int() refuses one past sys.get_int_max_str_digits (4300 by default).
+UID_DIGITS = len(str(2**32 - 1))
+
+
 def invoking_uid() -> int | None:
     """As root gained through sudo, run0 or pkexec, the id of the user who ran it, as SUDO_UID
-    or PKEXEC_UID names it; None for any other run, and for an id that is not a number."""
+    or PKEXEC_UID names it; None for any other run, and for an id that is not a number of
+    UID_DIGITS digits at most."""
     invoker = os.environ.get("SUDO_UID") or os.environ.get("PKEXEC_UID") or ""
-    if os.geteuid() != 0 or not invoker.isdecimal():
+    if os.geteuid() != 0 or not invoker.isdecimal() or len(invoker) > UID_DIGITS:
         return None
     return int(invoker)
+
+
+def root_alone() -> bool:
+    """Whether this runs as root with no invoking user named (invoking_uid), as after su - or
+    doas: no daemon can be asked then, since the daemon runs as a user's own account, never
+    in root's runtime folder."""
+    return os.geteuid() == 0 and invoking_uid() is None
 
 
 def use_invoking_users_runtime_dir() -> None:
@@ -58,10 +88,12 @@ def use_invoking_users_runtime_dir() -> None:
     own, whose folder is root's. No daemon listens in root's folder. A relative one counts as
     unset, since socket_path() ignores it.
 
-    Taken from sudoers(5), pkexec(1) and run0(1); not checked on a run under any of them."""
+    Taken from sudoers(5), pkexec(1) and run0(1). On Fedora 44 on 2026-11-03 the report run
+    under each reached the account's PipeWire, and under sudo and pkexec it named the device
+    the account's daemon holds."""
     invoker = invoking_uid()
-    if invoker is not None and runtime_home() in (None, Path(f"/run/user/{os.getuid()}")):
-        os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{invoker}"
+    if invoker is not None and runtime_home() in (None, logind_runtime(os.getuid())):
+        os.environ["XDG_RUNTIME_DIR"] = str(logind_runtime(invoker))
 
 
 class UnreadableReply(json.JSONDecodeError):
@@ -82,15 +114,6 @@ def peer_uid(conn: socket.socket) -> int:
     _pid, uid, _gid = UCRED.unpack(conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
                                                    UCRED.size))
     return uid
-
-
-def _way_to_your_daemon(invoker: int | None) -> str:
-    """The next step of send_command's refusal of another account's listener. Root with no
-    invoking user named has no daemon of its own to point at, since the daemon never runs as
-    root."""
-    if invoker is None and os.geteuid() == 0:
-        return "run the command with sudo, run0 or pkexec from the account whose daemon it is"
-    return OWN_FOLDER.format(uid=os.geteuid() if invoker is None else invoker)
 
 
 def send_command(request: dict, timeout: float = 3.0) -> dict:
@@ -115,15 +138,34 @@ def send_command(request: dict, timeout: float = 3.0) -> dict:
         # where root looks. A third account's is refused, since a folder sudo kept may be one
         # another account can listen in.
         invoker = invoking_uid()
-        if peer != (os.geteuid() if invoker is None else invoker):
+        own = os.geteuid() if invoker is None else invoker
+        if peer != own:
             # A PermissionError, as connect()'s to another account's socket of mode 0600: a
             # ConnectionError would read as no daemon running.
+            step = FROM_THE_ACCOUNT if invoker is None and own == 0 else OWN_FOLDER.format(uid=own)
             raise PermissionError(
                 f"another account (uid {peer}) listens on the socket, not your Gearbench daemon, "
-                f"so nothing was sent; {_way_to_your_daemon(invoker)}")
-        conn.sendall(json.dumps(request).encode())
-        conn.shutdown(socket.SHUT_WR)
-        data = b"".join(iter(lambda: conn.recv(65536), b""))
+                f"so nothing was sent; {step}")
+        # A daemon that cuts a request off past request_reader.MAX_REQUEST answers, then
+        # closes with the rest unread: Linux fails the send, or resets the connection once
+        # the answer is read (measured 2026-10-31). Its answer is read either way; with none,
+        # the send's or the reset's error stands.
+        cut_off: OSError | None = None
+        try:
+            conn.sendall(json.dumps(request).encode())
+            conn.shutdown(socket.SHUT_WR)
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            cut_off = exc
+        chunks: list[bytes] = []
+        try:
+            while chunk := conn.recv(65536):
+                chunks.append(chunk)
+        except ConnectionResetError:
+            if not chunks:
+                raise
+        if not chunks and cut_off is not None:
+            raise cut_off
+        data = b"".join(chunks)
     if not data:
         # serve_one answers every request it reads, so no reply is a daemon that died after
         # reading it: a ConnectionError, like the kernel's reset when it died before.
@@ -143,12 +185,13 @@ def send_command(request: dict, timeout: float = 3.0) -> dict:
 
 
 #: What a failed round trip means (`failure`). Each front end puts its own words to them,
-#: with these three in common: a daemon it could not reach, a reply it could not read, and
-#: no daemon running (DOWN).
+#: with these four in common: a daemon it could not reach, a reply it could not read, no
+#: daemon running (DOWN), and one that did not answer in time (BUSY).
 DOWN, BUSY, UNREAD, UNKNOWN = "down", "busy", "unread", "unknown"
 NOT_REACHED = "the daemon could not be reached"
 REPLY_UNREAD = "the daemon's reply could not be read"
 NOT_RUNNING = "the daemon is not running"
+NOT_IN_TIME = "the daemon did not answer in time; it may be busy"
 
 
 def failure(error: BaseException | None) -> str:

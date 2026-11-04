@@ -7,8 +7,8 @@ used up its inotify instances, they keep their own pace.
 Any account can put events on the watch: utimensat(2) lets an account that may write a node
 set its times, every account may write /dev/null, and each such call is an IN_ATTRIB on the
 watch (inotify(7)). So the watch is read at most once a READ_GAP, and a full queue runs the
-looks CABLE_LOOK, their pace without the watch, after the watch last ran them, or at the time
-a node made or an earlier full queue already set (pump)."""
+looks within CABLE_LOOK and at their pace without the watch (pump), but brings the mice's
+attach retry forward only with a node's own event among them (named)."""
 
 from __future__ import annotations
 
@@ -62,6 +62,13 @@ class Plugs:
         self.fd: int | None = None
         #: A node came, went or was opened to this user since the looks last ran.
         self._news = False
+        #: A node's own event came since the looks last ran, one made among them: a full
+        #: queue names none (came).
+        self._named = False
+        #: Whether the looks `came` last ran answer a node's own event, not a full queue
+        #: alone, which any account can bring: only a node's brings the mice's attach retry
+        #: forward (Mice.look_now).
+        self.named = False
         #: When the looks run for the nodes made that this user could not open yet, CABLE_LOOK
         #: after the first, whether or not udev's grant came before, or for a full queue
         #: (pump); None until either comes, and again once that time is past (came).
@@ -118,10 +125,13 @@ class Plugs:
                 continue
             elif not node_denied(DEV / name):
                 log.debug("%s changed (inotify %#x); looking for devices now", DEV / name, mask)
-                self._news = True
-            elif mask & IN_CREATE and self._grant_by is None:
-                log.debug("%s made, not yet open to Gearbench; waiting for udev", DEV / name)
-                self._grant_by = now + CABLE_LOOK
+                self._news = self._named = True
+            elif mask & IN_CREATE:
+                self._named = True
+                if self._grant_by is None:
+                    log.debug("%s made, not yet open to Gearbench; waiting for udev",
+                              DEV / name)
+                    self._grant_by = now + CABLE_LOOK
 
     def deadlines(self) -> list[float]:
         """When a node made waits no longer for udev's grant, or a full queue for its looks
@@ -129,8 +139,8 @@ class Plugs:
         return [at for at in (self._grant_by, self._read_at) if at is not None]
 
     def came(self) -> bool:
-        """Whether the looks run at this pass (pump), once; and the watch read again once
-        its gap is past."""
+        """Whether the looks run at this pass (pump), once, `named` saying whether a node's
+        own event brought them; and the watch read again once its gap is past."""
         now = time.monotonic()
         # Not look_due: its slack would shorten the gap.
         if self._read_at is not None and now >= self._read_at:
@@ -141,6 +151,7 @@ class Plugs:
         news, self._news = self._news, False
         if news:
             self._overflow_by = now + CABLE_LOOK
+            self.named, self._named = self._named, False
         return news
 
     def close(self) -> None:

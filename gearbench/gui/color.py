@@ -8,15 +8,24 @@ reads back through the same range-checked code as one the CLI writes.
 from __future__ import annotations
 
 import colorsys
+import functools
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 from gi.repository import Adw, Gdk, Gtk
 
-from ..config import format_color, parse_color
+from ..config import SAVED_COLORS_MAX, format_color, parse_color
 from ..settings_files import ConfigError
 from ..wording import counted
-from .style import EntryTexts, Styler, confirm, swatch_class, take_color_class, weakly
+from .style import (
+    EntryTexts,
+    Styler,
+    confirm,
+    swatch_class,
+    take_color_class,
+    watch_refused,
+    weakly,
+)
 from .worker import Settle
 
 if TYPE_CHECKING:                       # pragma: no cover
@@ -26,6 +35,8 @@ if TYPE_CHECKING:                       # pragma: no cover
 SAVED_TITLE = "Saved colors"
 SAVED_HELP = "Click to apply, right-click to remove; + saves the current color"
 SAVE_TIP = "Save the current color"
+#: A picker's line where a drag reaches the device only at its release.
+RELEASE_HELP = "Sent when you let go"
 #: The keys that do what a right click does on a focused widget, as Shift+F10 and Menu, the
 #: context menu keys, do on GTK's own color plane.
 RIGHT_CLICK_KEYS = "Delete|KP_Delete|BackSpace|<Shift>F10|Menu"
@@ -56,8 +67,26 @@ def pure_hue(hue: float) -> int:
     return from_hsv((hue, 1.0, 1.0))
 
 
+def not_a_color(text: str) -> bool:
+    """True for a Hex row's text parse_color refuses: the row is red while it holds it
+    (watch_refused)."""
+    try:
+        parse_color(text, "")
+    except ConfigError:
+        return True
+    return False
+
+
+#: How many colors to_rgba keeps made, more than any animation draws: wave and cycle, which draw
+#: the most, draw only the 1,530 full hues (6 x 255).
+RGBA_KEPT = 4096
+
+
+@functools.lru_cache(maxsize=RGBA_KEPT)
 def to_rgba(color: int) -> Gdk.RGBA:
-    """`color` as an opaque Gdk.RGBA, for what the drawn keyboard draws under its keys."""
+    """`color` as an opaque Gdk.RGBA, for what the drawn keyboard draws under its keys. Made
+    once for each color and shared, since each frame of an animation needs one for each lit
+    key: a caller never changes it."""
     rgba = Gdk.RGBA()
     rgba.parse(format_color(color))
     return rgba
@@ -107,7 +136,6 @@ class ColorPicker:
         self.on_preview = on_preview
         self.on_commit = on_commit
         self.on_error = on_error
-        self.color = color
         self._hsv = [0.0, 1.0, 1.0]
         #: True from press to release, or until a run of keys settles: the
         #: window's periodic reads wait for it so they do not fight the drag.
@@ -170,6 +198,7 @@ class ColorPicker:
                                         focusable=False))
 
         self.hex_row = Adw.EntryRow(title="Hex", show_apply_button=True)
+        watch_refused(self.hex_row, not_a_color)
         self.hex_row.connect("apply", weakly(self._on_hex))
         self.row.add_row(self.hex_row)
         self.set_color(color)
@@ -338,10 +367,9 @@ class ColorPicker:
 
     def _on_hex(self, row: Adw.EntryRow) -> None:
         try:
-            color = parse_color(row.get_text(), "Color")
+            color = parse_color(row.get_text(), row.get_title())
         except ConfigError as exc:
             self.on_error(str(exc))
-            self._show_text()
             return
         self.apply(color)
 
@@ -372,16 +400,13 @@ class SavedColors:
     (`window.saved_colors`), a click showing it on the picker and committing it, as the Hex
     row does, a right-click or one of RIGHT_CLICK_KEYS removing it after a question, and +
     saving the color `current` gives, the picker's by default. Every picker has one, so each
-    offers the same list (the owner's rule of 2026-10-18 on feature parity).
-    `refresh_css` loads the swatches' rules: the Keyboard tab's, which every page shares."""
+    offers the same list (the owner's rule of 2026-10-18 on feature parity)."""
 
     def __init__(self, picker: ColorPicker, window: Window,
-                 current: Callable[[], int] | None = None,
-                 refresh_css: Callable[[], None] = lambda: None) -> None:
+                 current: Callable[[], int] | None = None) -> None:
         self._window = window
         self._picker = picker
         self._current = current or (lambda: picker.color)
-        self._refresh_css = refresh_css
         #: The colors the buttons show, which a rebuild finds the focus's color in.
         self._shown: tuple[int, ...] = ()
         row = Adw.ActionRow(title=SAVED_TITLE, subtitle=SAVED_HELP)
@@ -424,7 +449,6 @@ class SavedColors:
                 buttons[min(was, len(buttons) - 1)].grab_focus()
             else:
                 self.add_button.grab_focus()
-        self._refresh_css()
 
     def _button(self, color: int) -> Gtk.Button:
         area = Gtk.Box(css_classes=["g915-saved", swatch_class(color)])
@@ -458,7 +482,7 @@ class SavedColors:
     def on_save(self, _b: Gtk.Button | None) -> None:
         color = self._current()
         if color in self._window.saved_colors:
-            self._window.toast("Already saved")
+            self._window.toast(f"{format_color(color)} is already saved")
             return
         self._window.call({"command": "save_color", "value": format_color(color)},
                           lambda reply: self._took_save(reply, color))
@@ -470,7 +494,11 @@ class SavedColors:
         self._window.took_saved(reply)
         if reply is None:
             return
-        gone = [old for old in before if old not in self._window.saved_colors]
+        # The daemon drops its oldest only to make room in a full row; a color gone from a
+        # shorter one was forgotten elsewhere since the last read.
+        after = self._window.saved_colors
+        gone = ([old for old in before if old not in after]
+                if len(after) == SAVED_COLORS_MAX else [])
         self._window.toast(
             f"Saved {format_color(color)} and removed the oldest, {format_color(gone[0])}"
             if gone else f"Saved {format_color(color)}")
@@ -480,6 +508,6 @@ class SavedColors:
         annoying to redo."""
         text = format_color(color)
         confirm(self._window, f"Remove {text}?",
-                "It leaves the saved list; the lighting does not change.", "Remove",
+                "It is removed from Saved colors; the lighting does not change.", "Remove",
                 lambda: self._window.call({"command": "forget_color", "value": text},
                                           self._window.took_saved))

@@ -1,9 +1,9 @@
 """The Macros tab: the library on the left, one macro's editor on the right.
 
 The worker thread reads `~/.config/gearbench/macros/` itself, since the `macros`
-command carries only a count; saves and deletes go through `macro_save` and
-`macro_delete`, because the daemon owns that directory. Text, delay and click rows
-write into their step in place, without a rebuild, so typing keeps the focus.
+command gives each macro's step count, not its steps; saves and deletes go through
+`macro_save` and `macro_delete`, because the daemon owns that directory. Text, delay and
+click rows write into their step in place, without a rebuild, so typing keeps the focus.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, cast
 
 from gi.repository import Adw, Gdk, Gio, GObject, Gtk
 
-from ..config import Config, macro_name
+from ..config import Config, layer_binding, macro_name
 from ..library_files import file_name, slug, unread_reason
 from ..macros import (
     CLICK,
@@ -52,50 +52,54 @@ from ..macros import (
     unbalanced,
     with_step,
 )
-from ..mouse import MODEL_IDS, bindings_of, key_name as mouse_shown
+from ..mouse import MODEL_IDS, bindings_of, key_name as mouse_shown, shift_bindings_of
 from ..profiles import GameProfile
 from ..wording import LEFT_OUT, MACRO_NEEDS_A_NAME, capitalized, counted, reason, word_list
-from .dialogs import MACROS_UNREAD, CaptureDialog, RecordDialog
+from .binding_rows import CHANGE, WITH_G_SHIFT
+from .dialogs import MACROS_UNREAD, NO_MACROS, CaptureDialog, RecordDialog
 from .style import (
     DELETE_HEADING,
     DELETE_OPENER,
     DELETE_RESPONSE,
+    HEADSET_TAB,
+    KEYBOARD_TAB,
+    MOUSE_TAB,
+    blank,
     confirm,
     left_out_row,
+    name_button,
     plain_row,
     respond,
+    say_in_place,
+    watch_refused,
 )
 from .tips import explain_choices
-from .worker import LoadingGuard, take_typed
+from .worker import BUSY, LoadingGuard, daemon_down, failure, take_typed, unreachable
 
 if TYPE_CHECKING:                       # pragma: no cover
     from .window import Window
 
 #: The button that runs the editor's steps after a countdown, as `macro-run` does.
 RUN = "Run"
-#: The Macro group's one line, the owner's window-text standard, and Save's tooltip: the
-#: rule a rename follows.
-MACRO_HELP = "Bind it on the Keyboard or Mouse tab"
+#: The Macro group's one line, the owner's window-text standard, and the status beside Save
+#: while no write is in flight: the rule a rename follows, which no one guesses.
+MACRO_HELP = f"Bind it on the {KEYBOARD_TAB}, {MOUSE_TAB} or {HEADSET_TAB} tab"
 RENAME_HELP = "Saving under a new name renames it"
 #: The repeat dropdown. The labels are short because a ComboRow ellipsizes the
 #: chosen one on the row.
-REPEAT_CHOICES = REPEAT_MODES
-REPEAT_LABELS = tuple(REPEAT_NAMES[mode] for mode in REPEAT_CHOICES)
-#: Each repeat mode's tooltip in the dropdown's list, looked up by mode: REPEAT_CHOICES takes
-#: its order from macros.
+REPEAT_LABELS = tuple(REPEAT_NAMES[mode] for mode in REPEAT_MODES)
+#: Each repeat mode's tooltip in the dropdown's list, looked up by mode, in REPEAT_MODES order.
 REPEAT_TIPS = tuple({ONCE: "Runs the steps once.",
                      WHILE_HELD: "Repeats until the key or button is released.",
                      TOGGLE: "Starts on one press, stops on the next."}[mode]
-                    for mode in REPEAT_CHOICES)
+                    for mode in REPEAT_MODES)
 #: The click dropdown, its buttons named as the recording dialog names them.
 CLICK_CHOICES = tuple(CLICK_BUTTONS)
 CLICK_LABELS = tuple(BUTTON_LABELS[button] for button in CLICK_CHOICES)
 #: The step-type dropdown beside Add, in STEP_TYPES order: each down/up pair after the
 #: step it splits. The labels are short because a Gtk.DropDown ellipsizes the chosen one.
-STEP_CHOICES = STEP_TYPES
-STEP_LABELS = tuple(STEP_TITLES[kind] for kind in STEP_CHOICES)
-#: Each step type's tooltip in the dropdown's list, looked up by type: STEP_CHOICES takes its
-#: order from macros.
+STEP_LABELS = tuple(STEP_TITLES[kind] for kind in STEP_TYPES)
+#: Each step type's tooltip in the dropdown's list, looked up by type, in STEP_TYPES order.
 STEP_TIPS = tuple({KEY: "Press and release a key or combination.",
                    KEY_DOWN: "Press a key and leave it down.",
                    KEY_UP: "Release a key an earlier step left down.",
@@ -104,9 +108,16 @@ STEP_TIPS = tuple({KEY: "Press and release a key or combination.",
                    CLICK: "Press and release a mouse button.",
                    CLICK_DOWN: "Press a mouse button and leave it down.",
                    CLICK_UP: "Release a mouse button an earlier step left down."}[kind]
-                  for kind in STEP_CHOICES)
+                  for kind in STEP_TYPES)
 #: The toast for a step its row's menu removed, by its number, with Undo.
 REMOVED_STEP = "Removed step {}"
+#: The toast for a recording put into the editor, by its count of steps (wording.counted).
+RECORDED = "Recorded {}; not saved yet"
+#: The placeholders of the macro list and the step list while each is empty, with the next
+#: step: Record… by name, since a recording is many steps and replaces the editor's.
+NEW_MACRO_HINT = "Press New to make one"
+NO_STEPS = "No steps yet"
+NO_STEPS_HINT = "Pick a step type and press Add, or press Record…"
 #: A step row's menu, apart from its value's control: the HIG's boxed lists set at most two
 #: controls a row. Its actions' group, its items, its tooltip and its name by the step's
 #: number, and the handle at the row's start that drags the step to another place.
@@ -116,17 +127,25 @@ MOVE_DOWN = "Move down"
 REMOVE = "Remove"
 STEP_MENU = "More"
 STEP_MENU_NAME = "More for step {}"
+#: A key step's Change… button's name by the step's number, and the title of the dialog it
+#: opens: each row has one, so a screen reader told only "Change…" could not say which.
+CHANGE_NAME = "Change step {}"
+#: Its tooltip, in the binding rows' form: keys only, as a macro cannot run a macro.
+CHANGE_HELP = "Pick another key for this step"
 DRAG_HELP = "Drag to move this step"
 
 
 def uses_by_macro(config: Config, library: list[GameProfile]) -> dict[str, list[str]]:
     """Every G key and mouse button that runs a macro, by the slug of the macro's name, as
-    "G1 on M1", "G2 with MR on M2" or "G502 X PLUS G4 in Doom": M profiles first, then the
-    game profiles. One walk of the bindings serves every macro's row.
+    "G1 on M1", "G2 with G-Shift on M2", "G502 X PLUS G4 in Doom" or "G502 X PLUS G4 with
+    G-Shift on M1": M profiles first, then the game profiles. One walk of the bindings serves
+    every macro's row.
 
     By slug, as the daemon finds a macro's file. A mouse button by its model, as the daemon
-    reads the model's bindings (mouse.bindings_of), since each model's buttons bind on their
-    own and the keyboard's G4 and G5 share their names.
+    reads the model's bindings on each layer (mouse.bindings_of, mouse.shift_bindings_of),
+    since each model's buttons bind on their own and the keyboard's G4 and G5 share their
+    names. A G-Shift binding counts as the daemon reads it (config.layer_binding): one that a
+    hand edit left on a key or button holding G-Shift never runs, and is not counted.
     """
     found: dict[str, list[str]] = {}
 
@@ -135,24 +154,31 @@ def uses_by_macro(config: Config, library: list[GameProfile]) -> dict[str, list[
         if target is not None:
             found.setdefault(slug(target), []).append(said)
 
-    layers = [(f"on M{i}", profile.keys, profile.shift, profile.mouse)
-              for i, profile in sorted(config.profiles.items())]
-    layers += [(f"in {profile.name}", profile.bindings, profile.shift, profile.mouse)
-               for profile in library]
-    for where, keys, shift, mouse in layers:
+    layers = [(f"on M{i}", *profile.layers) for i, profile in sorted(config.profiles.items())]
+    layers += [(f"in {profile.name}", *profile.layers) for profile in library]
+    for where, keys, shift, mouse, mouse_shift in layers:
         for key, spec in keys.items():
             add(spec, f"{key} {where}")
         for key, spec in shift.items():
-            add(spec, f"{key} with MR {where}")
-        for model in sorted(MODEL_IDS):
-            for button, spec in bindings_of(mouse, model).items():
+            if spec is not None:
+                add(layer_binding(keys, shift, key, True), f"{WITH_G_SHIFT.format(key)} {where}")
+        bases = {model: bindings_of(mouse, model) for model in sorted(MODEL_IDS)}
+        for model, base in bases.items():
+            for button, spec in base.items():
                 add(spec, f"{mouse_shown(model)} {button.upper()} {where}")
+        for model, base in bases.items():
+            shifted = shift_bindings_of(mouse_shift, model)
+            for button in shifted:
+                named = f"{mouse_shown(model)} {button.upper()}"
+                add(layer_binding(base, shifted, button, True),
+                    f"{WITH_G_SHIFT.format(named)} {where}")
     return found
 
 
 def uses_summary(uses: list[str]) -> str:
-    """What a macro's row says of where it runs."""
-    return f"Runs on {word_list(uses, 'and')}" if uses else "Not bound to a key or button"
+    """What a macro's row says of the keys and buttons bound to it, the clause after "; " in
+    its line."""
+    return f"bound to {word_list(uses, 'and')}" if uses else "not bound to a key or button"
 
 
 @functools.cache
@@ -174,8 +200,8 @@ def read_macros() -> tuple[list[dict], bool, list[tuple[str, str]]]:
 
 #: What New puts in the editor, and what the editor opens on.
 NEW_MACRO = {"name": "New macro", "repeat": ONCE, "steps": []}
-#: The status beside Save while no write is in flight.
-SAVE_HELP = "Writes the macro to disk"
+#: Save's tooltip.
+SAVE_HELP = "Write the macro to disk"
 #: The status beside Save while a save or a delete is on its way.
 SAVE_WAIT = "Waiting for the daemon…"
 #: What a read of the macro files says when the open macro's file changed under unsaved edits.
@@ -185,10 +211,17 @@ CHANGED_UNDER_EDITS = ("{} changed on disk; your edits stay unsaved; after a rel
                        "writes over it")
 #: What a save says once the daemon answered it or the list read after it holds it.
 SAVED = "Saved {}"
-#: What the list read after a save the daemon did not answer in time says when it lacks the
-#: save, and after such a delete when it still holds the macro: one sentence, so no period.
-NOT_SAVED = "Your edits to {} were not saved: the daemon did not answer in time"
-NOT_DELETED = "{} was not deleted: the daemon did not answer in time"
+#: What the list read after a save the daemon did not answer says when it lacks the save, and
+#: after such a delete when it still holds the macro, with the round trip's cause
+#: (_send_write), and START_FIRST or nothing: one sentence, so no period. The edits stay
+#: unsaved and the macro listed, so the same button does it again.
+NOT_SAVED = "Your edits to {} were not saved: {}; {}press Save again"
+NOT_DELETED = "{} was not deleted: {}; {}delete it again"
+#: Before NOT_SAVED's and NOT_DELETED's next step when no daemon runs: the same button fails
+#: the same way until the banner's Start daemon starts one.
+START_FIRST = "start the daemon, then "
+#: A busy daemon's cause (_send_write). Not `unreachable`'s words for it, which add that the daemon may be busy.
+TIMED_OUT = "the daemon did not answer in time"
 
 NEW_STEP: dict[str, dict] = {
     KEY: {"type": KEY, "value": "f13"},
@@ -246,8 +279,7 @@ class MacrosPage:
         #: oldest first, each as (what it sent, in `_form`, whether it renamed). That read
         #: misses a save the daemon still writes when the request sent before it timed out
         #: too, or when the read failed, and a later save can be lost the same way before an
-        #: earlier one lands; the newest listed is taken up (`_take_up`), by `reread` or by
-        #: a later save's refusal or settling.
+        #: earlier one lands; `_take_up` takes the newest a later read lists.
         self._late: list[tuple[tuple, bool]] = []
 
         self.widget = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18,
@@ -290,6 +322,7 @@ class MacrosPage:
             title="Macro",
             description=MACRO_HELP)
         self.name_row = Adw.EntryRow(title="Name")
+        watch_refused(self.name_row, blank)
         group.add(self.name_row)
         # Read at Save and Run; a change sends nothing to the daemon.
         self.repeat_row = Adw.ComboRow(title="Repeat", model=Gtk.StringList.new(REPEAT_LABELS))
@@ -309,7 +342,7 @@ class MacrosPage:
         adders.append(self.step_kind)
         add = Gtk.Button(label="Add", tooltip_text="Append a step of that type")
         add.connect("clicked", lambda _b: self.add_step(
-            STEP_CHOICES[self.step_kind.get_selected()]))
+            STEP_TYPES[self.step_kind.get_selected()]))
         adders.append(add)
         adders.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL,
                                     margin_top=4, margin_bottom=4))
@@ -336,14 +369,14 @@ class MacrosPage:
         # Both warnings depend on the mode as well as the steps.
         self.repeat_row.connect("notify::selected", lambda *_: self.check_holds())
 
-        self.save_status = Gtk.Label(label=SAVE_HELP, xalign=0, hexpand=True,
+        self.save_status = Gtk.Label(label=RENAME_HELP, xalign=0, hexpand=True,
                                      css_classes=["dimmed"])
         self.run_button = Gtk.Button(
             label=RUN, tooltip_text=f"Run these steps in {PLAY_DELAY} s, unsaved changes "
                                     f"included: click into the window they are for")
         self.run_button.connect("clicked", self.on_play)
         self.save_button = Gtk.Button(label="Save", css_classes=["suggested-action"],
-                                      tooltip_text=RENAME_HELP)
+                                      tooltip_text=SAVE_HELP)
         self.save_button.connect("clicked", self.on_save)
         bar = Gtk.Box(spacing=12, css_classes=["toolbar"])
         bar.append(self.save_status)
@@ -359,13 +392,12 @@ class MacrosPage:
         """Read the macros on the worker and rebuild the list; `then` gets whether it worked."""
         def loaded(result: tuple[list[dict], bool, list[tuple[str, str]]] | Exception) -> None:
             if isinstance(result, Exception):
-                self.win.toast(f"{MACROS_UNREAD}: {reason(result)}")
+                self.win.toast(f"{MACROS_UNREAD} ({reason(result)})")
             else:
                 self.macros, self.unlisted, self.skipped = result
                 # Added to, never replaced: a macro that left the list has its file
                 # only in an earlier one.
-                self._files.update((slug(m["name"]), m["file"]) for m in self.macros
-                                   if "file" in m)
+                self._files.update((slug(m["name"]), m["file"]) for m in self.macros)
                 self.rebuild_list()
             if then is not None:
                 then(not isinstance(result, Exception))
@@ -422,7 +454,8 @@ class MacrosPage:
     def rebuild_list(self) -> None:
         uses = self.uses()
         with self._loading:
-            self.listbox.remove_all()
+            # Set after each read, so the list says it is empty only once it was read.
+            say_in_place(self.listbox, NO_MACROS, NEW_MACRO_HINT)
             for macro in self.macros:
                 # Not markup: an "&" in a name would leave the row empty.
                 self.listbox.append(plain_row(Adw.ActionRow, macro["name"],
@@ -442,11 +475,18 @@ class MacrosPage:
         """A macro's row's line, `uses` as uses_by_macro gives it."""
         summary = macro_summary(len(macro["steps"]), macro["repeat"])
         bound = uses.get(slug(macro["name"]), [])
-        if not bound and self.win.config_error is not None:
-            # With config.json unread, the window's M profiles are the defaults or an
-            # earlier read (Window.config): which of their keys run it is not known.
+        if not bound and self._uses_unknown():
             return summary
-        return f"{summary}. {uses_summary(bound)}"
+        return f"{summary}; {uses_summary(bound)}"
+
+    def _uses_unknown(self) -> bool:
+        """Whether a key or button the window's copy lacks may run a macro: with config.json
+        unread, the M profiles are the defaults or an earlier read (Window.config); before
+        the game profiles' first read the window has none (Window.library_read); and the
+        game profile loaded from a file the window could not read keeps its keys in the
+        daemon (Window.profile_unread)."""
+        return (self.win.config_error is not None or not self.win.library_read
+                or self.win.profile_unread())
 
     def refresh_uses(self) -> None:
         """Say again where each macro runs, after the window read the files."""
@@ -459,10 +499,7 @@ class MacrosPage:
     def on_select(self, _box: Gtk.ListBox, row: Gtk.ListBoxRow | None) -> None:
         if self._loading.active or row is None:
             return
-        index = row.get_index()
-        if not 0 <= index < len(self.macros):
-            return
-        chosen = self.macros[index]
+        chosen = self.macros[row.get_index()]
         if self.dirty:
             name = chosen["name"]
             self.confirm_discard(f"Opening {name}", lambda: self._open_listed(name))
@@ -496,8 +533,7 @@ class MacrosPage:
         if uses:
             body += (f" {word_list(uses, 'and')} then "
                      f"{'does' if len(uses) == 1 else 'do'} nothing until rebound.")
-        elif self.win.config_error is None:
-            # Unread, the M profiles' keys are not known, as on the row (_row_subtitle).
+        elif not self._uses_unknown():
             body += " No key or button runs it."
         confirm(self.win, DELETE_HEADING.format(name), body, DELETE_RESPONSE,
                 lambda: self._do_delete(name))
@@ -516,24 +552,31 @@ class MacrosPage:
             self.saved_name = None
             self._clean = ()
             self.reselect_current()
-            self.win.toast(f"Deleted {name}. Later edits stay unsaved.")
+            self.win.toast(f"Deleted {name}; later edits stay unsaved")
 
         def done(reply: dict | None) -> None:
             if reply is not None:
                 deleted()
                 self.reload()
+            else:
+                # Refused, and the toast said why. A save whose reply was lost can have
+                # landed meanwhile, listed by a `reread` held off while this was out.
+                self._take_up()
 
-        def settle(read: bool) -> None:
+        def settle(read: bool, why: str, first: str) -> None:
             # A timeout can come after the file went; the list read again, once the daemon
             # answers a later request, says whether it did. A read that failed says so in
             # its toast, and a folder that could not be listed in its row: neither says
             # whether the file went.
             if not read or self.unlisted:
                 return
-            if self._listed(name) is None:
-                deleted()
+            # A lost save the list now holds landed before the delete, which the daemon
+            # answers in order: had it renamed the macro, the delete found no macro of
+            # this name.
+            if self._take_up() or self._listed(name) is not None:
+                self.win.toast(NOT_DELETED.format(name, why, first))
             else:
-                self.win.toast(NOT_DELETED.format(name))
+                deleted()
         self._send_write({"command": "macro_delete", "value": name}, done, settle)
 
     # -- the editor -------------------------------------------------------
@@ -544,7 +587,7 @@ class MacrosPage:
         self.steps = [dict(step) for step in macro["steps"]]
         self._moved += 1
         self.name_row.set_text(macro["name"])
-        self.repeat_row.set_selected(REPEAT_CHOICES.index(macro["repeat"]))
+        self.repeat_row.set_selected(REPEAT_MODES.index(macro["repeat"]))
         self.rebuild_steps()
         self._clean = self.snapshot()
         self.reselect_current()
@@ -560,7 +603,7 @@ class MacrosPage:
         """
         take_typed(*(row for row in self._rows if isinstance(row, Adw.SpinRow)))
         return self._form({"name": self._open_name(),
-                           "repeat": REPEAT_CHOICES[self.repeat_row.get_selected()],
+                           "repeat": REPEAT_MODES[self.repeat_row.get_selected()],
                            "steps": self.steps})
 
     @staticmethod
@@ -599,8 +642,7 @@ class MacrosPage:
             heading="Discard the unsaved changes?",
             body=f"{what} discards the unsaved changes to {name}. "
                  f"Nothing on disk changes.")
-        respond(dialog, "discard", "Discard", Adw.ResponseAppearance.DESTRUCTIVE,
-                cancel="Keep editing")
+        respond(dialog, "discard", "Discard", Adw.ResponseAppearance.DESTRUCTIVE)
 
         def answered(_d: Adw.AlertDialog, response: str) -> None:
             self._asking -= 1
@@ -673,14 +715,11 @@ class MacrosPage:
         # moves no focus, and the old row takes it only once GTK moves the focus on, with
         # the new row showing the old number.
         take_typed(*(row for row in self._rows if isinstance(row, Adw.SpinRow)))
-        self.step_list.remove_all()
+        # A heading over nothing reads as a tab that failed to load. remove_all takes the
+        # placeholder too, so it is set again with the rows.
+        say_in_place(self.step_list, NO_STEPS, NO_STEPS_HINT)
         self.check_holds()
-        if self.steps:
-            self._rows = [self._step_row(index, step) for index, step in enumerate(self.steps)]
-        else:
-            # A heading over nothing reads as a tab that failed to load.
-            self._rows = [Adw.ActionRow(title="No steps yet", sensitive=False,
-                                        subtitle="Pick a type and press Add, or record one")]
+        self._rows = [self._step_row(index, step) for index, step in enumerate(self.steps)]
         for row in self._rows:
             self.step_list.append(row)
         self._show_sendable()
@@ -693,7 +732,7 @@ class MacrosPage:
 
     def check_holds(self) -> None:
         """Show or hide the warnings under the steps."""
-        repeat = REPEAT_CHOICES[self.repeat_row.get_selected()]
+        repeat = REPEAT_MODES[self.repeat_row.get_selected()]
         found = unbalanced(self.steps, repeat) + ends_without_delay(self.steps, repeat)
         self.hold_label.set_text("\n".join(found))
         self.hold_warning.set_visible(bool(found))
@@ -727,7 +766,8 @@ class MacrosPage:
         else:
             # Not markup: the subtitle is what the step sends.
             row = Adw.ActionRow(title=numbered, subtitle=subtitle, use_markup=False)
-            change = Gtk.Button(label="Change…", valign=Gtk.Align.CENTER)
+            change = Gtk.Button(label=CHANGE, valign=Gtk.Align.CENTER, tooltip_text=CHANGE_HELP)
+            name_button(change, CHANGE_NAME.format(index + 1))
             change.connect("clicked", lambda _b, i=index: self._capture(i))
             row.add_suffix(change)
 
@@ -785,7 +825,7 @@ class MacrosPage:
     def _capture(self, index: int) -> None:
         """Ask for a key for one step: keys only, as a macro cannot run a macro, and no Unbind."""
         dialog = CaptureDialog(self.win, f"Step {index + 1}", can_unbind=False,
-                               title=f"Change step {index + 1}")
+                               title=CHANGE_NAME.format(index + 1), verb="Change")
         step = self.steps[index]
         dialog.run(lambda spec: self._captured(step, spec))
 
@@ -812,15 +852,15 @@ class MacrosPage:
             return
         confirm(self.win, "Replace the steps?",
                 f"The recording ({counted(len(steps), 'step')}) replaces the "
-                f"{counted(len(self.steps), 'step')} in the editor, unsaved.",
-                "Replace", lambda: self._replace_steps(steps), cancel="Keep these")
+                f"{counted(len(self.steps), 'step')} in the editor. Nothing on disk changes "
+                "until Save.",
+                "Replace", lambda: self._replace_steps(steps))
 
     def _replace_steps(self, steps: list[dict]) -> None:
         self.steps = [dict(step) for step in steps]
         self._moved += 1
         self.rebuild_steps()
-        self.win.toast(f"Recorded {counted(len(self.steps), 'step')}. Save when the macro "
-                       f"looks right.")
+        self.win.toast(RECORDED.format(counted(len(self.steps), 'step')))
 
     # -- playing ----------------------------------------------------------
 
@@ -834,7 +874,7 @@ class MacrosPage:
         if (name := self._sendable()) is None:
             return
         request = {"command": "macro_run", "value": name,
-                   "repeat": REPEAT_CHOICES[self.repeat_row.get_selected()],
+                   "repeat": REPEAT_MODES[self.repeat_row.get_selected()],
                    "steps": [dict(step) for step in self.steps], "delay": PLAY_DELAY}
         self.win.call(request,
                       lambda reply: self.win.macro_banner.take(reply) if reply is not None else None)
@@ -846,26 +886,21 @@ class MacrosPage:
         name = self._open_name()
         if not name:
             self.win.toast(capitalized(MACRO_NEEDS_A_NAME))
-        elif not self._untypable():
-            return name
-        return None
-
-    def _untypable(self) -> bool:
-        """Say which text step the daemon would refuse, by its row's number (the
-        daemon's refusal numbers steps from 0, as the file does), and whether one would be."""
+            return None
         for index, step in enumerate(self.steps):
             if step["type"] == TEXT and (problem := text_problem(step["value"])) is not None:
-                # Said as the daemon's refusals are (Window.refused).
+                # Said as the daemon's refusals are (Window.refused), by the row's number:
+                # the daemon's refusal numbers steps from 0, as the file does.
                 self.win.refused({"error": f"Step {index + 1}: {problem}"})
-                return True
-        return False
+                return None
+        return name
 
     # -- saving -----------------------------------------------------------
 
     def on_save(self, _b: Gtk.Button | None) -> None:
         if (name := self._sendable()) is None:
             return
-        repeat = REPEAT_CHOICES[self.repeat_row.get_selected()]
+        repeat = REPEAT_MODES[self.repeat_row.get_selected()]
         taken = self._taken(name)
         if taken is not None:
             self.confirm_overwrite(taken, name, repeat)
@@ -897,7 +932,7 @@ class MacrosPage:
             return
         taken = self._taken(name)
         if taken is not None:
-            self.confirm_overwrite(taken, name, REPEAT_CHOICES[self.repeat_row.get_selected()])
+            self.confirm_overwrite(taken, name, REPEAT_MODES[self.repeat_row.get_selected()])
 
     def confirm_overwrite(self, taken: dict, name: str, repeat: str) -> None:
         """Ask before saving `name` over `taken`, the listed macro it matches; Replace writes it."""
@@ -912,11 +947,16 @@ class MacrosPage:
                 lambda: self.write(name, repeat, replace=True))
 
     def write(self, name: str, repeat: str, replace: bool = False) -> None:
-        """Send the macro, counted as saved from the moment it is sent.
+        """Send the macro, counted as saved from the moment it is sent; nothing while a save
+        or a delete is out (`writing`).
 
         The steps are copied and snapshotted here, not when the reply lands: the editor
         stays live across the round trip, and an edit made meanwhile must leave it dirty.
         """
+        if self.writing:
+            # A second Replace prompt, a refusal's read put up over Save's own
+            # (_ask_after_refusal), answered with that one's save still out: one at a time.
+            return
         steps = [dict(step) for step in self.steps]
         late, self._late = self._late, []
         sent = self._form({"name": name, "repeat": repeat, "steps": steps})
@@ -945,7 +985,7 @@ class MacrosPage:
                 self._saved(reply["saved"], renamed)
                 self.reload()
 
-        def settle(read: bool) -> None:
+        def settle(read: bool, why: str, first: str) -> None:
             # A timeout can come after the write: settle the save by the list read again,
             # with the editor held until then. Taken as refused, a rename the daemon did
             # would send the old name as `previous` at every later Save, and be refused.
@@ -961,7 +1001,7 @@ class MacrosPage:
                 # Still in `_late`: this save is not listed. A read that failed says so in
                 # its toast, and a folder that could not be listed in its row: neither says
                 # whether the save landed.
-                self.win.toast(NOT_SAVED.format(name))
+                self.win.toast(NOT_SAVED.format(name, why, first))
         if replace:
             request["replace"] = True
         elif self.saved_name is None:
@@ -971,17 +1011,24 @@ class MacrosPage:
         self._send_write(request, done, settle)
 
     def _send_write(self, request: dict, answered: Callable[[dict | None], None],
-                    settle: Callable[[bool], None]) -> None:
+                    settle: Callable[[bool, str, str], None]) -> None:
         """Send a save or a delete with the editor held (`_set_writing`) until `answered`
         has the reply, or None for a refusal; unanswered, until `settle` has the list
-        read again after it (`_after_the_daemon`)."""
+        read again after it (`_after_the_daemon`), the round trip's cause in words and what
+        goes before the next step. The cause is TIMED_OUT where `failure` says BUSY (a
+        timeout, or a backlog too full to connect), else `unreachable`'s, as for a daemon not
+        running, which never got the write; before the next step goes START_FIRST where no
+        daemon runs (daemon_down), else nothing."""
         def done(reply: dict | None) -> None:
             answered(reply)
             self._set_writing(False)
 
-        def unanswered(_error: Exception) -> None:
+        def unanswered(error: Exception) -> None:
+            why = TIMED_OUT if failure(error) == BUSY else unreachable(error)
+            first = START_FIRST if daemon_down(error) else ""
+
             def settled(read: bool) -> None:
-                settle(read)
+                settle(read, why, first)
                 self._set_writing(False)
             self._after_the_daemon(settled)
         self._set_writing(True)
@@ -1006,7 +1053,7 @@ class MacrosPage:
         one."""
         for index in reversed(range(len(self._late))):
             form, renamed = self._late[index]
-            if self._on_disk(form):
+            if any(self._form(m) == form for m in self.macros):
                 self._late = self._late[index + 1:]
                 self._clean = form
                 self._saved(form[0], renamed)
@@ -1023,14 +1070,10 @@ class MacrosPage:
             # profiles, and the Keyboard tab draws from the window's copy.
             self.win.resync()
 
-    def _on_disk(self, form: tuple) -> bool:
-        """Whether the list last read holds a macro whose `_form` is `form`."""
-        return any(self._form(m) == form for m in self.macros)
-
     def _set_writing(self, busy: bool) -> None:
         """Disable what moves the editor on or sends a second write while one is in flight."""
         self.writing = busy
         for widget in (self.listbox, self.new_button, self.delete_button):
             widget.set_sensitive(not busy)
         self._show_sendable()
-        self.save_status.set_text(SAVE_WAIT if busy else SAVE_HELP)
+        self.save_status.set_text(SAVE_WAIT if busy else RENAME_HELP)

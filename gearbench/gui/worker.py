@@ -1,24 +1,14 @@
-"""The worker thread, the loading guard, the settle timer, and the helpers that read a
-round trip's reply.
-
-`DaemonWorker` is the one thread that talks to the daemon and does the window's
-file reads. `LoadingGuard` keeps a row the program sets from being read back as
-the user's change, and sets a row's value only when that changes it. `Settle`
-sends once after a run of changes stops, and `Pace` sends during one, at most
-once an interval; SETTLE_MS and LIVE_MS are the A50 X's page's and the volume
-rows' waits. `take_typed` takes a number typed in a spin row that the cursor
-may still be in. `named_layer` is the `layer` a request names. `daemon_down` and `unreachable` read a
-failed round trip through the daemon client's `failure`, as the CLI does, and
-`preview_reply` a preview's reply, the same way for every tab and dialog.
-`daemon_listening` says whether a daemon accepts on the socket, and `unusable_socket`
-names one that could not be used, and why. Nothing here builds a widget, so all of it is
-testable without a display.
+"""The worker thread that talks to the daemon and does the window's file reads, and what
+the pages share around it: the loading guard, the send timers (Settle, Pace) and their
+waits, and helpers such as those that read a round trip's reply. Nothing here builds a
+widget, so all of it is testable without a display.
 """
 
 from __future__ import annotations
 
 import queue
 import threading
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Never, Protocol, Self, cast
@@ -28,6 +18,7 @@ from gi.repository import GLib
 from ..daemon import (
     BUSY,
     DOWN,
+    NOT_IN_TIME,
     NOT_REACHED,
     NOT_RUNNING,
     REPLY_UNREAD,
@@ -41,6 +32,8 @@ from ..wording import NO_REASON, escaped, reason
 
 if TYPE_CHECKING:                       # pragma: no cover
     from gi.repository import Adw, Gio, Gtk
+
+    from .window import Window
 
 #: A call's callback gets the daemon's reply or what send_command raised: an OSError
 #: (ConnectionError among them), or ValueError for a reply that does not parse.
@@ -74,15 +67,19 @@ class SetStatus(Protocol):
                  poll: bool = False) -> None: ...
 
 
-#: The waits of the A50 X's sliders, which the volume rows share: a slider moved by its keys
-#: sends SETTLE_MS after the last change, so a run of arrow keys is one send (Settle); one the
-#: pointer drags sends at most once each LIVE_MS (Pace), five a second, about the pace the
-#: A50 X's own volume wheel sends at, six steps in about 2 s in its test (the owner's
-#: decision of 2026-10-22). The headset keeps each value it is sent.
+#: Every slider's waits: one sends SETTLE_MS after its last change, so a drag or a run of
+#: arrow keys is one send (Settle); one that follows a drag, as the A50 X's do, waits so only
+#: for its keys, and sends at most once each LIVE_MS the pointer drags it (Pace), five a
+#: second, about the pace the A50 X's own volume wheel sends at, six steps in about 2 s in
+#: its test (the owner's decision of 2026-10-22). The A50 X keeps each value it is sent.
 SETTLE_MS = 300
 LIVE_MS = 200
-#: What `unreachable` says for BUSY; for DOWN it says the client's NOT_RUNNING.
-NOT_IN_TIME = "the daemon did not answer in time; it may be busy"
+#: A spin row's wait after its last change before it sends: a run of clicks on + or of
+#: arrow keys is one send (Settle).
+SPIN_SETTLE_MS = 600
+#: A user unit's second read after an action: a --no-block start is still activating at the
+#: first read, and the link to the headset comes after it.
+FOLLOW_UP_MS = 1500
 
 
 def daemon_down(error: BaseException | None) -> bool:
@@ -91,7 +88,8 @@ def daemon_down(error: BaseException | None) -> bool:
 
 
 def daemon_listening() -> bool:
-    """Whether a daemon accepts on the socket; a file left by a killed daemon refuses."""
+    """Whether a daemon listens on the socket, one too busy to accept included; a file left
+    by a killed daemon refuses."""
     return listening(socket_path())
 
 
@@ -313,6 +311,33 @@ def take_typed(*rows: Adw.SpinRow) -> None:
         row.update()
 
 
+def send_switch(win: Window, loading: LoadingGuard, unanswered: Counter[str],
+                row: Adw.SwitchRow, *, command: str, key: str) -> None:
+    """Send the switch as `command` and read it back either way: a refusal puts it back once
+    no other flip of it is out. `command` also names the window's field and its count in
+    `unanswered`, which holds the row while a flip is out; the reply carries the value under
+    `key`. By keyword, so CommandTableTests finds the name."""
+    if loading.active:
+        return
+    wanted = row.get_active()
+    if wanted == getattr(win, command) and not unanswered[command]:
+        return
+    unanswered[command] += 1
+
+    def done(reply: dict | None) -> None:
+        unanswered[command] -= 1
+        if reply is None:
+            # A later flip still out is the user's last: its answer puts the row right.
+            if not unanswered[command]:
+                with loading:
+                    row.set_active(bool(getattr(win, command)))
+        elif isinstance(reply.get(key), bool):
+            # Taken now: a change back before the read-back lands is compared with it.
+            setattr(win, command, reply[key])
+        win.resync()
+    win.call({"command": command, "value": wanted}, done)
+
+
 class DaemonWorker:
     """One thread that talks to the daemon, so the GTK main loop never waits.
 
@@ -415,7 +440,6 @@ class DaemonWorker:
     def _deliver(self, handed: list[Job]) -> bool:
         job = handed.pop()
         if not self._stopped:
-            # The queue holds both kinds of job; `call`, `preview` and `run` each check
-            # their callback against what it gets (Job.callback).
+            # Job.callback's comment says why this cast holds.
             cast("Callable[[Reply | Result], None]", job.callback)(job.reply)
         return GLib.SOURCE_REMOVE

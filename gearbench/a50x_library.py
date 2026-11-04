@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import cast
+from typing import Self, cast
 
 from . import eq_presets, settings_files
 from .a50x import A50_GEN5, A50_X, G325, G522, PRO_X_2, Model, equalizer_refused
@@ -50,8 +50,7 @@ class Library(eq_presets.Saved[Preset]):
 
     def of(self, instance: str) -> list[tuple[int, Preset]]:
         """The presets of the equalizer `instance`, each with its number."""
-        return [(number, preset) for number, preset in zip(self.numbers, self.presets,
-                                                           strict=True)
+        return [(number, preset) for number, preset in enumerate(self.presets, 1)
                 if preset.instance == instance]
 
     def playing(self, instance: str, bands: tuple[Band, ...]) -> int | None:
@@ -59,6 +58,13 @@ class Library(eq_presets.Saved[Preset]):
         have, as equalizer.preset_of tells a G HUB preset; None for none."""
         return equalizer.preset_of(bands, {number: preset.bands
                                            for number, preset in self.of(instance)})
+
+    def added(self, preset: Preset) -> Self:
+        """These presets with `preset` after the last (eq_presets.Saved.added); ValueError,
+        eq_presets.ALREADY_SAVED, where a preset of its equalizer has its bands (playing)."""
+        if (held := self.playing(preset.instance, preset.bands)) is not None:
+            raise ValueError(eq_presets.ALREADY_SAVED.format(held, self.get(held).name))
+        return super().added(preset)
 
 
 def _bands(*bands: tuple[int, int, float]) -> tuple[Band, ...]:
@@ -202,7 +208,6 @@ def save_library(library: Library, model: Model) -> None:
 def edit(change: Callable[[Library], Library], model: Model) -> Library:
     """Save what `change` makes of `model`'s library, and answer it. eq_presets'
     LibraryUnread for a file that does not read and LibraryPartial for one read in part
-    (Library.whole), each left as it is."""
-    library = change(load_library(model).whole())
-    save_library(library, model)
-    return library
+    (Library.whole), each left as it is. The load and the save run under eq_presets.held."""
+    return eq_presets.edit(library_path(model), lambda: load_library(model), change,
+                           lambda library: save_library(library, model))

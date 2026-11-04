@@ -3,9 +3,9 @@ review page that asks about names Gearbench already has.
 
 Nothing is written until Import on the review page. Then the daemon writes
 each file, one command at a time on the window's worker, as the CLI's
-`import-ghub` does; `gearbench.ghub` holds the reading and mapping for both,
-`gearbench.ghub_plan` the planning, and `gearbench.import_plan` the plan and
-its requests.
+`import-ghub` does; `gearbench.ghub_file` holds the reading and
+`gearbench.ghub` the mapping for both, `gearbench.ghub_plan` the planning, and
+`gearbench.import_plan` the plan and its requests.
 
 The list suits picking two of ten or all but two of a hundred: a filter,
 Select all and Select none acting on what the filter shows, a check box per
@@ -31,9 +31,9 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from gi.repository import Adw, Gio, GLib, GObject, Gtk
 
-from .. import ghub, ghub_plan, import_plan
-from ..wording import RESTART_DAEMON, counted, word_list
-from .style import CHOOSE_WHAT, held_while_shown, picked_path, plain_row, weakly
+from .. import ghub, ghub_file, ghub_plan, import_plan
+from ..wording import RESTART_DAEMON, capitalized, counted, first_of, word_list
+from .style import CHOOSE_WHAT, held_while_shown, picked_path, plain_row, say_not_shown, weakly
 from .worker import Reply, unreachable
 
 if TYPE_CHECKING:                       # pragma: no cover
@@ -70,9 +70,10 @@ def search_text(item: GameProfile | Macro) -> str:
     return " ".join((item.name, *getattr(item, "processes", ()))).casefold()
 
 
-def selected_count(ticked: int, total: int) -> str:
-    """The first page's running count: "3 of 10 selected"."""
-    return f"{ticked:,} of {total:,} selected"
+def selected_count(ticked: int, total: int, kind: str | None = None) -> str:
+    """The first page's running count: "3 of 12 selected", or with the `kind` counted
+    "3 of 10 game profiles selected"."""
+    return f"{ticked:,} of {counted(total, kind) if kind else f'{total:,}'} selected"
 
 
 def shown_lines(lines: list[str]) -> str:
@@ -134,7 +135,7 @@ class Picker:
 def load(path: Path) -> tuple[ghub.Found, import_plan.Existing]:
     """Read the file and what Gearbench has. On the worker: a real settings
     document is over a megabyte, and the libraries parse every file."""
-    return ghub.parse(ghub.read_settings(path), path.name), import_plan.existing_from_disk()
+    return ghub.parse(ghub_file.read_settings(path), path.name), import_plan.existing_from_disk()
 
 
 def choose_file(window: Window) -> None:
@@ -219,7 +220,9 @@ class Importer(Adw.Dialog):
                                          import_plan.REPLACE: "Replace",
                                          import_plan.SKIP: KEEP_MINE}
     #: The clash group's line under its title.
-    CLASH_HELP = "Choose what to do with each."
+    CLASH_HELP = "Choose what to do with each"
+    #: The kind the count names, where its pickers list one kind.
+    COUNTED: ClassVar[str | None] = None
 
     def __init__(self, window: Window, existing: import_plan.Existing, title: str) -> None:
         super().__init__(title=title, content_width=600, content_height=680)
@@ -331,7 +334,7 @@ class Importer(Adw.Dialog):
         go once anything is."""
         ticked = sum(len(p.ticked) for p in self.pickers.values())
         total = sum(len(p.names) for p in self.pickers.values())
-        self.count.set_label(selected_count(ticked, total))
+        self.count.set_label(selected_count(ticked, total, self.COUNTED))
         self.next.set_sensitive(bool(ticked) or self.extra_ticked())
 
     def make_plan(self) -> import_plan.Plan:
@@ -371,7 +374,7 @@ class Importer(Adw.Dialog):
                                                 description=self.CLASH_HELP)
         self.clash_rows: dict[import_plan.Clash, Adw.ComboRow] = {}
         body.append(self.clash_group)
-        written = Adw.PreferencesGroup(title="What is written")
+        written = Adw.PreferencesGroup(title="What Import writes")
         written.add(self.written)
         body.append(written)
         body.append(self.said)
@@ -437,11 +440,12 @@ class Importer(Adw.Dialog):
         self.set_can_close(False)
         self.import_spinner.set_visible(True)
         sent: list[tuple[dict, dict]] = []
+        save_failures: dict[str, bool] = {}
 
         def send_next() -> None:
             while len(sent) < len(requests):
                 request = requests[len(sent)]
-                held = import_plan.held_back(request, sent)
+                held = import_plan.held_back(request, save_failures)
                 if held is None:
                     self.win.worker.call(request, done, timeout=REQUEST_TIMEOUT)
                     return
@@ -454,12 +458,15 @@ class Importer(Adw.Dialog):
                 # busy to answer in time is still read and done (held_back).
                 reply = {"ok": False, "error": unreachable(reply), "unanswered": True}
             sent.append((requests[len(sent)], reply))
+            save_failures.update(import_plan.failed_saves(sent[-1:]))
             send_next()
 
         send_next()
 
     def finish(self, sent: list[tuple[dict, dict]]) -> None:
         done, failed = import_plan.reply_lines(sent)
+        # Why the keyboard does not show a write to the layer in force, as the CLI prints it.
+        noted = [reply for _request, reply in sent if reply.get("ok") and reply.get("note")]
         self.nav.set_sensitive(True)
         self.set_can_close(True)
         self.import_spinner.set_visible(False)
@@ -468,11 +475,14 @@ class Importer(Adw.Dialog):
             # Window.explain shows the detail in one label. The cut keeps the line that ends
             # an older daemon's failures, since it says what to do.
             restart = failed[-1:] if failed[-1] == RESTART_DAEMON else []
-            detail = "\n".join([shown_lines(failed[:len(failed) - len(restart)]), *restart])
+            detail = "\n".join([shown_lines(failed[:len(failed) - len(restart)]),
+                                *(capitalized(reply["note"]) for reply in noted), *restart])
             self.win.explain(f"Imported {len(done):,} of {len(sent):,}.", detail,
                              heading=FAILED if done else NOTHING_IMPORTED)
         else:
             self.win.toast(import_plan.plan_summary(self.plan, "Imported"))
+            for reply in noted:
+                say_not_shown(self.win.toast, reply)
         # A macro saved moves the status' `macros` digest, which rereads the Macros tab
         # (Window.take_macros), so the tab is not read here.
         self.win.resync()
@@ -480,6 +490,9 @@ class Importer(Adw.Dialog):
 
 class ImportDialog(Importer):
     """The two pages: pick, then review and import."""
+
+    # The desktop default, apart from the list, is not counted.
+    COUNTED = "game profile"
 
     def __init__(self, window: Window, found: ghub.Found, existing: import_plan.Existing,
                  source: str) -> None:
@@ -512,23 +525,26 @@ class ImportDialog(Importer):
             lit = " and the G915's lighting" if desktop.lighting is not None else ""
             group = Adw.PreferencesGroup(
                 title="Desktop default",
-                description=f"Instead of a game profile, its bindings{lit} replace those "
-                            "of your M1, M2 and M3.")
+                description=f"Replaces the bindings{lit} of your M1, M2 and M3 instead of "
+                            "adding a game profile; nothing undoes it")
             group.add(self._profile_row(desktop))
             body.append(group)
             # G HUB keeps one per application, but a file can hold more: the list offers
-            # the one Found.desktop gives, and names the rest, as import-ghub --list shows each.
+            # the one Found.desktop gives and names the first of the rest; import-ghub --list
+            # shows each.
             unoffered = [p.name for p in self.found.profiles if p.desktop and p is not desktop]
             if unoffered:
                 lead = ("Another desktop default" if len(unoffered) == 1
                         else "Other desktop defaults")
+                named = first_of(unoffered, ghub.SHOWN_DEVICES)
                 body.append(Gtk.Label(
-                    label=f"{lead} in the file, not offered: {', '.join(unoffered)}. "
-                          "`gearbench-ctl import-ghub --profile` imports one by its name.",
+                    label=f"{lead} in the file, not offered: {named}. "
+                          "`gearbench-ctl import-ghub FILE --profile NAME` imports one by its "
+                          "name.",
                     wrap=True, xalign=0, css_classes=["dimmed"]))
         if self.found.other_devices:
             body.append(Gtk.Label(
-                label="Also in the file, not imported: " + ghub_plan.other_devices_text(self.found),
+                label=ghub_plan.OTHER_DEVICES + ghub_plan.other_devices_text(self.found),
                 wrap=True, xalign=0, css_classes=["dimmed"]))
         return self._page("pick", CHOOSE_WHAT, source, body, self.next)
 

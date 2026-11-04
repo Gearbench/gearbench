@@ -2,7 +2,8 @@
 
 The debug information is the version, the daemon's `status` reply and its problems, whether
 this user may open each device's hidraw node and /dev/uinput, what systemd and PipeWire say
-of spatial sound, and the daemon's last 30 journal lines, with the home folder written ~.
+of spatial sound, and the last 30 journal lines of the daemon and of systemd about it, with
+the home folder written ~.
 `gather` reads it on the worker thread, since a socket round trip or a process can take
 seconds; the dialog opens at once and takes the text when it lands, which libadwaita shows
 even on an open page. A source that fails says so in its own section.
@@ -17,7 +18,7 @@ import subprocess
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from gi.repository import Adw, Gtk
+from gi.repository import Adw, GLib, Gtk
 
 from .. import __version__, pipewire_client, spatial
 from ..a50x import PRODUCTS as CENTURION_MODELS, find_each_a50x
@@ -28,8 +29,11 @@ from ..g432 import PRODUCTS as G432_MODELS, find_g432
 from ..hidpp import NO_RULE, VENDOR_ID as LOGITECH_VENDOR
 from ..keyboard import MODELS as KEYBOARD_MODELS, attached_keyboards
 from ..mouse import MODELS as MOUSE_MODELS, find_attached_mice
+from ..settings_files import shown_path
 from ..uinput import UINPUT as UINPUT_NODE
-from ..wording import SERVICE, ended, escaped, home_shortened, reason
+from ..wording import SERVICE, capitalized, ended, escaped, home_shortened
+from .style import ICONS
+from .worker import unreachable
 
 #: The journal section's command: the daemon's last lines and the user manager's about it.
 #: The sender is matched by fields journald sets; USER_UNIT, which any program of this user can
@@ -46,7 +50,7 @@ UINPUT = Path(UINPUT_NODE)
 GATHERING = "Gathering the debugging information…"
 #: The Problems section's line when the daemon sent no list: "none" would say nothing is
 #: wrong.
-PROBLEMS_NOT_KNOWN = "not known: the daemon sent no problems list"
+PROBLEMS_NOT_KNOWN = "Not known: the daemon sent no problems list"
 #: Under the description on the dialog's Details page, and word for word the
 #: README's last section.
 NOT_AFFILIATED = ("Gearbench is an independent project, not affiliated with or endorsed by "
@@ -58,26 +62,35 @@ SADIE_LICENSE = ('Used under the <a href="https://www.apache.org/licenses/LICENS
                  "Apache License, Version 2.0</a>. Its text ships with the data: "
                  "spatial/sadie-ii/LICENSE.txt in a checkout, "
                  "/usr/share/gearbench/spatial/sadie-ii/LICENSE.txt from the package.")
+#: The Adwaita icons' legal section, markup, its own words as SADIE II's are, for the same
+#: reason; {} is the folder the window takes them from (ICONS), which differs by install,
+#: as the window names a path (shown_path).
+ADWAITA_LICENSE = ('Used under the <a href="https://www.gnu.org/licenses/lgpl-3.0.html">'
+                   'LGPL-3</a> or <a href="https://creativecommons.org/licenses/by-sa/3.0/us/">'
+                   "CC-BY-SA-3.0-US</a>. Their text ships with the icons: COPYING and LGPL-3 "
+                   "in {}.")
 
 
-def read_journal(run: pipewire_client.Run = subprocess.run) -> str:
-    """The daemon's last journal lines, or a sentence saying why not."""
+def read_journal(run: pipewire_client.Run) -> str:
+    """The last journal lines of the daemon and of systemd about it (JOURNAL), or a
+    sentence saying why not."""
     try:
         # A byte that is not UTF-8 becomes U+FFFD; raising would blank the page.
         done = run(JOURNAL, check=False, capture_output=True, encoding="utf-8",
                    errors="replace", timeout=JOURNAL_TIMEOUT)
-    except FileNotFoundError:
-        return "The journal could not be read: journalctl is not installed."
     except subprocess.TimeoutExpired:
-        return f"The journal could not be read: journalctl took over {JOURNAL_TIMEOUT:.0f} s."
+        return f"The journal could not be read (journalctl took over {JOURNAL_TIMEOUT:.0f} s)"
     except OSError as exc:
-        return f"The journal could not be read: {reason(exc)}."
+        return f"The journal could not be read ({pipewire_client.not_run('journalctl', exc)})"
     if done.returncode != 0:
         said = " ".join(done.stderr.split())
         if said:
-            return f"The journal could not be read: journalctl said {said}"
-        return f"The journal could not be read: {ended('journalctl', done.returncode)}."
-    return done.stdout.rstrip() or "The journal has no lines for Gearbench."
+            return f"The journal could not be read (journalctl said {said})"
+        return f"The journal could not be read ({ended('journalctl', done.returncode)})"
+    # journalctl --user reads only a persistent journal (journalctl(1)); finding no file,
+    # it prints nothing and exits 0.
+    return done.stdout.rstrip() or ("The journal shows no lines for Gearbench (`journalctl "
+                                    "--user` shows none if the journal is kept in memory only)")
 
 
 def device_nodes() -> list[tuple[str, Path]]:
@@ -121,15 +134,16 @@ def access_lines(nodes: list[tuple[str, Path]],
         elif can(path, need):
             state = granted
         else:
-            state = f"no access: {NO_RULE}"
+            state = f"no permission to open it: {NO_RULE}"
         lines.append(f"{path} ({what}): {state}")
     return lines
 
 
 def debug_info(status: dict | Exception, access: list[str],
                spatial_rows: list[tuple[str, str]], journal: str) -> str:
-    """The text of the Troubleshooting page, the home folder written ~. The
-    daemon's status or its error, the problems, the spatial rows and the journal go through
+    """The text of the Troubleshooting page, the home folder written ~. A failed status
+    read is put in `unreachable`'s words, as the Daemon banner and the tabs put it. The
+    daemon's status or its failure, the problems, the spatial rows and the journal go through
     `wording.escaped`: a PipeWire client names its own stream, the saved
     gearbench-debug.txt is read in a terminal, and a newline in a name would
     start a section of its own."""
@@ -147,7 +161,7 @@ def debug_info(status: dict | Exception, access: list[str],
         parts.append(PROBLEMS_NOT_KNOWN)
     parts += ["", "== Daemon status =="]
     if isinstance(status, Exception):
-        parts.append(f"The daemon's status could not be read: {escaped(reason(status))}")
+        parts.append(escaped(capitalized(unreachable(status))))
     else:
         # Not ensure_ascii, which writes each letter of a home folder outside ASCII as a JSON
         # escape, where home_shortened does not find it. A line break in a string is JSON's
@@ -190,4 +204,10 @@ def about_dialog() -> Adw.AboutDialog:
         "SADIE II Database v2-2, subjects D1 and D2, The Audio Lab, University of York. "
         "Copyright 2018 University of York. https://doi.org/10.5281/zenodo.12092466",
         Gtk.License.CUSTOM, SADIE_LICENSE)
+    # The owner's decision of 2026-10-28. "GNOME Project" and its link are the attribution
+    # the theme's license asks for (icons/COPYING).
+    dialog.add_legal_section(
+        "Adwaita icons",
+        "Icons from the Adwaita icon theme, the GNOME Project. https://www.gnome.org",
+        Gtk.License.CUSTOM, ADWAITA_LICENSE.format(GLib.markup_escape_text(shown_path(ICONS))))
     return dialog

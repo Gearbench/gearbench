@@ -17,7 +17,7 @@ import math
 from collections.abc import Sequence
 from functools import cache, partial
 
-from . import astro, g432_presets
+from . import a50_library, astro, g432, g432_presets
 
 #: The base station's sample rate, which its filters' coefficients are for (the A50 EQ
 #: research's disassembly of its firmware, 2026-09-27).
@@ -59,7 +59,7 @@ def _a50_shelf(freq: float, corner: int, gain: int, high: bool) -> complex:
     return 1 + (big - 1) / 2 * ((1 - allpass) if high else (1 + allpass))
 
 
-def a50_curve(preset: astro.EqPreset) -> tuple[float, ...]:
+def a50_curve(preset: a50_library.EqPreset) -> tuple[float, ...]:
     """The A50 preset's gain in dB at each of FIT_FREQS."""
     low, *peaks, high = astro.BANDS
     curve = []
@@ -97,7 +97,7 @@ def _nearest(freq: int) -> int:
 def _curve_of(gains: Sequence[int]) -> list[float]:
     """The ten bands' curve at FIT_FREQS for `gains`: a cascade's dB add."""
     return [sum(column) for column in zip(*(
-        _band_curve(freq, gain) for freq, gain in zip(g432_presets.BAND_FREQS, gains, strict=True)),
+        _band_curve(freq, gain) for freq, gain in zip(g432.BAND_FREQS, gains, strict=True)),
         strict=True)]
 
 
@@ -117,7 +117,7 @@ def _each_band(gains: list[int], curve: Sequence[float]) -> bool:
     low, high = g432_presets.DB_RANGE
     total = _curve_of(gains)
     changed = False
-    for index, freq in enumerate(g432_presets.BAND_FREQS):
+    for index, freq in enumerate(g432.BAND_FREQS):
         rest = [t - own for t, own in zip(total, _band_curve(freq, gains[index]), strict=True)]
         best = min(range(low, high + 1), key=partial(_miss, rest, freq, curve=curve))
         changed = changed or best != gains[index]
@@ -146,7 +146,7 @@ def fitted(curve: Sequence[float]) -> g432_presets.Gains:
     search brings near `curve`, given at FIT_FREQS, with the shelves at 0: gains a little
     nearer can exist."""
     low, high = g432_presets.DB_RANGE
-    gains = [min(high, max(low, round(curve[_nearest(freq)]))) for freq in g432_presets.BAND_FREQS]
+    gains = [min(high, max(low, round(curve[_nearest(freq)]))) for freq in g432.BAND_FREQS]
     for _ in range(MAX_PASSES):
         if _each_band(gains, curve):
             continue
@@ -157,6 +157,6 @@ def fitted(curve: Sequence[float]) -> g432_presets.Gains:
     return g432_presets.Gains(bands=tuple(gains))
 
 
-def from_a50(preset: astro.EqPreset) -> g432_presets.Preset:
+def from_a50(preset: a50_library.EqPreset) -> g432_presets.Preset:
     """The A50 preset as a G432 preset: its name, and its curve fitted onto the ten bands."""
     return g432_presets.Preset(preset.name, fitted(a50_curve(preset)))

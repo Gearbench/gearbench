@@ -1,15 +1,17 @@
 """The files Gearbench keeps in its settings folder, ~/.config/gearbench: where they are
 (`config_dir`, `backup_dir`), how one is read (`read_capped`, `read_json`, `from_file`) and
 written (`write_json`, `replace_file`, `replace_synced`, `make_folder`), the hand-edit check
-(`file_stamp`, `changed_on_disk`), a link to nothing (`link_to_nothing`), an older format's
-bytes kept before a save (`keep_old_version`), the format-version rule (`version_problem`)
-and the errors (`ConfigError`, `FileChanged`, `FileUnreadable`). On the standard library,
-`wording` and the file rules' `json_text`, `regular_file` and `runtime_folder` alone, so a
-module that keeps a file of its own loads none of config.json's vocabulary.
+(`file_stamp`, `changed_on_disk`), a link to nothing (`link_to_nothing`, `link_gone`,
+`behind_link`), an older format's bytes kept before a save (`keep_old_version`), the
+format-version rule (`version_problem`) and the errors (`ConfigError`, `FileChanged`,
+`FileUnreadable`). On the standard library, `wording` and the file rules' `json_text`,
+`regular_file` and `runtime_folder` alone, so a module that keeps a file of its own loads
+none of config.json's vocabulary.
 """
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -20,7 +22,16 @@ from pathlib import Path
 from .json_text import TOO_DEEP, JsonRefused, json_value
 from .regular_file import open_regular
 from .runtime_folder import make_private, missing_folders
-from .wording import MAX_REFUSAL, both_ends, escaped, reason, whole, word_list, written
+from .wording import (
+    MAX_REFUSAL,
+    both_ends,
+    escaped,
+    reason,
+    size_words,
+    whole,
+    word_list,
+    written,
+)
 
 log = logging.getLogger("gearbench")
 
@@ -85,9 +96,25 @@ def link_to_nothing(path: Path) -> Path | None:
 
 def link_gone(place: Path, named: bool = True) -> str:
     """`place`, a link to nothing (link_to_nothing), in words; `named` False leaves out its
-    path, for a sentence that has just given it."""
+    path, for a sentence that has just given it. A target stat fails for another cause than
+    its absence, past a folder this account may not search or round a loop of links, is
+    given with that cause, since it may be there."""
     link = f"{place} is a link" if named else "a link"
+    try:
+        place.stat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        return f"{link} to {os.readlink(place)}, which cannot be reached ({reason(exc)})"
     return f"{link} to {os.readlink(place)}, which is not there"
+
+
+def behind_link(path: Path, place: Path) -> OSError:
+    """The ENOENT already met at `path`, which `place`, it or a folder above it, a link to
+    nothing (link_to_nothing), hides: in link_gone's words, which say where the link points,
+    since "No such file or directory" says neither that a link is in the way nor where it
+    goes."""
+    return OSError(errno.ENOENT, link_gone(place, named=place != path), str(path))
 
 
 def missing_behind(target: Path, place: Path) -> str:
@@ -104,8 +131,9 @@ def make_folder(target: Path) -> None:
     that fails is raised before anything is written, the folders made removed, as
     replace_synced removes its own: left, the next save would take them as on disk and sync
     none of their parents. A folder that is, or sits behind, a link to nothing is a
-    ConfigError naming the link: mkdir fails it as "File exists", naming neither the link
-    nor where it points."""
+    ConfigError naming the link: mkdir fails the link as "File exists" and a folder behind it
+    as "No such file or directory", saying neither that a link is in the way nor where it
+    points."""
     if (place := link_to_nothing(target.parent)) is not None:
         raise ConfigError(f"{missing_behind(target, place)}; nothing is saved")
     made = missing_folders(target.parent)
@@ -124,6 +152,10 @@ def folders_left(made: Sequence[Path]) -> list[tuple[Path, Callable[[], None]]]:
     return [(folder, folder.rmdir) for folder in made if folder.exists(follow_symlinks=False)]
 
 
+#: remove_leftovers' journal line: the leftover's path and why it could not be removed.
+NOT_REMOVED = "%s could not be removed after a write that failed (%s)"
+
+
 def remove_leftovers(leftovers: Sequence[tuple[Path, Callable[[], None]]]) -> None:
     """Remove what a write that failed left, a removal that fails a warning, so it is the
     write's failure that is raised."""
@@ -131,13 +163,14 @@ def remove_leftovers(leftovers: Sequence[tuple[Path, Callable[[], None]]]) -> No
         try:
             remove()
         except OSError as exc:
-            log.warning("%s could not be removed after a write that failed (%s)",
-                        escaped(leftover), reason(exc))
+            log.warning(NOT_REMOVED, escaped(leftover), reason(exc))
 
 
 #: The end of a refusal over a file that could not be read: what to do, the config banner's
 #: words for the window's own read, with the command that reloads it.
 FIX_AND_RELOAD = "fix it, then reload it (`gearbench-ctl reload`)"
+#: The way past a refused save of a file the daemon holds a copy of.
+SAVE_OVER = "`gearbench-ctl save` writes the daemon's copy over it"
 
 
 def changed_on_disk(path: Path, save: bool = True) -> ConfigError:
@@ -148,8 +181,13 @@ def changed_on_disk(path: Path, save: bool = True) -> ConfigError:
     return FileChanged(
         f"{path} changed on disk since the daemon read it; {kept}; "
         f"`gearbench-ctl reload` takes your edit"
-        + (", and `gearbench-ctl save` writes the daemon's copy over it" if save else "")
+        + (f", and {SAVE_OVER}" if save else "")
     )
+
+
+#: write_json's journal line for a folder sync that failed after the replace.
+SAVED_UNSYNCED = ("%s is saved, but its folder could not be synced (%s): a power loss "
+                  "may bring the old file back")
 
 
 def write_json(target: Path, payload: dict, prefix: str) -> None:
@@ -166,24 +204,39 @@ def write_json(target: Path, payload: dict, prefix: str) -> None:
     path, where a pipe would block. Text over MAX_JSON_BYTES is refused before anything
     is written: read_json would not read it back. The new file is its owner's alone,
     whatever the old file's mode or the umask: mkstemp makes the temporary 0600, which a
-    umask cannot widen, and a macro's text step can hold a password.
+    umask cannot widen, and a macro's text step can hold a password. An OSError of the
+    write names the file written, `target` with its links resolved, as its filename, for
+    the refusal a caller words from it. A `target` that is, or sits behind, a link to
+    nothing (link_to_nothing) leading into a folder not there is an OSError of ENOENT in
+    link_gone's words, its filename `target` as given, and nothing is written.
     """
     # ASCII (ensure_ascii), so its length is its size in bytes.
     text = json.dumps(payload, indent=2) + "\n"
     if len(text) > MAX_JSON_BYTES:
-        raise ConfigError(f"{target.name}: {len(text)} bytes is more than the "
-                          f"{MAX_JSON_BYTES} a file may hold; nothing is saved")
-    target = target.resolve()
-    directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        raise ConfigError(f"{target.name}: {len(text):,} bytes is more than the "
+                          f"{size_words(MAX_JSON_BYTES)} a file may hold; nothing is saved")
+    given, target = target, target.resolve()
     try:
-        replace_file(target, text.encode("ascii"), prefix, ".json")
+        directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+    except FileNotFoundError:
+        # resolve() followed the link to a folder not there, whose "No such file or
+        # directory" says neither that a link is in the way nor where it points.
+        if (place := link_to_nothing(given)) is None:
+            raise
+        raise behind_link(given, place) from None
+    try:
+        try:
+            replace_file(target, text.encode("ascii"), prefix, ".json")
+        except OSError as exc:
+            # The temporary it named, or the write's own error that names none, is gone.
+            exc.filename = str(target)
+            raise
         # Raised, the caller would undo a change the file holds and keep the stamp of the
         # file it replaced, so that its next save is refused as a hand edit.
         try:
             os.fsync(directory)
         except OSError as exc:
-            log.warning("%s is saved, but its folder could not be synced (%s): a power loss "
-                        "may bring the old file back", escaped(target), reason(exc))
+            log.warning(SAVED_UNSYNCED, escaped(target), reason(exc))
     finally:
         os.close(directory)
 
@@ -249,7 +302,8 @@ def replace_synced(target: Path, data: bytes, prefix: str, suffix: str) -> None:
     of their parents. A removal that fails is a warning, so it is the write's failure that
     is raised. A folder behind a link to nothing (link_to_nothing) is an OSError naming the
     link, before anything is made."""
-    # mkdir fails such a folder as "File exists", naming neither the link nor where it points.
+    # mkdir fails the link as "File exists" and a folder behind it as "No such file or
+    # directory", saying neither that a link is in the way nor where it points.
     if (place := link_to_nothing(target.parent)) is not None:
         raise OSError(link_gone(place))
     made = missing_folders(target.parent)
@@ -278,15 +332,19 @@ def sync_directory(directory: Path) -> None:
         os.close(fd)
 
 
+#: sync_removal's journal line for a folder sync that failed after an unlink or a rename.
+REMOVED_UNSYNCED = ("%s is removed, but its folder could not be synced (%s): a power loss "
+                    "may bring it back")
+
+
 def sync_removal(removed: Path) -> None:
-    """sync_directory after `removed` was unlinked. A sync that fails is a warning, as in
-    write_json: the file is already gone, and raised, the daemon would answer a delete or a
-    rename that happened as refused and go on naming the file that is gone."""
+    """sync_directory after `removed` was unlinked or renamed. A sync that fails is a warning,
+    as in write_json: the name is already gone, and raised, the daemon would answer a delete or
+    a rename that happened as refused and go on naming the file that is gone."""
     try:
         sync_directory(removed.parent)
     except OSError as exc:
-        log.warning("%s is removed, but its folder could not be synced (%s): a power loss "
-                    "may bring it back", escaped(removed), reason(exc))
+        log.warning(REMOVED_UNSYNCED, escaped(removed), reason(exc))
 
 
 class ConfigError(ValueError):
@@ -329,7 +387,7 @@ def read_capped(path: str | os.PathLike[str], limit: int) -> bytes:
     finally:
         os.close(fd)
     if size > limit:
-        raise ConfigError(f"{path}: larger than {limit} bytes")
+        raise ConfigError(f"{path}: larger than {size_words(limit)}")
     return b"".join(chunks)
 
 
@@ -350,12 +408,15 @@ def read_json(path: Path) -> object:
 
 
 def from_file[T](path: Path, parse: Callable[[object], T]) -> T:
-    """`parse` over one file's JSON, with every failure a ConfigError.
+    """`parse` over one file's JSON (read_json), a TypeError, AttributeError, ValueError or
+    RecursionError of the parse a ConfigError naming the file.
 
     A bad file must be a ConfigError naming it, so a library skips it and keeps the
-    rest, and the daemon starts on the defaults instead of crash-looping. A TypeError,
-    AttributeError or ValueError from a shape `parse` does not check is the same kind
-    of bad file. A refusal longer than MAX_REFUSAL is cut to its two ends (both_ends).
+    rest, and the daemon starts on the defaults instead of crash-looping: those errors from
+    a shape `parse` does not check are the same kind of bad file. `parse`'s own ConfigError
+    goes out as it is. A refusal longer than MAX_REFUSAL is cut to its two ends (both_ends).
+    Any other error of the parse, a KeyError from an index `parse` does not check say,
+    passes through, as does an OSError of the read.
     """
     raw = read_json(path)
     try:

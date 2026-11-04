@@ -251,7 +251,8 @@ def _load_keycodes() -> dict[str, int]:
         return table
     for name, value in _DEFINE.findall(text):
         # Not a value int() refuses, 010 (octal in C) or more digits than it reads: every
-        # program imports this module, and the ValueError would end each at its start.
+        # program but runtime_folder imports this module, and the ValueError would end each
+        # at its start.
         with contextlib.suppress(ValueError):
             table[name] = int(value, 0)
     # Bounds and aliases, not keys: KEY_MAX, BTN_MISC for BTN_0, and KEY_CNT and
@@ -299,7 +300,7 @@ MODIFIER_KINDS: dict[int, str] = {
     )
 }
 #: The four modifiers as `spec_for_keys` writes them in front of a key, in order.
-_KINDS = ("ctrl", "shift", "alt", "super")
+MODIFIER_ORDER = ("ctrl", "shift", "alt", "super")
 
 
 def spec_for_keys(codes: Sequence[int], ctrl: bool = False, shift: bool = False,
@@ -313,16 +314,16 @@ def spec_for_keys(codes: Sequence[int], ctrl: bool = False, shift: bool = False,
     2026-09-25 that a chord of modifiers is a binding). A modifier only the flags name, held
     before the capture saw it go down, has the plain name.
 
-    A key no binding may name (the Clear key, a pointer or gamepad button, KEY_RESERVED)
-    raises UinputError with `resolve`'s reason, so the capture never offers a spec every
-    bind refuses.
+    A key no binding may name raises UinputError, so the capture never offers a spec every
+    bind refuses: the Clear key with words for a key pressed, since `resolve`'s are for a
+    name typed; a pointer or gamepad button or KEY_RESERVED with `resolve`'s reason.
     """
-    held = dict(zip(_KINDS, (ctrl, shift, alt, meta), strict=True))
+    held = dict(zip(MODIFIER_ORDER, (ctrl, shift, alt, meta), strict=True))
     modifiers = [code for code in MODIFIER_KINDS if code in codes]
     keys = [code for code in codes if code not in MODIFIER_KINDS]
     if not keys:
         parts: list[str] = []
-        for kind in _KINDS:
+        for kind in MODIFIER_ORDER:
             sides = [MODIFIER_SPELLING[c] for c in modifiers if MODIFIER_KINDS[c] == kind]
             parts.extend(sides or ([kind] if held[kind] else []))
         return "+".join(parts)
@@ -335,9 +336,11 @@ def spec_for_keys(codes: Sequence[int], ctrl: bool = False, shift: bool = False,
             raise UinputError(f"key code {code} has no name Gearbench knows")
         spelled = name.removeprefix("KEY_").lower()
         if name not in KEY_NAMES:
-            resolve(spelled)    # raises: the Clear key, a button, or no key to bind
+            if name == CLEAR_KEY:
+                raise UinputError("no binding can send the Clear key")
+            resolve(spelled)    # raises: a button, or no key to bind
         names.append(spelled)
-    return "+".join([kind for kind in _KINDS if held[kind]] + names)
+    return "+".join([kind for kind in MODIFIER_ORDER if held[kind]] + names)
 
 #: Modifier aliases in a binding spec like "ctrl+shift+f5", and on their own as the key:
 #: "shift" is KEY_LEFTSHIFT. Each side has a short form (`rsuper`: the owner's decision of
@@ -370,6 +373,15 @@ class PointerNameError(UinputError):
         self.name = name
 
 
+#: Why a press the kernel would take as a SysRq command is refused, {key} the key named.
+SYSRQ_ARMED = ("once Print Screen (sysrq) goes down with Alt held, and until Alt comes up, "
+               "the kernel can take {key} as a SysRq command, such as an instant reboot")
+
+
+class SysrqRefused(UinputError):
+    """A press the kernel would take as a SysRq command, refused with nothing written."""
+
+
 def resolve(name: str) -> int:
     """Resolve a key name to its kernel code.
 
@@ -386,12 +398,11 @@ def resolve(name: str) -> int:
             f"{name!r} is the Clear key, which no binding can send: clear means unbind"
         )
     if (button := _pointer_code(name)) is not None:
-        # A click step sends SENT_BUTTONS, and a mouse button's actions POINTER_ACTIONS: no
-        # other button gets either.
+        # A click step sends SENT_BUTTONS, each button a mouse button's actions hold
+        # (POINTER_ACTIONS) among them: no other button gets either.
         if button in POINTER_ACTIONS.values():
-            advice = f"bind {' or '.join(POINTER_ACTIONS)} to a mouse button"
-            if button in SENT_BUTTONS:
-                advice += ", or use a macro's click step"
+            advice = (f"bind {' or '.join(POINTER_ACTIONS)} to a mouse button, "
+                      "or use a macro's click step")
         elif button in SENT_BUTTONS:
             advice = "use a macro's click step"
         else:
@@ -473,91 +484,6 @@ def parse_binding(spec: str) -> tuple[list[int], int]:
         named[code] = part
     *before, last = named
     return before, last
-
-
-#: What the key capture's list offers, group by group, in a spec's spelling: a curated list
-#: (the owner's decision of 2026-09-25), since the full one buries the keys a binding wants
-#: among names like alterase. Every other name still binds with `gearbench-ctl bind` and is
-#: listed by `gearbench-ctl keys`.
-#:
-#: F13 to F24 first (the decision of 2026-09-24): the G915 has no key for them. Under the
-#: default keymap (xkb's inet(evdev)) GNOME takes some: F13 is XF86Tools, which opens
-#: Settings (checked 2026-09-26), F20 is mic mute and F21 to F23 the touchpad keys, as
-#: KEY_LABELS says. Then the media keys, and the modifiers on their own, both sides.
-FIRST_KEYS = tuple(f"f{n}" for n in range(13, 25))
-MEDIA_KEYS = ("playpause", "stopcd", "previoussong", "nextsong", "mute",
-              "volumedown", "volumeup", "micmute")
-MODIFIER_KEYS = ("leftctrl", "rightctrl", "leftshift", "rightshift",
-                 "leftalt", "rightalt", "leftmeta", "rightmeta")
-#: Then the rest of the G915's full-size US board (layout.KEYS), block by block, row by row:
-#: the main block less the modifiers, Print Screen to the arrows, then the keypad.
-MAIN_KEYS = (
-    "esc", *(f"f{n}" for n in range(1, 13)),
-    "grave", *"1234567890", "minus", "equal", "backspace",
-    "tab", *"qwertyuiop", "leftbrace", "rightbrace", "backslash",
-    "capslock", *"asdfghjkl", "semicolon", "apostrophe", "enter",
-    *"zxcvbnm", "comma", "dot", "slash",
-    "space", "compose",
-)
-NAVIGATION_KEYS = ("sysrq", "scrolllock", "pause", "insert", "home", "pageup",
-                   "delete", "end", "pagedown", "up", "left", "down", "right")
-KEYPAD_KEYS = ("numlock", "kpslash", "kpasterisk", "kpminus", "kp7", "kp8", "kp9",
-               "kpplus", "kp4", "kp5", "kp6", "kp1", "kp2", "kp3", "kpenter",
-               "kp0", "kpdot")
-#: The list's groups by their titles, in the order it shows them.
-KEY_GROUPS = {"F13 to F24": FIRST_KEYS, "Media": MEDIA_KEYS, "Modifiers": MODIFIER_KEYS,
-              "Main keys": MAIN_KEYS, "Navigation": NAVIGATION_KEYS, "Keypad": KEYPAD_KEYS}
-
-#: What each key in the list is, the title of its row: searched with the
-#: name, so "escape" finds esc, "super" leftmeta, "print screen" sysrq and
-#: "backtick" grave.
-KEY_LABELS = {
-    **{f"f{n}": f"F{n}" for n in range(1, 25)},
-    # What GNOME does with these under the default keymap (FIRST_KEYS).
-    "f13": "F13 (opens GNOME Settings)", "f20": "F20 (GNOME mic mute)",
-    "f21": "F21 (GNOME touchpad toggle)", "f22": "F22 (GNOME touchpad on)",
-    "f23": "F23 (GNOME touchpad off)",
-    "playpause": "Play/Pause", "stopcd": "Stop", "previoussong": "Previous track",
-    "nextsong": "Next track", "mute": "Mute", "volumedown": "Volume down",
-    "volumeup": "Volume up", "micmute": "Mic mute",
-    "leftctrl": "Left Ctrl", "rightctrl": "Right Ctrl", "leftshift": "Left Shift",
-    "rightshift": "Right Shift", "leftalt": "Left Alt", "rightalt": "Right Alt, AltGr",
-    "leftmeta": "Left Super", "rightmeta": "Right Super",
-    "esc": "Escape", "grave": "Backtick (`)",
-    **{digit: digit for digit in "1234567890"},
-    "minus": "Minus (-)", "equal": "Equals (=)", "backspace": "Backspace",
-    "tab": "Tab", **{letter: letter.upper() for letter in "abcdefghijklmnopqrstuvwxyz"},
-    "leftbrace": "Left bracket ([)", "rightbrace": "Right bracket (])",
-    "backslash": "Backslash (\\)", "capslock": "Caps Lock",
-    "semicolon": "Semicolon (;)", "apostrophe": "Quote (')", "enter": "Enter",
-    "comma": "Comma (,)", "dot": "Period (.)", "slash": "Slash (/)",
-    "space": "Space", "compose": "Menu",
-    "sysrq": "Print Screen", "scrolllock": "Scroll Lock", "pause": "Pause",
-    "insert": "Insert", "home": "Home", "pageup": "Page Up", "delete": "Delete",
-    "end": "End", "pagedown": "Page Down", "up": "Up arrow", "left": "Left arrow",
-    "down": "Down arrow", "right": "Right arrow",
-    "numlock": "Num Lock", "kpslash": "Keypad /", "kpasterisk": "Keypad *",
-    "kpminus": "Keypad -", "kpplus": "Keypad +", "kpenter": "Keypad Enter",
-    "kpdot": "Keypad .", **{f"kp{digit}": f"Keypad {digit}" for digit in "0123456789"},
-}
-
-
-def _squash(text: str) -> str:
-    """Lower case, with the spaces and underscores taken out."""
-    return "".join(text.lower().replace("_", " ").split())
-
-
-def key_matches(name: str, query: str) -> bool:
-    """Whether the list's search for `query` shows the key `name`.
-
-    Part of the name or of its label, in any case, with spaces and
-    underscores ignored and a leading KEY_ dropped, so "KEY_F13", "play
-    pause" and "caps_lock" all find their key. An empty search shows
-    everything. The query comes stripped: a KEY_ after leading white space
-    is searched as text, not dropped.
-    """
-    wanted = _squash(query.lower().removeprefix("key_"))
-    return wanted in _squash(name) or wanted in _squash(KEY_LABELS[name])
 
 
 #: The kernel's magic SysRq (Documentation/admin-guide/sysrq.rst, drivers/tty/sysrq.c). Its
@@ -662,13 +588,15 @@ class _UinputDevice:
         Only the first press and the last holder's release are written. A press whose write
         fails is not counted; a release is counted before it is written, so a failed one
         leaves nothing counted down. A release of a code nobody holds writes nothing. A
-        failed write raises UinputError, and so does a first press the kernel would take as a
-        SysRq command, which writes nothing.
+        failed write raises UinputError, and a first press the kernel would take as a SysRq
+        command raises SysrqRefused and writes nothing.
         """
         held = self._down.get(code, 0)
         if pressed:
             if not held:
-                self._refuse_sysrq_command([code])
+                if (name := self._sysrq_command_key([code])) is not None:
+                    raise SysrqRefused(
+                        f"{self.name} did not press {name}: {SYSRQ_ARMED.format(key=name)}")
                 self._write(EV_KEY, code, 1)
                 self.sync()
             self._down[code] = held + 1
@@ -680,20 +608,17 @@ class _UinputDevice:
             self.sync()
         self._follow_sysrq(pressed and not held and code == _SYSRQ_CODE)
 
-    def _refuse_sysrq_command(self, presses: Sequence[int]) -> None:
-        """Raise UinputError where one of `presses`, going down in order over what is down
-        now, would run a kernel SysRq command (_NO_SYSRQ_COMMAND)."""
+    def _sysrq_command_key(self, presses: Sequence[int]) -> str | None:
+        """The name of the first of `presses`, going down in order over what is down now, that
+        would run a kernel SysRq command (_NO_SYSRQ_COMMAND), or None."""
         armed = self._sysrq_armed
         alt = not _ALT_CODES.isdisjoint(self._down)
         for code in presses:
             if armed and code not in _NO_SYSRQ_COMMAND:
-                name = CODE_NAMES[code].removeprefix("KEY_").lower()
-                raise UinputError(
-                    f"{self.name} did not press {name}: once Print Screen (sysrq) goes down "
-                    f"with Alt held, and until Alt comes up, the kernel can take {name} as a "
-                    f"SysRq command, such as an instant reboot")
+                return CODE_NAMES[code].removeprefix("KEY_").lower()
             alt = alt or code in _ALT_CODES
             armed = armed or (code == _SYSRQ_CODE and alt)
+        return None
 
     def _follow_sysrq(self, sysrq_went_down: bool) -> None:
         """Arm the SysRq filter as the kernel does once SysRq went down with an Alt down, and
@@ -742,12 +667,14 @@ class VirtualKeyboard(_UinputDevice):
         at the end of the tap, and the rest would go out unshifted.
 
         A tap with a press the kernel would take as a SysRq command raises
-        UinputError and writes nothing.
+        SysrqRefused and writes nothing.
         """
         free = [code for code in (*codes, final) if code not in self._down]
         if not free:
             return
-        self._refuse_sysrq_command(free)
+        if (name := self._sysrq_command_key(free)) is not None:
+            raise SysrqRefused(f"{self.name} did not tap {spec_for_keys(free)}: "
+                               f"{SYSRQ_ARMED.format(key=name)}")
         # A tap leaves `_down` as it was: SysRq tapped under an Alt a holder has down arms
         # the filter until that Alt comes up.
         self._follow_sysrq(_SYSRQ_CODE in free)
@@ -789,6 +716,4 @@ class VirtualMouse(_UinputDevice):
         self.sync()
 
     def button(self, code: int, pressed: bool) -> None:
-        if code not in POINTER_BUTTONS:
-            raise UinputError(f"0x{code:x} is not one of the virtual mouse's buttons")
         self.key(code, pressed)

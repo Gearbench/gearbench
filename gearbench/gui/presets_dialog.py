@@ -5,8 +5,9 @@ Load, which the page sends to the slot picked under Load into through the daemon
 and a menu of Rename…, Replace with the active preset…, which takes the sound of the slot
 playing, and Delete…, the last two asked first. The library is read at the page's polls
 until one is taken (show), for the page's Save as new preset, which grays out with the
-library full (saved), then when the dialog opens and at the page's polls while it is open;
-Save as new preset saves into it with the dialog closed too. Building it runs nothing.
+library full (saved), as the dialog's Add row does, then when the dialog opens and at the
+page's polls while it is open; Save as new preset saves into it with the dialog closed too.
+Building it runs nothing.
 """
 
 from __future__ import annotations
@@ -19,7 +20,8 @@ from typing import cast
 from gi.repository import Adw, Gio, GLib, Gtk
 
 from .. import a50_library, astro, astroeq, eq_presets
-from ..wording import capitalized, printable, reason
+from ..wording import printable, reason
+from .library_card import say_library_failure
 from .style import (
     DELETE_HEADING,
     DELETE_OPENER,
@@ -35,18 +37,19 @@ from .style import (
     astroeq_dialog,
     confirm,
     displayable,
+    in_place,
     name_button,
+    offer_save_new,
     picked_path,
     plain_row,
     preset_label,
-    toast_not_saved,
     toast_note,
 )
 from .worker import DaemonWorker, Result
 
 TITLE = "Load preset to headset"
 HELP = "Stored on this computer; one loaded into a slot stays there after Save"
-#: The row that stands in for the list while it is empty.
+#: What the list says in its placeholder while the library is empty.
 EMPTY = "No presets in the library yet"
 EMPTY_HELP = f"{SAVE_NEW_PRESET} in the Equalizer group adds one"
 #: The row that adds a Command Center file to the library, and the title of the chooser it
@@ -65,14 +68,15 @@ REPLACE = "Replace with the active preset…"
 DELETE = DELETE_OPENER
 #: The slot choice's group, and each slot's row and radio button.
 LOAD_INTO = "Load into"
+#: The Load into group's line while the base station takes no write, which grays out Load.
+LOAD_WAITS = "Load waits for the base station"
 SLOT = "Slot {}"
 #: The Rename dialog.
 RENAME_HEADING = "Rename preset"
 RENAME_BUTTON = "Rename"
 #: Replace's confirmation, by the preset's name.
-REPLACE_HEADING = "Replace {}?"
-REPLACE_BODY = ("It takes the active slot's gains and bands. A slot it was loaded into keeps "
-                "the old ones.")
+REPLACE_HEADING = "Replace {} with the active preset?"
+REPLACE_BODY = "A slot it was loaded into keeps the old gains and bands."
 REPLACE_RESPONSE = "Replace"
 #: Delete's confirmation.
 DELETE_BODY = "A slot it was loaded into keeps it. This cannot be undone."
@@ -82,12 +86,11 @@ SAVE_BODY = f"{TITLE}… puts it in a slot."
 #: behind Details.
 NOT_REPLACED = "The preset was not replaced"
 NOT_IMPORTED = "The file was not added"
-NOT_LOADED = LIBRARY_UNREAD
 #: An import's refusal of the file, with its name and why.
 IMPORT_REFUSED = "{} could not be added: {}"
 
 
-def gains_text(preset: astro.EqPreset) -> str:
+def gains_text(preset: a50_library.EqPreset) -> str:
     """A preset's five gains, as a row's subtitle gives them: each signed, a zero too, as
     signed writes one, and dB once at the end."""
     return " ".join(f"{gain:+d}" for gain in preset.gains) + " dB"
@@ -96,17 +99,20 @@ def gains_text(preset: astro.EqPreset) -> str:
 class PresetsDialog:
     """Load preset to headset: `write(slot, preset)` sends a preset to a slot through the
     page, `active()` gives the active slot's preset as the page shows it, None while it is
-    not read whole, and `changed()` runs after each result _take takes (saved); `parent` is
-    the window, which the dialog and the import's file dialog open over. The dialog is built
+    not read whole, and `changed()` runs after each result _take takes (saved); `kept_up()`
+    is told of an action or an import's read that failed (Window.kept_up); `parent` is the
+    window, which the dialog and the import's file dialog open over. The dialog is built
     once and presented again at each open."""
 
     def __init__(self, parent: Gtk.Window, worker: DaemonWorker, toast: Callable[..., object],
-                 write: Callable[[int, astro.EqPreset], None],
-                 active: Callable[[], astro.EqPreset | None],
+                 kept_up: Callable[[], None],
+                 write: Callable[[int, a50_library.EqPreset], None],
+                 active: Callable[[], a50_library.EqPreset | None],
                  changed: Callable[[], None]) -> None:
         self._parent = parent
         self._worker = worker
         self._toast = toast
+        self._kept_up = kept_up
         self._write = write
         self._active = active
         self._changed = changed
@@ -137,11 +143,16 @@ class PresetsDialog:
 
     def _build(self) -> Adw.Dialog:
         self.group = Adw.PreferencesGroup(description=HELP)
-        # Dimmed: a state, not a preset of that name (style.say_in_place).
-        self.empty_row = plain_row(Adw.ActionRow, EMPTY, EMPTY_HELP, css_classes=["dimmed"],
-                                   visible=False)
-        self.group.add(self.empty_row)
-        slots = Adw.PreferencesGroup(title=LOAD_INTO)
+        # A list of its own, which says an empty library in its placeholder: a preferences
+        # group has none, and a state drawn as a row reads as a preset of that name. Hidden
+        # until a library is read (show).
+        self.preset_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE,
+                                       css_classes=["boxed-list"], visible=False)
+        self.preset_list.set_placeholder(in_place(EMPTY, EMPTY_HELP))
+        self.group.add(self.preset_list)
+        # Its line says why Load is grayed out while the base station takes no write
+        # (_set_sensitive).
+        slots = self.slots_group = Adw.PreferencesGroup(title=LOAD_INTO)
         self.slot_rows: list[Adw.ActionRow] = []
         self.slot_checks: list[Gtk.CheckButton] = []
         for slot in astro.PRESETS:
@@ -155,12 +166,14 @@ class PresetsDialog:
             slots.add(row)
             self.slot_rows.append(row)
             self.slot_checks.append(check)
-        adding = Adw.PreferencesGroup()
+        # Its line says why the Add row is grayed out with the library full (_set_sensitive).
+        adding = self.adding_group = Adw.PreferencesGroup()
         self.import_row = Adw.ButtonRow(title=IMPORT, start_icon_name="document-open-symbolic")
         self.import_row.connect("activated", self.on_import)
         adding.add(self.import_row)
         page = Adw.PreferencesPage()
-        for group in (self.group, slots, adding):
+        # Load into first: its slot is picked before a preset's Load is pressed.
+        for group in (slots, self.group, adding):
             page.add(group)
         view = Adw.ToolbarView(content=page)
         view.add_top_bar(Adw.HeaderBar())
@@ -180,7 +193,9 @@ class PresetsDialog:
         if self.is_open:
             return
         self.is_open = True
-        self._pick(self._active_slot)
+        self.slot = self._active_slot
+        if self.slot is not None:
+            self.slot_checks[astro.PRESETS.index(self.slot)].set_active(True)
         self.dialog.present(self._parent)
         self.refresh()
 
@@ -204,13 +219,15 @@ class PresetsDialog:
     def _loaded(self, result: Result) -> None:
         self._pending = False
         if not self.busy:
-            self._take(result, NOT_LOADED)
+            self._take(result, LIBRARY_UNREAD)
 
     def _take(self, result: Result, failed: str) -> None:
         """A read's or an action's result: the library shown, or the failure said, in the
         list's description for a library that does not read, which no action may then
         change, else in a toast. The description also says what a library read in part left
-        out, while its rows load and each change is refused (a50_library.Library.whole)."""
+        out, while its rows load and each change is refused (a50_library.Library.whole), and a
+        change that finds the file read in part since the last read says it there as well as
+        in its toast."""
         said: str | None = None
         if isinstance(result, a50_library.Library):
             self.show(result)
@@ -218,12 +235,10 @@ class PresetsDialog:
         elif isinstance(result, eq_presets.LibraryUnread):
             self.show(None)
             said = str(result)
-        elif isinstance(result, OSError):
-            # Only a50-eq.json's save raises one.
-            toast_not_saved(self._toast, a50_library.library_path(), result)
         else:
-            # A refusal in words: the work gives a Library or raises.
-            toast_note(self._toast, capitalized(str(result)), failed, one_sentence=True)
+            # The work gives a Library or raises: an OSError from a50-eq.json's save or the
+            # hold of its folder (eq_presets.held), else a refusal in words.
+            said = say_library_failure(self._toast, a50_library.library_path(), result, failed)
         if said is not None:
             # A group's description is markup; each sentence quotes the file's path, a lone
             # surrogate in it as U+FFFD (displayable), and its cause, a wrong version's value
@@ -232,7 +247,7 @@ class PresetsDialog:
         self._set_sensitive()
         self._changed()
 
-    def saved(self) -> tuple[astro.EqPreset, ...] | None:
+    def saved(self) -> tuple[a50_library.EqPreset, ...] | None:
         """The library's presets as the last read or action gave them; None before one and
         while the file does not read."""
         return None if self.library is None else self.library.presets
@@ -244,18 +259,19 @@ class PresetsDialog:
         shown = () if self.library is None else self.library.presets
         self.library, self._taken = library, True
         presets = () if library is None else library.presets
-        self.empty_row.set_visible(library is not None and not presets)
+        self.preset_list.set_visible(library is not None)
         if presets == shown:
             return
+        # One by one: remove_all would take the placeholder too.
         for row in self.rows:
-            self.group.remove(row)
+            self.preset_list.remove(row)
         self.rows, self._loads, self.replace_actions = [], [], []
         for number, preset in enumerate(presets, 1):
             row = self._row(number, preset)
             self.rows.append(row)
-            self.group.add(row)
+            self.preset_list.append(row)
 
-    def _row(self, number: int, preset: astro.EqPreset) -> Adw.ActionRow:
+    def _row(self, number: int, preset: a50_library.EqPreset) -> Adw.ActionRow:
         """One preset's row: its number and name, its gains, Load, and its menu."""
         row = plain_row(Adw.ActionRow, preset_label(number, preset.name), gains_text(preset))
         load = Gtk.Button(label=LOAD, valign=Gtk.Align.CENTER)
@@ -295,11 +311,6 @@ class PresetsDialog:
         self._active_slot = active
         self._set_sensitive()
 
-    def _pick(self, slot: int | None) -> None:
-        self.slot = slot
-        if slot is not None:
-            self.slot_checks[astro.PRESETS.index(slot)].set_active(True)
-
     def on_slot(self, check: Gtk.CheckButton, slot: int) -> None:
         if check.get_active():
             self.slot = slot
@@ -312,22 +323,23 @@ class PresetsDialog:
 
     def _set_sensitive(self) -> None:
         usable = self.library is not None and not self.busy
-        self.import_row.set_sensitive(usable)
+        self.adding_group.set_description(offer_save_new(self.import_row, usable, self.saved()))
         for row in self.rows:
             row.set_sensitive(usable)
         for load in self._loads:
             load.set_sensitive(self._writable and self.slot in self._slots)
+        self.slots_group.set_description(None if self._writable else LOAD_WAITS)
         takes = self._active() is not None
         for swap in self.replace_actions:
             swap.set_enabled(takes)
 
     # -- the actions --------------------------------------------------------
 
-    def save_new(self, preset: astro.EqPreset) -> None:
+    def save_new(self, preset: a50_library.EqPreset) -> None:
         """Save `preset` after the last, the page's Save as new preset."""
-        self._act(lambda: a50_library.edit(lambda library: library.added(preset)), NOT_SAVED_NEW)
+        self._act(lambda library: library.added(preset), NOT_SAVED_NEW)
 
-    def _preset(self, number: int) -> astro.EqPreset:
+    def _preset(self, number: int) -> a50_library.EqPreset:
         """Preset `number` of the library the rows show: a row is there only while one read
         (show)."""
         return cast("a50_library.Library", self.library).get(number)
@@ -341,8 +353,8 @@ class PresetsDialog:
         shown = self._preset(number)
 
         def rename(name: str) -> None:
-            self._act(lambda: a50_library.edit(lambda library: library.named(
-                eq_presets.number_named(library.presets, number, shown.name), name)),
+            self._act(lambda library: library.named(
+                eq_presets.number_named(library.presets, number, shown.name), name),
                 NOT_RENAMED)
         ask_name(self.dialog, shown.name, rename, RENAME_HEADING, "", RENAME_BUTTON)
 
@@ -359,15 +371,15 @@ class PresetsDialog:
             return library.put(eq_presets.number_named(library.presets, number, shown.name),
                                replace(active, name=shown.name))
         confirm(self.dialog, REPLACE_HEADING.format(shown.name), REPLACE_BODY, REPLACE_RESPONSE,
-                lambda: self._act(lambda: a50_library.edit(change), NOT_REPLACED))
+                lambda: self._act(change, NOT_REPLACED))
 
     def on_delete(self, _action: Gio.SimpleAction, _value: object, number: int) -> None:
         """The preset row `number` shows deleted once asked, where the file holds it then
         (eq_presets.number_named)."""
         shown = self._preset(number)
         confirm(self.dialog, DELETE_HEADING.format(shown.name), DELETE_BODY, DELETE_RESPONSE,
-                lambda: self._act(lambda: a50_library.edit(lambda library: library.deleted(
-                    eq_presets.number_named(library.presets, number, shown.name))),
+                lambda: self._act(lambda library: library.deleted(
+                    eq_presets.number_named(library.presets, number, shown.name)),
                     NOT_DELETED))
 
     def on_import(self, _row: Adw.ButtonRow) -> None:
@@ -380,12 +392,13 @@ class PresetsDialog:
     def import_path(self, path: Path) -> None:
         """Read the .astroeq file at `path` on the worker, then add it after the last: an
         action from the read on, which the window's close waits for (busy)."""
-        def parsed(result: astro.EqPreset | Exception) -> None:
+        def parsed(result: a50_library.EqPreset | Exception) -> None:
             self._acting -= 1
-            if isinstance(result, astro.EqPreset):
+            if isinstance(result, a50_library.EqPreset):
                 self.save_new(result)
                 return
             self._set_sensitive()
+            self._kept_up()
             # Whoever shared the file named it: a direction turn or a separator in the
             # name would draw the rest of the sentence in another order or on a new line.
             toast_note(self._toast, IMPORT_REFUSED.format(printable(path.name), reason(result)),
@@ -394,18 +407,22 @@ class PresetsDialog:
         self._set_sensitive()
         self._worker.run(lambda: astroeq.load_astroeq(path), parsed)
 
-    def _act(self, work: Callable[[], a50_library.Library], failed: str) -> None:
-        """Run `work` on the worker; `failed` is the toast line for a failure too long for
-        a toast."""
+    def _act(self, change: Callable[[a50_library.Library], a50_library.Library],
+             failed: str) -> None:
+        """`change` made to the saved library on the worker (a50_library.edit); `failed` is
+        the toast line for a failure too long for a toast."""
         self._acting += 1
         self._set_sensitive()
-        self._worker.run(work, lambda result: self._acted(result, failed))
+        self._worker.run(lambda: a50_library.edit(change),
+                         lambda result: self._acted(result, failed))
 
     def _acted(self, result: Result, failed: str) -> None:
         """An action's result (_take). A library that does not read is toasted too while
         the dialog is down, where the list's description that says so is not seen: the
         page's Save as new preset saves with it down."""
         self._acting -= 1
+        if isinstance(result, Exception):
+            self._kept_up()
         if isinstance(result, eq_presets.LibraryUnread) and not self.is_open:
-            toast_note(self._toast, capitalized(str(result)), failed, one_sentence=True)
+            say_library_failure(self._toast, a50_library.library_path(), result, failed)
         self._take(result, failed)

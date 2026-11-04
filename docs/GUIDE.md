@@ -1,122 +1,131 @@
 # Gearbench user guide
 
-This guide covers installing Gearbench, every control in the window and
-every `gearbench-ctl` command. The README lists the devices Gearbench drives,
-the two ways to install it and how to ask for a device it does not drive yet.
-`man gearbench-ctl` has every option; from a checkout,
-`man ./man/gearbench-ctl.1`.
+Gearbench is an open-source Linux app for Logitech G keyboards, mice and
+headsets. This guide covers installing it, every control in the window and
+every `gearbench-ctl` command. [The README](../README.md) lists the devices
+Gearbench drives, the two ways to install it and how to ask for a device it
+does not drive yet. `man gearbench-ctl` has every option; from a checkout,
+`man ./man/gearbench-ctl.1`. Gearbench is an independent project, not
+affiliated with or endorsed by Logitech.
 
-Just installed: start with [First-time setup](#first-time-setup). Coming
-from Windows and G HUB: [Moving from G HUB](#moving-from-g-hub). Looking for
-your model: [The models and their ids](#the-models-and-their-ids) names the
-section that covers it.
+Just installed: start with [First-time setup](#first-time-setup). Not
+installed yet: see [Install in detail](#install-in-detail). Coming from
+Windows and G HUB: [Moving from G HUB](#moving-from-g-hub). Looking for your
+model: [The models and their ids](#the-models-and-their-ids) says how it
+was built, whether it was tested on the hardware and which section covers it.
 
-The daemon runs as your user service, `gearbench.service`, and owns the
-devices. The window and the command line, `gearbench-ctl`, send it requests
-over its control socket. This guide calls the service the daemon, as
-`gearbench-ctl` and the window's messages do.
+The daemon, your user service `gearbench.service`, owns the devices. The
+window and the command line, `gearbench-ctl`, send it requests over its
+control socket. This guide calls the service the daemon, as `gearbench-ctl`
+and the window's messages do. Gearbench needs no online account and sends
+nothing over the network. Only the udev rules, the mice's hardware database
+entry and the `gearbench` group need root; [The udev rules](#the-udev-rules)
+says what the rules let the programs you run open.
 
-The sections:
+The sections, in the wiki sidebar's groups:
+
+Getting started:
 
 - [First-time setup](#first-time-setup): the steps after an install.
 - [Moving from G HUB](#moving-from-g-hub): G HUB's profiles, bindings and
-  macros, read from its settings database copied over from Windows.
-- [The window](#the-window): the four tabs, the main menu and the banners
-  that say what is wrong and what to do.
-- [The keyboard](#the-keyboard): three M profiles, G keys and the MR layer,
-  Static, Per-key and the keyboard's animations, keys painted by click or
-  drag, brightness, FN keys lit while FN is held on the G515 and its newer
-  relatives (the G915 X, G316 X and G512 X models) and more than one keyboard
-  at once.
-- [Keyboard models](#keyboard-models): the G515s, the G915 TKL, the G815, the
-  PRO X TKL LIGHTSPEED, the G515's newer relatives and the G213 Prodigy, what
-  each does and lacks.
-- [Game profiles](#game-profiles): lighting and bindings that load while
-  their game has focus, a Proton game's by its Windows `.exe`; a pack with
-  per-key lighting for 67 games and 10 macros.
-- [Macros](#macros): up to 64 steps of keys, text, clicks and delays, added
-  one by one or recorded, played once, while held or as a toggle.
-- [The mouse](#the-mouse): the buttons G4 to G9, DPI and its one to five
-  stages, host mode, the report rate, following the keyboard's color and
-  onboard profile 1 with its backups.
-- [Mouse models](#mouse-models): the G502 HERO and the mice built without
-  one on hand, what each does and lacks.
-- [The headset](#the-headset): the Headset tab's pages and the Mic input and
-  Input level rows on each; the Astro A50 Gen 4's microphone, equalizer
-  presets, base station and its Game and Chat outputs.
-- [The Logitech G432](#the-logitech-g432): the G432's sidetone, equalizer
-  and noise suppression, and its ten relatives: the G431, G433, G533, G535,
-  G633, G635, G733, G933, G935 and PRO X Wireless.
-- [The Astro A50 X and A50 Gen 5](#the-astro-a50-x-and-a50-gen-5): their
-  battery, settings and equalizers, read on both and changed on the A50 X.
-- [The PRO X 2, G522 and G325 LIGHTSPEED](#the-pro-x-2-g522-and-g325-lightspeed):
-  their battery, settings and equalizer through their receiver, read now and
-  changed once tested; the PRO X 2's equalizer is only read.
-- [Spatial sound](#spatial-sound): Gearbench Spatial, a 7.1 output that
-  renders a game's surround channels for headphones with a measured head
-  from the SADIE II set.
-- [Idle, lock and suspend](#idle-lock-and-suspend): the keyboard dims a
-  minute after the last keypress and goes dark five minutes later, times you
-  can change; by default its lights also go off while the screen is locked or
-  blank.
-- [Battery and DPI notices](#battery-and-dpi-notices): a low battery under
-  30% and again under 15%, the new DPI when a DPI button steps it and a
-  keyboard's custom assignments turned off or on.
-- [The tray icon](#the-tray-icon): a menu in the top bar with the
-  batteries, the DPI stages, the game profiles and the switches.
+  macros, from its settings database copied over from Windows.
+
+Using Gearbench:
+
+- [The window](#the-window): the four tabs, the main menu and the banners.
+- [The keyboard](#the-keyboard): M profiles, G keys and G-Shift, lighting,
+  brightness, FN keys and more than one keyboard.
+- [Keyboard models](#keyboard-models): what each other keyboard does and
+  lacks.
+- [Game profiles](#game-profiles): lighting and bindings that load for their
+  game, and a pack for 67 games.
+- [Macros](#macros): keys, text, clicks and delays, added or recorded.
+- [The mouse](#the-mouse): G4 to G9, DPI stages, host mode, the report rate
+  and onboard profile 1.
+- [Mouse models](#mouse-models): the G502 HERO and the mice not yet tested
+  on one.
+- [The headset](#the-headset): the Astro A50 Gen 4, the rows every
+  headset's page has, and noise suppression.
+- [The Logitech G432](#the-logitech-g432): the G432 and the ten others of
+  its family.
+- [The Astro A50 X and A50 Gen 5](#the-astro-a50-x-and-a50-gen-5) and
+  [The PRO X 2, G522 and G325 LIGHTSPEED](#the-pro-x-2-g522-and-g325-lightspeed).
+- [Spatial sound](#spatial-sound): Gearbench Spatial, a 7.1 output for games
+  on headphones.
+- [Outputs](#outputs): Gearbench Game, Chat and Media.
+
+Around the desktop:
+
+- [Idle, lock and suspend](#idle-lock-and-suspend): when the keyboard dims
+  and goes dark.
+- [Battery and DPI notices](#battery-and-dpi-notices): low battery, a new
+  DPI and custom assignments turned off or on.
+- [The tray icon](#the-tray-icon): batteries, DPI stages, profiles and
+  switches in the desktop's tray.
+
+Reference:
+
 - [The command line](#the-command-line): every subcommand, by group.
 - [Settings files](#settings-files): what Gearbench keeps in
-  `~/.config/gearbench/` and editing it by hand.
+  `~/.config/gearbench/`.
 - [Install in detail](#install-in-detail), [The udev rules](#the-udev-rules)
-  and [Upgrading and removing](#upgrading-and-removing): putting Gearbench on
-  a machine; what its rules grant and to whom; moving to a new version or
-  taking it off.
-- [The models and their ids](#the-models-and-their-ids): each model's ids
-  and what it was built from; which models were tested on the hardware, in
-  full or in part; what Gearbench writes to a model not yet tested.
+  and [Upgrading and removing](#upgrading-and-removing).
+- [The models and their ids](#the-models-and-their-ids): each model's ids,
+  what it was built from and whether it was tested on the hardware.
+
+Help and background:
+
 - [Troubleshooting](#troubleshooting): what you see and where its fix is,
-  what to gather and where to report a problem, a security problem privately
-  included.
+  and where to report a problem.
 - [Reporting a device](#reporting-a-device): the report from a model not yet
-  tested or not listed, what it reads and what it leaves out.
-- [Why and how we built it](#why-and-how-we-built-it): how the project came
-  about.
+  tested or not listed.
+- [Why and how we built it](#why-and-how-we-built-it): why Gearbench exists,
+  and the research, the captures of G HUB, the reverse engineering and the
+  tests on the hardware that its device support rests on.
 
 ## First-time setup
 
 The install started Gearbench's service, the daemon, in your desktop
-session. From then on it starts with each graphical login and stops at
-logout, which hands the keyboard back to its onboard profile. These steps
+session. After that it starts at each graphical login and stops at logout,
+which hands the keyboard back to its onboard profile. These steps
 check it, light a key, bring over your G HUB setup and bind your G keys.
 
 1. Run `gearbench-ctl status`. It lists the keyboard, each mouse and each
    headset the daemon found, with its connection. Under `problems` it says
-   `none`, or lists anything wrong, a line each. If the daemon was stopped,
-   `systemctl --user start gearbench` starts it. If `problems` lists
-   `no virtual keyboard`, see [No virtual keyboard](#no-virtual-keyboard) under "Troubleshooting".
-2. Open the window: Gearbench in the app grid, or `gearbench-ctl gui`. It
-   opens on the Keyboard tab.
+   `none`, or lists each thing wrong on a line. If it says the daemon is
+   not running, start it with `systemctl --user start gearbench`. If
+   `problems` lists `no virtual keyboard` or `no virtual mouse`, see [No virtual
+   keyboard](#no-virtual-keyboard) under "Troubleshooting".
+2. Open the window: Gearbench among your applications, or `gearbench-ctl
+   gui`. It opens on the Keyboard tab.
 3. With a keyboard, set the Keyboard tab's Effect to Per-key (Per-area on a
    G213 Prodigy) and click a key on the drawn keyboard: it lights at once
-   (see [Painting keys](#painting-keys)).
+   (see [Painting keys](#painting-keys)). With a mouse alone, type a DPI in
+   the Mouse tab's DPI row and press Enter: the mouse takes it about half a
+   second later (see [DPI and stages](#dpi-and-stages)).
 4. If you come from Windows, choose Import from G HUB… in the window's main
    menu to bring over G HUB's profiles, bindings and macros (see [Moving from
-   G HUB](#moving-from-g-hub)). Do it before you bind G keys by hand. Nothing undoes its desktop
-   default, if you check it: it replaces the G keys, MR layer and mouse
-   buttons of M1 to M3, and a G915's lighting if the default has any.
+   G HUB](#moving-from-g-hub)). Do it before you bind G keys by hand.
+   If you check G HUB's desktop default, it replaces the bindings of M1 to
+   M3, and a G915's per-key lighting if the default has any. Nothing undoes
+   it: step 3 of [Moving from G HUB](#moving-from-g-hub) says what to copy
+   first.
 5. Bind the G keys, which ship unbound. On the Keyboard tab, turn on Bind G
-   keys and click a G key (see [G keys and the MR layer](#g-keys-and-the-mr-layer)), or run
+   keys and click a G key (see [G keys and G-Shift](#g-keys-and-g-shift)), or run
    `gearbench-ctl bind G1 f15`.
-6. On a G502 X PLUS, G4 to G9 need your account in the `gearbench` group
-   while host mode is off or did not take (see [Host mode](#host-mode)). With the
-   package, run `sudo usermod -aG gearbench $USER` before you log out. From a
-   checkout, `install.sh` has done it. If lingering is on for your account
-   (`loginctl show-user $USER -p Linger` says `Linger=yes`), the daemon gets
-   the group only when the machine restarts.
-7. Log out of every session and back in, so GNOME Shell loads the Gearbench
-   focus extension. The extension tells the daemon which window has focus.
-   With the package, the window (step 2) then shows a banner: press its Turn
-   on to enable the extension. From a checkout, `install.sh` has enabled it
+6. On a G502 X PLUS with host mode off, or where it did not take, G4 to G9
+   need your account in the `gearbench` group (see [Host mode](#host-mode)).
+   With the package, run `sudo usermod -aG gearbench $USER`; from a
+   checkout, `install.sh` has done it. The daemon gets the group once you
+   log out of every session and back in. If lingering is on for your account
+   (`loginctl show-user $USER -p Linger` says `Linger=yes`), it gets the
+   group only when the machine restarts.
+7. Under GNOME, log out of every session and back in, so GNOME Shell loads
+   the Gearbench focus extension. The extension tells the daemon which window
+   has focus; on another desktop there is none (see [Systems and
+   desktops](#systems-and-desktops)).
+   With the package, the window then shows a banner: press its Turn on
+   button to enable the extension. From a checkout, `install.sh` has enabled it
    already. Until the extension runs, game profiles follow only X11 windows,
    which include a Proton game's unless it runs Wine's Wayland driver. Once
    it runs, the `focus:` line of `gearbench-ctl status` names the program you
@@ -124,8 +133,9 @@ check it, light a key, bring over your G HUB setup and bind your G keys.
 
 ### For your device
 
-- On a G502 X PLUS, G4 to G9 work at once while Gearbench runs. Then give
-  the mouse one of these two writes; each G502 X PLUS needs its own.
+- On a G502 X PLUS, G4 to G9 work at once while Gearbench runs. To set what
+  they do without Gearbench, or with host mode off, write one of these two
+  to the mouse; each G502 X PLUS needs its own.
   Gearbench backs up every profile sector first (see [The onboard profile
   and its backups](#the-onboard-profile-and-its-backups)).
   - With host mode on, the default, write the fallback once: choose Write
@@ -141,32 +151,36 @@ check it, light a key, bring over your G HUB setup and bind your G keys.
 - The G305 needs nothing. For any other mouse, see [Mouse models](#mouse-models) for its
   section.
 - For the Astro A50 Gen 4, set the base station's switch to PC. With
-  Gearbench's audio profile, GNOME's Sound settings list two outputs, Astro
-  A50 Game and Astro A50 Chat, and one microphone, Astro A50 Chat. Games go
-  on Game and voice chat on Chat: in your voice chat program's own settings,
-  set its output to Astro A50 Chat. Game becomes the default output unless
-  another output was chosen before; if Chat was, pick Astro A50 Game in Sound
-  settings (see [Game and Chat](#game-and-chat)). For any other headset, see its section,
-  from "The Logitech G432" on.
+  Gearbench's audio profile, the headset has two outputs, Astro A50 Game and
+  Astro A50 Chat, and one microphone, Astro A50 Chat. Games go on Game and
+  voice chat on Chat: in your voice chat program's own settings, set its
+  output to Astro A50 Chat. Game becomes the default output unless another
+  output was chosen before; if Chat was, pick Astro A50 Game in your
+  desktop's sound settings (see [Game and Chat](#game-and-chat)). For any other headset, see its section:
+  [The Logitech G432](#the-logitech-g432), [Other Logitech G
+  headsets](#other-logitech-g-headsets), [The Astro A50 X and A50 Gen
+  5](#the-astro-a50-x-and-a50-gen-5) or [The PRO X 2, G522 and G325
+  LIGHTSPEED](#the-pro-x-2-g522-and-g325-lightspeed).
 - For lighting made for a game, in the Game profiles dialog, choose Import
   pack… at its top left: per-key lighting for 67 games and 10 macros,
   imported only as you choose (see [The profiles and macros pack](#the-profiles-and-macros-pack)).
 
 ## Moving from G HUB
 
-G HUB has no per-profile export. It keeps every profile, binding and macro in
-one SQLite database on Windows, `%LOCALAPPDATA%\LGHUB\settings.db`: on most
-machines, `C:\Users\<you>\AppData\Local\LGHUB\settings.db`. A
+Gearbench imports G HUB's profiles, bindings and macros from the one SQLite
+database where G HUB keeps all of them on Windows, since G HUB has no
+per-profile export. The database is `%LOCALAPPDATA%\LGHUB\settings.db`: on
+most machines, `C:\Users\<you>\AppData\Local\LGHUB\settings.db`. A
 `settings.db-wal` beside it, if there is one, holds your newest changes.
 
 1. On Windows, quit G HUB from its tray icon, so nothing is writing the
    files.
 2. Copy `settings.db`, and `settings.db-wal` if there is one, into one
    folder that Linux can read.
-3. If you will import G HUB's desktop default, copy
-   `~/.config/gearbench/config.json` first in case you want your own M
-   profiles back. The desktop default replaces the G keys, MR layer and mouse
-   buttons of your M1 to M3, and a G915's lighting if it has any; nothing
+3. If you will import G HUB's desktop default, first copy
+   `~/.config/gearbench/config.json`, so you can get your own M profiles
+   back. The desktop default replaces the G keys, G-Shift layer and mouse
+   buttons of your M1 to M3, and a G915's per-key lighting if it has any; nothing
    undoes it.
 4. On Linux, in the window's main menu, choose Import from G HUB… and pick
    `settings.db`, or run `gearbench-ctl import-ghub settings.db --list`. The
@@ -181,57 +195,39 @@ it.
 Each profile is named by its application. Where G HUB has more than one
 profile for an application, a profile with a name of its own is named by
 both, as "Apex Legends: Ranked". `--profile` takes these names. Under each
-macro is each of its steps, a line each, named as the macro editor names
-them. The review page, `import-ghub --list` and `--dry-run` list them too. In
-the list, a row under a profile that runs past 2,000 lines or 50,000
-characters, as Macros can, shows its first lines and how many more there
+macro, its steps are listed one to a line, with the macro editor's names
+for them. The review page, `import-ghub --list` and `--dry-run` list them too. In
+the list, when a row under a profile runs past 2,000 lines or 50,000
+characters, as Macros can, it shows its first lines and how many more there
 are. The review page still shows every step. A filter narrows the list, and
 Select all and Select none act on the profiles the filter shows.
 
 ### What comes over
 
-- Each G HUB profile becomes a game profile: its per-key lighting (the keys
-  G HUB left out stay dark), the G keys of its M1 bank, its G-Shift layer as
-  the MR layer and the buttons of each mouse G HUB has. A G915 TKL's G1 to
+- Each G HUB profile but the desktop default becomes a game profile. It brings its per-key lighting
+  (the keys G HUB left out stay dark), the G keys of its M1 bank with their G-Shift
+  layer, and the buttons of each mouse G HUB has, on the mouse's
+  G-Shift layer too. A key or button G HUB gives the G-Shift action holds
+  G-Shift in Gearbench (see [G keys and G-Shift](#g-keys-and-g-shift)). A G915 TKL's G1 to
   G12 come over as its F1 to F12, beside the G915's G1 to G5, and a PRO X
   TKL's as PROXTKL-F1 to PROXTKL-F12. A G815's G1 to G5 come over as the
   G915's would. Where both keyboards hold different bindings of yours on one
-  key, the G915's comes over and Not imported lists the G815's. No G HUB
+  key, the G915's comes over and the list's Not imported line names the G815's. No G HUB
   file with a G915 TKL, a G815 or a PRO X TKL in it has been tested yet.
-- A binding of one key and its modifiers becomes a plain binding. A sequence
+- A binding of one key and its modifiers becomes a plain binding. A media
+  control on a G key or a mouse button (play/pause, stop, volume up, volume
+  down, next, previous or mute) becomes the media key of that name. A sequence
   becomes a Gearbench macro, with G HUB's delays as delay steps; "Repeat
   while holding" becomes `while_held` and "Toggle" becomes `toggle`. Only
   the macros the chosen profiles use come over.
 - Where you added the program to G HUB yourself, the profile can load for
-  its `.exe`, but only when you ask. Check Load for, the first line under
-  the profile once you open it in the list, or give `import-ghub`
-  `--with-programs`, which takes the programs of every imported profile that
-  G HUB names programs for. Otherwise the profile loads by hand, or, if it
-  replaces a game profile of yours, keeps that profile's programs. Names
-  match with `.exe` optional: a profile for `firefox.exe` also loads for a
-  Linux program named `firefox`. So a file from someone else could name a
-  program you run every day. The list's Notes line and the review page say
-  which way each profile loads. A game G HUB recognizes by itself carries no
-  program name, so its profile loads by hand until you add one. Under Proton
-  the process can have another name, which `gearbench-ctl apps` shows while
-  the game runs. At most 64 programs come over per profile, each at most 255
-  bytes; Not imported says when a profile had more or a longer one.
-  When the programs come over, a program a game profile of yours already
-  loads for stays with yours, and the import comes without it. Two names are
-  one program when one running game would load both profiles. Linux keeps a
-  program's first 15 bytes as its process name, so under Proton
-  `Warhammer 40000 Space Marine 2.exe` and
-  `Warhammer 40000 Space Marine 2 - Retail.exe` are one. When two chosen
-  G HUB profiles would load for one program, as two profiles of one
-  application do, the program goes to the one G HUB had active for that
-  application, else to the first in the list. The other comes without it.
-  In both cases the review page and the command line say which.
-- The desktop's default profile comes over only when you check it or name
-  it with `--profile Desktop`. Nothing undoes it: copy
-  `~/.config/gearbench/config.json` first if you may want back what it
-  changes (step 3). It replaces the G keys and MR layer of your M1, M2 and
-  M3 with its three banks. It gives all three its mouse buttons, for each
-  mouse G HUB has buttons for, and its lighting on a G915 if it has any.
+  its `.exe`, but only when you ask (see [Which programs an imported profile
+  loads for](#which-programs-an-imported-profile-loads-for)).
+- The desktop default comes over only when you check it or name
+  it with `--profile Desktop`. Nothing undoes it, so make the copy in step 3
+  first. It replaces the G keys and G-Shift layer of your M1, M2 and M3 with
+  its three banks. It gives all three its mouse buttons, for each
+  mouse G HUB has buttons for, and its per-key lighting on a G915 if it has any.
   Your other mice keep their bindings, and other keyboards keep their
   lighting. A G915 TKL or PRO X TKL keeps its F1 to F12 unless the desktop
   default has that keyboard. Keys of another model bound under names of
@@ -239,41 +235,56 @@ Select all and Select none act on the profiles the filter shows.
 
 ### What does not come over
 
-The list and `import-ghub --list` name what does not come over, including:
+A card is what G HUB puts on a key, a button or a profile, such as a
+keystroke, a macro or the profile's lighting. The list and
+`import-ghub --list` name what does not come over, including:
 
 - a macro that acts when its key is released
+- a macro that repeats only part of itself while its key is held
 - G HUB's actions (OBS, audio presets and the like)
-- the wheel tilt and the mouse's G-Shift layer
-- a G key disabled on the G-Shift layer alone (with MR held it sends its
-  binding)
+- the left, right and middle buttons, the wheel and its tilt, and the G903
+  LIGHTSPEED HERO's profile button, on either layer
+- a G-Shift card on the G-Shift layer, and any card there on a key or button
+  that holds G-Shift
+- Disabled on a G915 TKL's or PRO X TKL's F key without G-Shift held: the key
+  still types its own key
 - a game profile's M2 and M3 banks
 - lighting other than a per-key layout
 - other devices, 20 by name and then how many more
 
-Gearbench drops control characters from G HUB's names. A line or paragraph
-separator (U+2028, U+2029) and a character that turns the direction of the
-text after it (U+202A to U+202E, U+2066 to U+2069) show as U+FFFD.
-Application, profile and card names are cut at 256 characters, and Not
-imported lists each cut.
+### Which programs an imported profile loads for
 
-### Files and their limits
+Where you added the program to G HUB yourself, the profile can load for
+its `.exe`, but only when you ask. Check Load for, the first line under
+the profile once you open it in the list. Or give `import-ghub`
+`--with-programs`, which takes the programs of every imported profile that
+G HUB names programs for. Otherwise the profile loads by hand, or, if it
+replaces a game profile of yours, keeps that profile's programs.
 
-Gearbench reads `settings.db`, or a JSON file holding the same document. Each
-file must be a regular file or a link to one, of at most 64 MiB for
-`settings.db` and `settings.db-wal` and 16 MiB for a JSON file.
-`settings.db-wal` must belong to the account that owns the `settings.db`
-beside it; where `settings.db` is a link, the account that owns the link
-itself. The settings the database holds must fit in 16 MiB too. A card is
-what G HUB puts on a key, a button or a profile, such as a keystroke, a
-macro or the profile's lighting. Gearbench refuses a file with more than
-10,000 profiles or more than 10,000 cards. It stops SQLite's read of a
-database after 10 s, or once SQLite holds 256 MiB of memory. Each refusal
-names the file, and a size or count refusal names its cap.
+Names match with `.exe` optional: a profile for `firefox.exe` also loads for a
+Linux program named `firefox`. So a file from someone else could name a
+program you run every day. The list's Notes line and the review page say
+which way each profile loads. A game G HUB recognizes by itself carries no
+program name, so its profile loads by hand until you add one. Under Proton
+the process can have another name, which `gearbench-ctl apps` shows while
+the game runs. At most 64 programs come over per profile, each at most 255
+bytes; Not imported says when a profile had more or a longer one.
+
+When the programs come over, one that a game profile of yours already
+loads for stays with yours, and the imported profile comes without it. Two names are
+one program when one running game would load both profiles. Linux keeps a
+program's first 15 bytes as its process name, so under Proton
+`Warhammer 40000 Space Marine 2.exe` and
+`Warhammer 40000 Space Marine 2 - Retail.exe` are one. When two chosen
+G HUB profiles would load for one program, as two profiles of one
+application do, the program goes to the one G HUB had active for that
+application, else to the first in the list. The other comes without it.
+In both cases the review page and the command line say which.
 
 ### Names Gearbench already has
 
 A G HUB game profile counts as already there when Gearbench has a game
-profile of the same name with the same G keys, MR layer, mouse buttons,
+profile of the same name with the same G keys, G-Shift layer, mouse buttons,
 lighting and macros. The review page and the command line say so in one
 line, and nothing is written for it. Programs are not compared. Names match
 in any case, with punctuation and symbols counted as spaces: "Apex: Legends"
@@ -281,8 +292,9 @@ is "apex legends". A name with no letter or digit keeps its symbols. Keys
 match in any case. Modifiers side by side before a binding's last key match
 in any order: `shift+ctrl+q` is `ctrl+shift+q`, but `shift+ctrl` is not
 `ctrl+shift`, whose last keys differ. The keys go down in the order the
-binding names them, so `a+ctrl+b` is not `ctrl+a+b`. A macro with the same
-steps and repeat mode under another name is the same macro.
+binding names them, so `a+ctrl+b` is not `ctrl+a+b`. When the two game
+profiles are compared, a macro either one binds matches one with the same
+steps and repeat mode, whatever its name.
 
 Gearbench asks about any other name it already has, with three answers:
 
@@ -335,15 +347,35 @@ every game profile, never the desktop default. Without `--on-clash`, an
 import or a dry run that meets a name Gearbench already has lists the names
 and exits 1, writing nothing and showing no plan.
 
+### Files and their limits
+
+Gearbench reads `settings.db`, or a JSON file holding the same document. Each
+file must be a regular file or a link to one, of at most 64 MiB for
+`settings.db` and `settings.db-wal` and 16 MiB for a JSON file.
+`settings.db-wal` must belong to the account that owns the entry it sits
+beside. If `settings.db` is a link, Gearbench looks for `settings.db-wal`
+beside the link first, where it must belong to the link's own owner. When the
+link has none beside it, Gearbench looks beside the file the link names,
+where it must belong to that file's owner. The settings the database holds must fit in 16 MiB too.
+Gearbench refuses a file with more than 10,000 profiles or more than 10,000
+cards. It stops SQLite's read of a database after 10 s, or once SQLite holds
+256 MiB of memory. Each refusal names the file, and a size or count refusal
+names its cap.
+
+Gearbench drops control characters from G HUB's names. A line or paragraph
+separator (U+2028, U+2029) and a character that turns the direction of the
+text after it (U+202A to U+202E, U+2066 to U+2069) show as U+FFFD.
+Application, profile and card names are cut at 256 characters, and Not
+imported lists each cut.
+
 ## The window
 
-![The window on its Keyboard tab, with its four tabs and the main menu's button](images/hero.png)
+![The window on its Keyboard tab: its four tabs, the main menu's button at the top right, and a G915 painted key by key](images/hero.png)
 
-The four tabs at the top, the main menu at the top right.
-
-Open the window with `gearbench-ctl gui`, from Gearbench in the app grid, or
-with Open Gearbench in the tray icon's menu. It has four tabs, Keyboard,
-Mouse, Headset and Macros, and always opens on the Keyboard tab.
+Open the window with `gearbench-ctl gui`, from Gearbench among your
+applications, or with Open Gearbench in the tray icon's menu. It has four
+tabs, Keyboard, Mouse, Headset and Macros, and always opens on the Keyboard
+tab.
 
 The window shows the daemon's live state, so a change made with an M key or
 with `gearbench-ctl` shows in it too. An M key, a program, the tray icon's
@@ -366,7 +398,7 @@ that base station every 5 s on its own (see [Status and battery](#status-and-bat
 
 The main menu, at the top right, has six entries:
 
-- Game profiles… opens the Game profiles dialog (see [Game profiles](#game-profiles)).
+- Game profiles opens the Game profiles dialog (see [Game profiles](#game-profiles)).
 - Import from G HUB… brings over G HUB's profiles, bindings and macros (see
   [Moving from G HUB](#moving-from-g-hub)).
 - Import pack… opens the profiles and macros pack, as the button of that
@@ -381,7 +413,7 @@ The main menu, at the top right, has six entries:
   opens what a bug report needs, with Copy Text and Save As: the version,
   the daemon's `status` reply and its problems, whether you may open each
   device's hidraw node and `/dev/uinput`, what systemd and PipeWire say of
-  spatial sound, and the daemon's last 30 journal lines, with your home
+  spatial sound, and the last 30 journal lines of the daemon and of systemd about it, with your home
   folder written as `~`.
 
 ### The device tabs
@@ -393,12 +425,21 @@ Until the window has seen a device, its tab shows Looking for the keyboard…
 (or the mouse, or the headset), then Keyboard not available (or Mouse, or
 Headset) with the reason. The reasons include no device found, a device or
 receiver that does not answer, a device found that could not be set up and
-no permission to open its node. No permission means its udev rule is
-missing or not applied, or another account or a text console has the seat.
+no permission to open its node, the file under `/dev` that Gearbench opens to
+talk to it. No permission means its udev rule is missing or not applied, or
+another account or a text console has the screen.
+With no headset plugged in, the Headset tab's reason is No headset found;
+plug one in, an Astro A50 Gen 4's switch on PC. Whatever the Headset tab
+says there, the Outputs and Spatial sound groups show under it, since
+Outputs and Gearbench Spatial run without a headset and without the daemon
+(see [Outputs](#outputs)). Headset for computer sound shows above them while
+more than one headset is plugged in or once you have picked one.
 While the daemon does not answer, the tab says Waiting for the daemon….
 With the window on screen, a mouse can take up to about 40 s to appear after
 you switch it on. Once the window has seen a device, the tab keeps its rows
-after the device goes, until the window closes.
+after the device goes, until the window closes. On the Headset tab, a
+headset's page goes with the headset, but for the Astro A50 Gen 4's, which
+shows while no headset is plugged in.
 
 Once a device is seen, the tab's first group is named after it; before
 that it has the tab's name. On every tab and headset page, the first group's
@@ -406,13 +447,15 @@ Status row has a green check mark while the device is there. It has a red
 error sign and says why once the device is gone or while the daemon does not
 answer; no message pops up for it. When a device the daemon has reached
 stops answering, the row has an amber warning sign and says what to do:
-press a key on the keyboard, move the mouse or switch it on. A device the
+press a key on the keyboard, move the mouse or switch it on. A keyboard on
+its cable, which it leaves when switched off, says Not answering instead,
+with the `journalctl` command that says why. A device the
 daemon has not reached, such as one switched off when its receiver was
 plugged in or when the daemon started, shows the daemon's reason instead.
 The keyboard's Status row then has an amber warning sign, and the mouse's a
 red error sign, even with its receiver plugged in. The row says On its cable
-or Through its receiver, with the `/dev/hidraw` node in its tooltip. A
-headset's says On its cable, or Through its base station, its receiver or
+or Through its receiver, with the `/dev/hidraw` node in its tooltip and, for
+a screen reader, in its description after the route. A headset's says On its cable, or Through its base station, its receiver or
 its USB adapter. Before the first answer, a headset page's row says Looking
 for the headset…, with a spinner where the sign goes.
 
@@ -425,30 +468,35 @@ it links there. Its settings and lighting go with it.
 
 Some models were built without one on hand, and some of those, such as the
 G815, the PRO WIRELESS or the G522 LIGHTSPEED, have not been tested on one
-yet. For those, the first group also has a Not yet tested on this model row. A device report from yours shows what works and what to fix. The
-row's Device report button opens the form in your browser, and
-`gearbench-ctl report`, run in a terminal, prints what to paste into it (see
-[Reporting a device](#reporting-a-device)). What Gearbench writes to such a model, and what it
-refuses until a test, is in "The models and their ids". On a mouse, each
-write to its onboard memory is refused, with nothing written.
+yet. For those, the first group also has a Not yet tested on this model
+row. What Gearbench writes to such a model, and what it refuses until a
+test, is in [The models and their ids](#the-models-and-their-ids). On a
+mouse, each write to its onboard memory is refused, with nothing written. A
+device report from yours shows what works and what to fix. The row's Device
+report button opens the form in your browser, and `gearbench-ctl report`,
+run in a terminal, prints what to paste into it (see
+[Reporting a device](#reporting-a-device)).
 
 ![A PRO X SUPERLIGHT's group on the Mouse tab, with the row Not yet tested on this model and its Device report button](images/untested-row.png)
 
 The Battery row gives the percentage, with the state after a comma when the
-device is not on battery, in the tray menu's words: 64%, 64%, charging, or
-Fully charged. It is amber below 30% and red below 15% while not plugged in.
-It says Not read while the device answers but has given no reading, and
+device is not on battery, in the tray menu's words: "64%", "64%, charging",
+or "Fully charged". Its icon is amber below 30% and red below 15% while not
+plugged in, or below 10% and 5% for a device whose notices are set to At
+10% and 5%. The row says Not read while the device answers but has given
+no reading, and
 shows a dash with no device there. A keyboard on its cable that gives no
 reading shows a power plug and On its cable. The G305 reports only a coarse
 level, shown as "about 90%". The G915 and the G915 TKL report only their
 voltage; the percentage comes from Logitech's own curves for the G915, one
 on battery and one charging. The charging curve ends at 91%, so above 4.10 V
 while charging, the G915 and the G915 TKL read "charging, nearly full", with
-no number. `gearbench-ctl status` prints the voltage beside the reading. A
-G515 LIGHTSPEED TKL or PRO X TKL through its receiver, or a G915 X
-LIGHTSPEED model on either route, reports its own percentage and tells
-Gearbench each time it changes. The Battery row and the tray then show the
-new level at once.
+no number. `gearbench-ctl status` prints the voltage beside each reading
+that has one, a mouse's or a headset's too, and `gearbench-ctl mouse`
+beside the mouse's. A G515 LIGHTSPEED TKL through its receiver, or a PRO X
+TKL or a G915 X LIGHTSPEED model on either route, reports its own
+percentage and tells Gearbench each time it changes. The Battery row and
+the tray then show the new level within a few seconds.
 
 The G502 X PLUS's battery is the last level it reported by itself, or the
 level read before its first report. The G305's is the level last read from
@@ -458,17 +506,38 @@ not today. The tray, `gearbench-ctl status` and `mouse` show it the same
 way. A keyboard or mouse that has gone, or one the daemon cannot be asked
 about, shows no reading.
 
+A device with a battery has a Battery notices row, after the Not yet tested
+row where there is one: At 30% and 15%, At 10% and 5%, Off, or At 30% and
+15%, urgent (see [Low battery](#low-battery)). Where the desktop warns of
+the device's battery too, the row leaves the urgent choice out and says
+"KDE Plasma also warns, so no urgent choice". Where urgent is the setting
+already, the row keeps it and says "KDE Plasma also warns, so 15% is not
+urgent". On GNOME, both lines name GNOME. The tooltip then gives the
+reason: an urgent notice would come on top of the desktop's own. The row
+shows while the device is attached.
+
+The Firmware row of a keyboard or mouse gives the version of the firmware
+it runs, such as U1 69.00.B0009, and `gearbench-ctl status` prints it on a
+`firmware:` line. Gearbench reads it as the device attaches, and not again
+until it attaches again. Some devices have no Firmware row and work all the
+same: one with no version to give, and, until it attaches again, one that
+refused the question or gave an answer cut short, or a mouse that did not
+answer it. The journal says why for each but one with no version to give.
+The row goes
+once the device has gone, and while the daemon does not answer.
+
 While the keyboard is away or not answering, a banner says Changes are saved
 and will show when the G915 is back, with your keyboard's model in place of
 G915. The Mouse tab shows the same banner while the mouse does not answer.
 Its rows for what the mouse holds, such as DPI and the lighting, are grayed
 out; Host mode and the button rows, which Gearbench keeps, stay live.
 
-The first group of the Headset tab's A50 page belongs to the base station.
-Its Status row shows a green check mark with Through its base station, and
-an amber warning sign with Switched off or out of range, Switched off,
-docked, or The Astro A50 Gen 4's base station is not answering; unplug it and
-plug it back in. It shows a red error sign with the reason once the base
+The first group of the Headset tab's A50 page is titled with the model,
+Astro A50 Gen 4. Its Status row shows a green check mark with Through its
+base station, and an amber warning sign with "Switched off or out of range;
+switch it on, or bring it near its base station", "Switched off, docked", or
+"The Astro A50 Gen 4's base station is not answering; unplug it and plug it
+back in". It shows a red error sign with the reason once the base
 station is gone or while the daemon does not answer. The rows that change the
 base station's settings are grayed out while it does not answer or while it
 saves. See [Status and battery](#status-and-battery) under "The headset".
@@ -479,11 +548,11 @@ A banner under the header stays up while one of these lasts:
 
 - The daemon is not running. The banner says the G keys type their onboard
   bindings while the daemon is down, or may type nothing if it was killed.
-  It has Start it, which runs `systemctl --user start gearbench`. While that
+  It has Start daemon, which runs `systemctl --user start gearbench`. While that
   runs, the banner says Starting the Gearbench daemon… with no button. After
   a failed start, the banner gives what systemctl said, or says that
-  systemctl did not finish in 30 s or that the daemon exited at once or did
-  not listen within 5 s.
+  systemctl took over 30 s or that the daemon exited at once or was
+  not ready within 5 s.
 - The daemon runs but did not answer in time, busy with a mouse profile
   write, for example, or sent a reply that could not be read. The banner has
   no button, since starting the daemon again would do nothing.
@@ -524,19 +593,30 @@ daemon lists for a mouse:
   could not be set up, unless the tab already gives it as the reason it
   shows no mouse
 
+The Headset tab has one too, over every headset's page, with a line for each
+problem the daemon lists for a headset: one whose node Gearbench has no
+permission to open, one that could not be set up, one that does not answer,
+one switched off or out of range, and a second headset of the G432's family
+that is not driven. Where the tab
+gives one of them as the reason it shows no headset, the banner leaves that
+one out.
+
 A refused change comes back as a toast. A refusal too long for a toast shows
 its first clause, or That did not work, with the whole of it behind Details.
 A change the daemon refuses because `config.json`, the loaded game profile's
 file or a macro's file was edited on disk, or because one of the first two
 could not be read, goes on the banner with Reload… instead. The Game
 profiles dialog covers that banner, so while the dialog is open the refusal
-also comes back over it as a toast. While the window itself cannot read one
-of the first two, it sends no binding, keyboard color or keyboard effect
-change, Save as… or Save to M profile, and says why in a toast. A device
+also comes back over it as a toast. While the window itself cannot read
+`config.json` or the loaded game profile's file, it sends no binding,
+keyboard color or keyboard effect change, Save as… or Save to M profile.
+While it cannot read `config.json`, it sends no new Name for the M profile
+either. Each time, it says why in a toast, and the row over the drawn
+keyboard starts with "Not sent" and names the file. A device
 failure is said in plain words, with the raw error behind Details, under the
 words. A note too long for a toast, such as the one a mouse write gives in
-host mode, shows its first sentence or a short summary, with the whole note
-behind Details. A dropdown entry that needs explaining has a tooltip.
+host mode, shows its first sentence or clause or a short summary, with the
+whole note behind Details. A dropdown entry that needs explaining has a tooltip.
 
 ### Closing the window
 
@@ -549,22 +629,25 @@ window open; close the window again. A change refused then keeps the window
 open, shows the reason and puts the row back. The next close asks again
 about unsaved macro changes, even those you chose to discard. A change the
 daemon never got, because it is not running or its socket could not be used,
-keeps the window open too, under the banner that says so. A failure then
-does not keep the window open for a Spatial sound action, a volume set on
-Game output, Chat output or Mic input, or a change to the G432's equalizer,
-its Noise suppression or a preset library. Macro changes made while it waits
-are asked about before the window closes, unless a macro save or delete is
-still on its way.
+keeps the window open too, under the banner that says so. So does a change
+the window makes on this computer itself that fails then, with the reason
+shown: a Spatial sound action, a change in the Outputs group, a volume set
+on Game output, Chat output or Mic input, a switch of the computer's Noise
+suppression, or a change to the G432's equalizer or a preset library. A
+G432 equalizer change that is saved but not set on the equalizer does not
+keep the window open, since the change stands. Macro changes made while it
+waits are asked about before the window closes, unless a macro save or
+delete is still on its way.
 
 ### The color picker
 
 The Keyboard and Mouse tabs and a headset's Lighting group use the same
-color picker, in the Color row: Brush under Per-key, and First color, with a
-Second color row under it, under Pulsar point. Click the row to
+color picker, in the Color row. Under Per-key that row is titled Brush; under
+Pulsar point it is First color, with a Second color row below it. Click the row to
 open it: a square for saturation and value over a strip for hue, then the
 Hex row and the Saved colors row. As you drag, the color shows live on the
-mouse, and on a keyboard lit key by key under Static; on the G213 it shows
-when you let go. A keyboard
+mouse, and on a keyboard lit key by key under Static; on the G213 and a
+headset it shows when you let go. A keyboard
 color is saved when you let go, the
 Brush only with the keys it paints.
 
@@ -582,9 +665,10 @@ The Hex row takes six hex digits, `#0080ff` or `0080ff`; three digits,
 + in the Saved colors row keeps the current color, and a click on a saved
 color applies it. Every picker shows the same list, so a color saved on the
 Keyboard tab is there on the Mouse tab too. The row holds 24 colors; + on
-a full row drops the oldest and names it. A `config.json` edited by hand to list more cannot be read. To remove
-one, right-click it, or focus it and press Delete, Backspace, the Menu key
-or Shift+F10; the window asks first.
+a full row drops the oldest and names it. To remove one, right-click it, or
+focus it and press Delete, Backspace, the Menu key or Shift+F10; the window
+asks first. A `config.json` edited by hand to list more than 24 cannot be
+read.
 
 ## The keyboard
 
@@ -597,20 +681,22 @@ one keyboard](#more-than-one-keyboard).
 
 The Keyboard tab, from the top:
 
-- while two keyboards are plugged in, a switcher that picks the keyboard the
+- while two or more keyboards are plugged in, a switcher that picks the keyboard the
   tab shows (see [More than one keyboard](#more-than-one-keyboard))
-- the G915 group with Status and Battery
+- the G915 group with Status, Battery, Battery notices and Firmware
 - the M profile group, with Active, Name and Reload from disk (see [Settings
   files](#settings-files))
 - the Game profile group (see [Game profiles](#game-profiles))
-- the Lighting group: Leader while two keyboards are plugged in, and the
+- the Lighting group: Leader while two or more keyboards are plugged in, and the
   follow switch on the tab of the one that does not lead; then the Effect
   row, with Speed under Breathe, Cycle, Wave and Ripple, and Direction under
   Wave
-- the Keys group, with Editing, the drawn keyboard and Bind G keys
+- the Keys group, with Editing, Bind G keys (Bind F keys on a keyboard whose
+  F1 to F12 bind), the Layer row while it is on, and the drawn keyboard
 - the color picker with its Saved colors row, Second color under Pulsar
-  point, Groups, Background, Brightness, and the idle and lock switches and
-  times (see [Idle, lock and suspend](#idle-lock-and-suspend))
+  point, Groups, Background, Brightness, the Lights off when locked switch,
+  and the idle switches and times (see [Idle, lock and
+  suspend](#idle-lock-and-suspend))
 
 The keyboard on its receiver is set up again at once when it is switched on,
 and moves to its cable when that is plugged in.
@@ -619,7 +705,7 @@ and moves to its cable when that is plugged in.
 
 M1, M2 and M3 on the keyboard switch between three M profiles, and the M
 LEDs show which one is active. Each M profile has its own lighting, G-key
-bindings, MR layer and mouse button bindings. On the Keyboard tab, the
+bindings, G-Shift layer and mouse button bindings. On the Keyboard tab, the
 Active row switches the M profile and the Name row renames the one shown.
 `gearbench-ctl m-profile 2` does what M2 does (`profile 2`, its name in
 Gearbench 1.1.0, too).
@@ -636,7 +722,7 @@ An M profile's name cannot hold a control character (Unicode category Cc,
 such as ESC or BEL) or run past 1,000 characters. The rename is refused with
 the reason, and a `config.json` holding such a name cannot be read.
 
-### G keys and the MR layer
+### G keys and G-Shift
 
 G1 to G5 ship unbound. To bind a G key, turn on Bind G keys over the drawn
 keyboard. Each G key then shows its binding under its name, `Macro: name`
@@ -647,20 +733,24 @@ Hovering M1 to M3, MR, Game, BT or Host says what that key does.
 On other keyboards:
 
 - A G915 TKL's or PRO X TKL's G keys are its F1 to F12, each typing its
-  own F key until it is bound.
+  own F key until it is bound. Its tab says Bind F keys, and "Click an F
+  key" over the drawn keyboard, where the rest of this guide says Bind G
+  keys.
 - A G515's F1 to F12 bind the same way once their hardware test passes (see
-  [The G515 TKL and G515 LIGHTSPEED TKL](#the-g515-tkl-and-g515-lightspeed-tkl)), with no MR layer.
+  [The G515 TKL and G515 LIGHTSPEED TKL](#the-g515-tkl-and-g515-lightspeed-tkl)), with no MR key.
 - A G915 X LIGHTSPEED's G1 to G9 bind now, as G915X-G1 to G915X-G9, with no
-  MR layer. While Gearbench runs, one left unbound does nothing.
+  MR key: one of its own G keys, a mouse button or a headset's G key bound to
+  `g-shift` (below) shifts them. While Gearbench has set them to report, one left unbound does nothing.
 - The keys of the G515's other newer relatives, the G915 X, G915 X
   LIGHTSPEED TKL, G316 X, G316 X 98, G512 X 75 and G512 X 98, wait for their
   own hardware test.
 
 Click a G key for the Press a key dialog:
 
-- Press what the key should send. Nothing is bound until you choose Set, so
+- Press what the key should send. Nothing is bound until you choose Bind, so
   after a slip you can press again. Escape closes the dialog. A key still
-  held as the dialog opens or closes does nothing until you let go of it.
+  held as the dialog opens or closes, or as Back returns to it, does nothing
+  until you let go of it.
 - The dialog records the physical key, whatever your layout, Space and Enter
   included.
 - Modifiers held while a key goes down are part of its binding, as
@@ -683,7 +773,13 @@ Click a G key for the Press a key dialog:
   with the key you pick, except a box for that same key. Shift with Left
   Shift gives `leftshift`, and Shift with Right Shift `shift+rightshift`.
   The list is how the window binds Escape and Super alone;
-  `gearbench-ctl bind` binds the kernel's other key names.
+  `gearbench-ctl bind` binds the other names `gearbench-ctl keys` lists.
+- On the Keyboard tab the list opens on Actions: G-Shift (hold), Balance
+  toward game and Balance toward chat, as a mouse button's dropdown lists
+  them. On the G-Shift layer Nothing comes first and G-Shift (hold) is left
+  out, since a key holds G-Shift from its base layer alone. A balance entry
+  says Needs Outputs while [Outputs](#outputs) is not running. The boxes do
+  not go with an action.
 - Choose a macro… binds the key to a macro. Back returns to Press a key.
 - Unbind clears the key's binding. Undo, on the message that says so, binds
   it again, as it does after a binding that took another's place.
@@ -693,11 +789,49 @@ From the command line: `gearbench-ctl bind G1 volumeup`, on a G915 TKL
 volumeup`, on a PRO X TKL `gearbench-ctl bind PROXTKL-F5 volumeup`, or on a
 G915 X LIGHTSPEED `gearbench-ctl bind G915X-G5 volumeup`.
 
-MR is a shift layer while you hold it, with its LED lit. A G key then sends
-its MR binding, or its base binding when it has no MR binding. The window
-has no editor for the MR layer; bind it with
-`gearbench-ctl bind G1 f15 --mr` (`--shift`, its name in Gearbench 1.1.0,
-does the same).
+MR, the G915's G-Shift key, holds G-Shift while you hold it, with its LED
+lit. A G key then sends its G-Shift binding, or its base binding when it has
+no G-Shift binding. Holding MR shifts every mouse too: each button sends its
+binding on the mouse's G-Shift layer, or its base binding when it has none
+there. A headset's G keys send their G-Shift bindings the same way. MR on
+one keyboard leaves another keyboard's G keys alone.
+
+With Bind G keys on, the Layer row directly under it picks Base or
+G-Shift. Each layer shows its own bindings alone: on G-Shift a key with no
+G-Shift binding shows none, and with G-Shift held it does the same as on Base,
+as its tooltip says. A click binds the key on that layer. There the dialog's
+Unbind reads Same as Base, which gives the key back its base binding, and
+Nothing, first under Actions in Choose a key…, makes it do nothing while
+G-Shift is held, as a mouse button's list has them. The row's line says how
+to hold G-Shift: "Hold MR" on a keyboard with MR, else "Bind G-Shift to a
+key or button first". Once one of its keys, a mouse button or a headset's G
+key is bound to `g-shift`, it says "Hold MR or a G-Shift key or button", or
+"Hold a G-Shift key or button" on a keyboard without MR. From the command
+line, `gearbench-ctl bind G1 f15 --g-shift` binds G1 to F15 on the G-Shift
+layer (`--mr`, its name in Gearbench 1.2.0, and `--shift`, its name in 1.1.0,
+do the same). `gearbench-ctl bind G1 clear --g-shift` gives G1 back its base
+binding there, and `gearbench-ctl bind G1 none --g-shift` makes it do nothing
+while G-Shift is held.
+
+Any G key can do MR's job, on a keyboard without MR too. Bound to
+`g-shift`, with G-Shift (hold) under Choose a key… on the base layer, or with
+`gearbench-ctl bind G915X-G9 g-shift` on a G915 X
+LIGHTSPEED, it shifts its own keyboard, every mouse and a headset's G keys
+while you hold it, and on a keyboard with MR lights that keyboard's MR LED as
+MR does. A mouse
+button bound to `g-shift` shifts every keyboard, every mouse and a headset's G
+keys, and lights each MR LED while held (see [The buttons, G4 to G9](#the-buttons-g4-to-g9));
+a headset's G key bound to it does the same (see [Other Logitech G
+headsets](#other-logitech-g-headsets)). A key that holds the shift
+takes no G-Shift binding of its own, so `gearbench-ctl bind G915X-G9 f15 --g-shift` is
+then refused, and a key with a G-Shift binding has to lose it before it can take
+`g-shift`. In the window the same binds are refused, with a message saying
+why.
+
+Bound to `balance-chat` or `balance-game`, Balance toward chat or Balance
+toward game under Choose a key…, a G key moves the balance between voice
+chat and the game one stop at each press (see [Outputs](#outputs)). Its
+tooltip says Needs Outputs while Outputs is not running.
 
 ### Binding syntax
 
@@ -711,29 +845,33 @@ In a binding or a macro, once Print Screen goes down with Alt held, a key
 other than Alt, Shift or Print Screen is left up until Alt comes up. The `b`
 of `alt+sysrq+b` is one such key: Linux would take it as a magic SysRq
 command, and on Ubuntu `b` restarts the computer at once, without saving
-your work. The journal names the key left up. Alt with Print Screen alone
+your work. The journal names the key left up, or for a text step, the
+character's place in the text. Alt with Print Screen alone
 still goes through. A G key or mouse button bound to `alt+sysrq+b`, or a
 macro's `key_down` step of it, still holds Alt and Print Screen. A macro's
-`key` step of it presses none of its keys.
+`key` step of it presses none of its keys, and the journal names the keys
+of the step that nothing else already holds.
 
 A binding names each key once, so `a+a` is refused. A `+` needs a key on
 each side, so `ctrl++` is refused too: the plus key is `shift+equal` on a US
 layout, or `kpplus` on the keypad. `macro:NAME` runs a macro, and is refused
 when the name holds a control character or runs past 1,000 characters.
-`none`, `clear` or `off`, in any case, clears a G key with
-`gearbench-ctl bind` and a mouse button with `gearbench-ctl mouse-bind`.
+`clear` or `off`, in any case, clears a G key with `gearbench-ctl bind` and
+a mouse button with `gearbench-ctl mouse-bind`. So does `none` on the base
+layer; with `--g-shift`, `none` makes the key or button do nothing while
+G-Shift is held.
 
 No name binds the Clear key, `key_clear` included, since it is too easily
 confused with `clear`. A `config.json` or game profile file that binds it
-cannot be read, and neither can one holding any other binding the command
-line refuses. A binding in either file goes in quotes: `"G1": "5"` binds the
+cannot be read, and neither can one holding any other key spec or macro name
+the command line refuses. A binding in either file goes in quotes: `"G1": "5"` binds the
 5 key, and a file with `"G1": 5` cannot be read. In a file, G1 to G5 with no
 binding are `null`, and any other key with no binding is left out, such as a
 G515's `G515-F1` or a G915 X's `G915X-G1`.
-`none`, `clear` and `off` unbind on the command line only. A file that gives
-one of them to a keyboard's G or F key cannot be read, and neither can one
-that gives a mouse button or a headset's G key `clear` or `off`. `none` is an
-action of a mouse button and of a headset's G key, and the default for G9 on
+A file that gives
+`clear` or `off` to any key or button cannot be read, and neither can one
+that gives `none` to a keyboard's G or F key on its base layer. `none` is an
+action of a mouse button, of a headset's G key and, on the G-Shift layer, of any other key, and the default for G9 on
 the G502 models.
 
 Key names are the kernel's, from a copy of its key table taken from Linux
@@ -757,19 +895,19 @@ macros work on the mouse's G4 to G9.
   releases it: G1 bound to `shift` while a macro types a capital, for
   example, or two G keys.
 - A screen lock, GNOME's screen blank, a suspend, or another account or a
-  text console taking the screen releases whatever a G key holds, and the MR
-  layer and its LED. A G key or MR still held through it does nothing until
-  you release it and press it again.
+  text console taking the screen releases whatever a G key holds, and
+  G-Shift and each MR LED that shows it, whatever key or button holds it. A
+  G key or MR still held through it does nothing until you release it and
+  press it again.
 - The Game Mode button is the keyboard's own Game Mode, which Gearbench
-  does not touch. Game Mode turns off the Super and Menu keys: if Super does
-  nothing, the Activities overview included, press the Game Mode button
-  again.
+  does not touch. Game Mode turns off the Super key: if Super does nothing,
+  the Activities overview included, press the Game Mode button again.
 - With the daemon stopped, the keyboard runs its onboard profiles. A G915's
   G1 to G5 then type F1 to F5 on M1, 1 to 5 on M2 and 6 to 0 on M3. A G915
   TKL's or PRO X TKL's F1 to F12 type F1 to F12. At a shutdown or reboot the
-  daemon turns the lights off. It also leaves the keyboard off its onboard
-  profiles then, unless it is a G915 TKL or PRO X TKL, and a killed daemon
-  can leave it off them too. Off its onboard profiles, a G915's or G815's G
+  daemon leaves the keyboard off its onboard profiles, unless it is a G915
+  TKL or PRO X TKL, and a killed daemon can leave it off them too. Off its
+  onboard profiles, a G915's or G815's G
   keys type nothing. After a
   shutdown, the keys of a G515 and its newer relatives do their own jobs
   again.
@@ -779,13 +917,12 @@ macros work on the mouse's G4 to G9.
 The Effect row picks what the keyboard shows: Static, one color for the whole
 keyboard; Per-key, keys painted one by one; or one of the keyboard's own
 animations, Breathe, Cycle, Wave, Ripple and Pulsar point, and on the G512 X
-Remind me of, Neon and Outer space. The G915 has the first four, and the
+"Remind me of", Neon and Outer space. The G915 has the first four, and the
 wired G515 TKL the first five. The G515's Cycle, Wave and
 Ripple are its own versions of them, each checked on it on 2026-10-18.
 Pulsar point is the keyboard's own animation in two colors over the whole
 board. The two G515s and the G515's newer relatives have it where the
-keyboard lists it, as the wired G515 TKL and the G915 X LIGHTSPEED do; it
-has run on a G915 X LIGHTSPEED. Remind me of, Neon and Outer space are
+keyboard lists it; it has run on a G915 X LIGHTSPEED. "Remind me of", Neon and Outer space are
 three more of the keyboard's own animations over the whole board, each in
 one color, on the G512 X 75 and G512 X 98 alone, where the keyboard has
 Pulsar point; none of the three has run on a keyboard yet. The row lists
@@ -811,7 +948,9 @@ window draws the profile's Static color and background as black: the Effect
 row says Off on a Static profile and Per-key on a Per-key one. Choosing
 an animation with a color, Breathe or Ripple among them, then runs it in the
 profile's stored Static color and moves the picker to it. Static then comes
-back in that color.
+back in that color. Static or an animation also brings back the stored
+background, which Per-key then shows under the unpainted keys; Per-key chosen
+straight from Off paints them black and saves that black as the background.
 
 Breathe, Cycle, Wave and Ripple show a Speed slider, slower to the left. Its
 subtitle is the length of one cycle in milliseconds, as `gearbench-ctl
@@ -833,14 +972,11 @@ on a wired G515 TKL.
 Breathe, ripple and the G512 X's three run in the Static color, which the
 picker sets. Cycle and wave have no color, and the picker is grayed out. The G915's logo waves with
 the keys under wave, and stays steady in the Static color under ripple. On
-the G915 X LIGHTSPEED the logo joins both, waving with the keys under wave
-and rippling with them under ripple.
+the G915 X LIGHTSPEED the logo waves and ripples with the keys.
 Pulsar point runs in two colors: the picker, titled First color, sets the
 Static color, and a second picker, the Second color row, sets the other,
 magenta until you choose one
-(`gearbench-ctl effect pulsar-point --second-color '#00b8fc'`). It opens
-as the First color does, with the same square, Hex row and saved colors,
-and sends its color when you let go. When the
+(`gearbench-ctl effect pulsar-point --second-color '#00b8fc'`). When the
 keyboard dims, Pulsar point runs at half its brightness in the same two
 colors, and the G512 X's three at half theirs in the same color. Each profile
 saves its mode, the speed of each animation that has one, wave's direction
@@ -854,16 +990,16 @@ the colors across the board in its direction. Ripple spreads a ring of its
 color across the board from each key you click on the drawn keyboard or type
 while the window has focus. Pulsar point keeps W, A, S and D in its first
 color, and every other key shows its second, brightening and dimming in a
-wave from left to right, never dark, as a G915 X LIGHTSPEED runs it. Remind
-me of, Neon and Outer space show their color twinkling over the board: how
+wave from left to right, never dark, as a G915 X LIGHTSPEED runs it.
+"Remind me of", Neon and Outer space show their color twinkling over the board: how
 those three look on a keyboard has not been checked yet, so their drawing
 is a guess. The logo
 does what the keyboard's does, and on the G213 Prodigy each of its five
 areas shows one color. The drawing runs only while the window is on screen
 with the Keyboard tab shown. With animations turned off in the desktop's
 settings, it shows one still frame in the effect's colors. A screen reader hears
-which effect the drawn keyboard shows, in which colors, and its speed where
-it has one; its keys give their names.
+which effect the drawn keyboard shows, in which colors, wave's direction,
+and its speed where it has one; its keys give their names.
 
 ### Painting keys
 
@@ -882,10 +1018,11 @@ Brush:
   color, or the background for an unpainted key. That click paints nothing,
   and Sample turns itself off after it. Escape or a second click on Sample
   cancels it. While it waits, no click, drag or key clears a key.
-- Sample and Groups show under Per-key only, and not while Bind G keys is
-  on.
+- Sample shows under Per-key, and under Per-area on the G213 Prodigy, where
+  a key gives its area's color. Groups shows under Per-key alone. Neither
+  shows while Bind G keys is on or the keyboard follows another.
 - Background sets what an unpainted key shows, apart from the brush. Use
-  brush color gives it the brush's color, and Black leaves unpainted keys
+  brush color gives it the brush's color, and Use black leaves unpainted keys
   unlit.
 - The Editing row over the drawn keyboard says which profile the edits go to.
 
@@ -911,7 +1048,7 @@ holds, and its background when that differs from its Static color.
 ### Brightness
 
 The Brightness row, or `gearbench-ctl brightness`, sets the backlight,
-rounded down to a level the firmware keeps: on the G915, 0, 12, 25, 50 or
+rounded down to a level the keyboard keeps: on the G915, 0, 12, 25, 50 or
 100%. The keyboard's own brightness key works too, and the daemon saves the
 level it sets. On a G515 that is FN+F8, which steps through 100, 50, 25, 13
 and 0%.
@@ -924,18 +1061,19 @@ shows it as 12%.
 
 When one of them connects, Gearbench reads the level the keyboard holds and
 keeps it in place of the one it saved. So a level set with the keyboard's
-own key while Gearbench was not running shows in the Brightness row. A level
-you set in Gearbench while the keyboard was away or switched off is sent to
-it instead. A keyboard that follows another takes that keyboard's level.
-Once it stops following, it goes back to its own level, even if it was
-switched off in between: Gearbench does not mistake the level it gave the
-keyboard for one set with the keyboard's key. Gearbench forgets that level
-when it restarts. So a keyboard that connects after a restart, not
-following, can keep the level of the keyboard it followed as its own.
-Gearbench also reads and keeps the level of each of the G515's other newer
-relatives, the G915 X, the G915 X LIGHTSPEED TKL and the G316 X and G512 X
-models, when it connects. Whether they keep their brightness when switched
-off is not known.
+own key while Gearbench was not running shows in the Brightness row. A
+level you set in Gearbench while the keyboard was away or switched off is
+sent to it instead, unless Gearbench restarts before the keyboard is back.
+A keyboard that follows another takes that keyboard's level. Once it stops
+following, it goes back to its own level, even if it was switched off in
+between, unless Gearbench restarts before it connects again: then it can
+keep the level of the keyboard it followed as its own. Gearbench also reads
+and keeps the level of each of the G515's other newer relatives, the G915
+X, the G915 X LIGHTSPEED TKL and the G316 X and G512 X models, when it
+connects. Whether they keep their brightness when switched off is not
+known. A PRO X TKL LIGHTSPEED has the G515's brightness feature: Gearbench
+writes its level each time it lights the board and does not read it back,
+and whether it keeps the level when switched off is not known.
 
 A mouse that follows the keyboard takes its brightness too (see [Lighting
 and following the keyboard](#lighting-and-following-the-keyboard)). Each keyboard model keeps its own brightness.
@@ -949,8 +1087,10 @@ F8 to F12, PrtSc, ScrLk and Pause, and FN itself. Every
 other key keeps its color, and letting go of FN puts the board back. Under
 an animation, holding FN pauses it: the board shows the profile's Static
 color under the white keys, and the animation starts again from the
-beginning when you let go. FN wakes a dimmed board, as any key does, and a
-board whose lights are off stays dark. The keys do what they always do:
+beginning when you let go. FN wakes a board dimmed or turned off by its idle
+dimming, as any key does. While a locked or blank screen has the lights off,
+FN lights nothing. Under the Off effect, the FN keys still turn white, over
+a black board. The keys do what they always do:
 the keyboard plays, stops and skips tracks, changes the volume and steps the
 brightness itself. This has been tested on a wired G515 TKL. The G515
 LIGHTSPEED TKL is taken to work the same, and none of it has been tested on one.
@@ -962,10 +1102,11 @@ the backtick and 1 to 3, F3 to F12 and, on the 75, Print Screen, Page Up
 and Page Down. It has been tested on a G915 X LIGHTSPEED, and on none of the
 others yet.
 
-A G915 X LIGHTSPEED tells Gearbench that FN is held only while its custom
-assignments are on, and each of these keyboards, the G515s included, is
-taken to do the same: while they are off, its FN keys do not light. When
-FN+F1 turns them off, the FN keys go back to the profile's colors at once.
+A G915 X LIGHTSPEED's FN keys do not light while its custom assignments
+are off, since it tells Gearbench that FN is held only while they are on;
+each of these keyboards, the G515s included, is taken to do the same. When
+FN+F1 turns the custom assignments off, the FN keys go back to the
+profile's colors at once.
 
 To see FN, Gearbench has each of these keyboards send it Ctrl, Shift, Alt,
 Super and FN as you press them. For what that lets other programs read, see
@@ -979,46 +1120,49 @@ The G915, the G815 and the G213 Prodigy have no FN key.
 ### More than one keyboard
 
 Gearbench drives every keyboard plugged in at once, one of each model. One
-of them leads: the other shows its lighting at its brightness unless set to
-keep its own, and a mouse can follow it. The M keys of either keyboard switch
-the M profile of both; MR shifts the G keys of its own keyboard alone. The
+of them is the leader: the others show its lighting at its brightness unless
+set to keep their own, and a mouse can follow it. The M keys of any keyboard switch
+the M profile of every keyboard; MR shifts its own keyboard's G keys, every
+mouse and every headset, and never another keyboard's G keys. The
 keyboards dim together (see [Idle, lock and suspend](#idle-lock-and-suspend)). When the daemon starts
-with more than one keyboard plugged in and switched on, it sets them up in
-this order: the G915, the wired G515 TKL, the G515 LIGHTSPEED TKL, the G915
-TKL, the G815, the PRO X TKL LIGHTSPEED, the G515's newer relatives and the
-G213 Prodigy. The first leads unless another keyboard plugged in is picked
-to lead.
+with more than one keyboard plugged in and switched on, it sets up the one
+picked to lead first, if it is among them, then the others in this order:
+the G915, the wired G515 TKL, the G515 LIGHTSPEED TKL, the G915 TKL, the
+G815, the PRO X TKL LIGHTSPEED, the G515's newer relatives (the G915 X,
+G316 X and G512 X models) and the G213 Prodigy. With none of them picked,
+the first in that order leads.
 
 A keyboard switched off with its receiver plugged in is set up once it is
 switched on. Gearbench listens for it and asks it again 10 seconds after,
 then 20, 40 and 80 seconds, then every 2 minutes, so a keyboard that stays
-off does not slow the other one's keys. The Leader row grays out a keyboard
-switched off, with Switched off under its name. `gearbench-ctl sync-keyboard`
+off does not slow the other keyboards' keys. The Leader row grays out a
+keyboard that was switched off when Gearbench went to set it up, with
+Switched off under its name. `gearbench-ctl sync-keyboard`
 still picks it, and it leads once it is switched on. The daemon leaves a
-G915 TKL on its onboard profile while it has no virtual keyboard or while
-another account or a text console has the screen. It sets the keyboard up
-once that ends and drives the other keyboard meanwhile. If you pick such a
-keyboard in the Leader row then, it leads once it is set up, and the tab
-says so. While a picked keyboard is plugged in, the Leader row shows it even
-before it leads; picking the other one there picks that one in its place.
+G915 TKL or a PRO X TKL LIGHTSPEED on its onboard profile while it has no
+virtual keyboard or while another account or a text console has the screen.
+It sets the keyboard up
+once that ends and drives the others meanwhile. If you pick such a
+keyboard in the Leader row then, it leads once Gearbench sets it up, and
+the tab says so. While a picked keyboard is plugged in, the Leader row shows
+it even before it leads; picking another there picks that one in its place.
 
-While two keyboards are plugged in, the switcher at the top of the Keyboard
-tab has a button for each. It picks the keyboard the tab shows and changes:
-its status, its lighting and its board. The rest of the tab, the M profile,
-game profiles and the idle settings, is both keyboards'. A pick in the
-window changes nothing `gearbench-ctl` does: a command with no `--keyboard`
-acts on the leader, except `probe`, which reads the first keyboard that
-answers. A keyboard switched off with its receiver plugged in keeps its
-button, grayed out with "Switched off" under its name; it can be picked once
-it is switched on.
+While two or more keyboards are plugged in, the switcher at the top of the
+Keyboard tab has a button for each. It picks the keyboard the tab shows and
+changes: its status, its lighting and its board. The rest of the tab, the M
+profile, game profiles and the idle settings, is every keyboard's. A pick in
+the window changes nothing `gearbench-ctl` does: `color`, `effect`,
+`brightness` and `preview` act on the leader, or with `--keyboard` on the
+one named, and `probe` with no `--keyboard` reads the first keyboard that
+answers. A keyboard Gearbench finds switched off, with its receiver plugged in, keeps its
+button, grayed out with Switched off under its name; it can be picked once
+it is switched on. One switched off while Gearbench drives it keeps a button
+that can be picked, and its Status row says it is asleep or switched off.
 
 ![The top of the Keyboard tab with two keyboards plugged in: the G915 grayed and switched off, the G515 TKL connected](images/keyboard-switcher.png)
 
 Each M profile and each game profile keeps its lighting for each keyboard
-model, the same on its cable and its receiver. The fourteen models are the
-G915, the wired G515 TKL, the G515 LIGHTSPEED TKL, the G915 TKL, the G815,
-the PRO X TKL LIGHTSPEED, the G515's seven newer relatives (the G915 X, G316
-X and G512 X models) and the G213 Prodigy. A keyboard with no lighting of its
+model, the same on its cable and its receiver. A keyboard with no lighting of its
 own in a profile shows another model's, cut to what it can show. An effect it
 lacks shows as Static or Per-key, whichever the copied lighting was on
 before that effect, and only the keys it has are painted. It copies the
@@ -1031,18 +1175,21 @@ applies:
 3. with none connected, the one picked, or, with none picked, the one
    connected first
 
-A keyboard that is not plugged in, or the keyboard connected first, is
-picked with `gearbench-ctl sync-keyboard`. Where the leader has no lighting
+A keyboard that is not plugged in is picked with `gearbench-ctl
+sync-keyboard` and its model's name or id, as `gearbench-ctl sync-keyboard
+G915`; `gearbench-ctl sync-keyboard first` drops the pick, so the one
+connected first leads. Where the leader has no lighting
 in the profile either, the keyboard copies a model with the same keys as its
-own, else the first of the fourteen models above with lighting in the
-profile. A profile with no keyboard's lighting in it shows the default
+own, else the first model with lighting in the profile, in the order the
+daemon sets keyboards up at a start, the G915 first. A profile with no keyboard's lighting in it shows the default
 lighting: Static in Gearbench's default color, `#0080ff`.
 
-With two keyboards connected, the one that does not lead follows the leader
-while its follow switch is on (below). It shows the leader's lighting in
-place of its own, cut the same way to what it can show, at the leader's
+With more than one keyboard connected, each that does not lead follows the
+leader while its follow switch is on (below). It shows the leader's lighting
+in place of its own, cut the same way to what it can show, at the leader's
 brightness. A change to the leader's lighting or brightness then shows on
-both, and the brightness key of either keyboard sets both. Its own lighting
+each that follows, and the brightness key of the leader or of one that
+follows sets them all. Its own lighting
 stays in the profile. With none connected, the mouse shows the leader's
 lighting and brightness.
 
@@ -1053,27 +1200,30 @@ leader) in the Lighting group. From a terminal,
 TKL, by its id; its name, `"G515 TKL"`, names it too. While the switch is
 on, that keyboard's Effect, color, Background and Brightness rows are grayed
 out, as a following mouse's color rows are, and its board takes no paint.
-Bind G keys still works. With the switch off, that keyboard shows its own lighting
+Bind G keys, or Bind F keys, still works. With the switch off, that keyboard shows its own lighting
 at its own brightness while another leads. The leader's changes leave it
-alone unless it shows a copy of the leader's (below). `gearbench-ctl color`,
-`effect`, `brightness` and `preview` act on the keyboard that leads; with
-`--keyboard` they act on the one named. A change for a keyboard that follows
-is saved for it, and the reply says so. It shows once the keyboard stops
+alone unless it shows a copy of the leader's (below). A change
+`gearbench-ctl` makes with `--keyboard` to a keyboard that follows is saved
+for it, and the reply says so. It shows once the keyboard stops
 following, or at once where the leader shows a copy of its lighting.
 
 Connecting a keyboard saves no copy. The first change you make on it saves
 the copy, with your change, for that keyboard alone; the other models'
 lighting stays as it was. Until then it shows each change to the lighting it
 copies at once; while it leads, so does a mouse that follows it. A change
-made while no keyboard is connected goes to the leader. Before the daemon
+made while no keyboard is connected goes to the leader where the daemon has
+found a keyboard of the leader's model since it started, switched on or not,
+and else to the first keyboard model it found. Before the daemon
 has found a keyboard, switched on or not, it refuses a lighting or
 brightness change with a message to connect a keyboard.
 
 ## Keyboard models
 
-"The keyboard" covers the G915 and the Keyboard tab's controls; each other
-keyboard model's section is here. With more than one keyboard plugged in,
-"More than one keyboard" says which is set up first and leads.
+[The keyboard](#the-keyboard) covers the G915 and the Keyboard tab's
+controls; this section covers each other keyboard model. Of these models,
+only the wired G515 TKL and the G915 X LIGHTSPEED have been tested on one.
+With more than one keyboard plugged in, [More than one
+keyboard](#more-than-one-keyboard) says which is set up first and leads.
 
 ### The G515 TKL and G515 LIGHTSPEED TKL
 
@@ -1090,37 +1240,34 @@ key the G515 lacks, such as the logo, a media key, the keypad or a G key.
 That color stays in the profile and is not sent to the keyboard.
 
 The G515's F1 to F12 do not bind yet: binding them takes a setting written
-to the keyboard, which has not been tested on the hardware. For now its tab
-has no Bind G keys, its Custom assignments row says the bindings wait for a
-test and the F keys type their own keys. `gearbench-ctl bind G515-F1 volumeup`
+to the keyboard, which has not passed its test on the hardware. For now its tab
+shows Bind F keys grayed out, with "Bindings wait for a test on this model"
+on its row, and the F keys type their own keys. `gearbench-ctl bind G515-F1 volumeup`
 saves a binding meanwhile and says so.
 
 Once that test passes, they bind as a G915 TKL's do, under names of their
 own, G515-F1 to G515-F12, so a binding made for a G915 TKL's F1 stays on
-that keyboard. Gearbench sets each bound F key to report to it and runs the
-binding; every other F key types its own key. The keyboard keeps what
-Gearbench set until it loses power. Gearbench sets every F key back when it
-stops, and while another account or a text console has the screen.
+that keyboard. A key with a G-Shift binding and no base binding counts as
+unbound, so it types its own key even while G-Shift is held: give it a base
+binding too, as the bind's note says.
 
 A shortcut on the keyboard, such as FN+F1, turns its custom assignments off
-and on. While they are off, bound F keys type their own keys. Once its F
-keys bind, the tab's Custom assignments row says On or Off, with the
-shortcut that turns them the other way. Each turn brings a notice, "G515
-TKL: custom assignments off" or "on", with the shortcut that turns them back
-under it. Once its F keys bind, the notice also says what the bound ones do
-until then (see [Custom assignments](#custom-assignments) under "Battery and DPI notices"). The
+and on. Each turn brings a notice, "G515 TKL: custom assignments off" or
+"on", with the shortcut that turns them back under it
+(see [Custom assignments](#custom-assignments) under "Battery and DPI notices"). The
 tab's Game Mode row says whether Game Mode is on. The keyboard tells
 Gearbench only when its Game Mode button is pressed. So the row says Game
 Mode is not known until you press the button after Gearbench last set the
 keyboard up, as when the daemon starts or the keyboard is switched on or
-moves to its cable. `gearbench-ctl status` says both.
+moves to its cable. `gearbench-ctl status` says whether the custom
+assignments and Game Mode are on.
 
 The G515 LIGHTSPEED TKL works through its receiver too, on a node of its own
 that its udev rule grants. Its group has a Battery row with the percentage
 the keyboard reports, and it gets the G915's low-battery notices (see [Low
 battery](#low-battery)). A cable plugged in moves it to its cable. With its udev rule
 installed, any program you run can read what you type on it through that
-node; Gearbench drops those reports unread (see [The udev rules](#the-udev-rules)).
+node; Gearbench drops those reports unread. [The udev rules](#the-udev-rules) says how to limit that grant to one group's accounts on a machine several people use.
 
 ### The G915 TKL
 
@@ -1133,20 +1280,20 @@ The G915 TKL's tab draws its own keys, with its logo, media keys and
 brightness button, and Groups leaves out G keys and Keypad. Its G1 to G12
 are its F1 to F12. These type only through the keyboard's onboard profile,
 so while the daemon runs, the daemon types them itself through its virtual
-keyboard. Each one binds as the G915's G keys do, with Bind G keys, on the
-MR layer and in a game profile. It types its own F key until it is bound;
+keyboard. Each one binds as the G915's G keys do, with Bind F keys, on the
+G-Shift layer and in a game profile. It types its own F key until it is bound;
 unbinding it brings that back. They bind under their own names, F1 to F12,
 so a binding made for the G915's G1 leaves the G915 TKL's F1 typing F1.
+The G915 TKL's M1 to M3, printed under F1 to F3, switch M profiles as on
+the G915; how the keyboard sends them has not been checked.
 
 While the daemon cannot open `/dev/uinput`, it has no virtual keyboard and
 leaves the keyboard on its onboard profile, so F1 to F12 work. It then
 drives none of the keyboard's lighting or keys, and `gearbench-ctl status`,
 the tray and the Keyboard tab say why. Once the daemon can open
-`/dev/uinput`, the keyboard is set up within about 30 seconds. Its M1 to M3,
-printed under F1 to F3, switch M profiles as on the G915; how the keyboard
-sends them has not been checked. When the daemon stops, at a shutdown or
-reboot too, it hands the keyboard back to its own profile, and F1 to F12
-type as before. A crash or a kill stops the daemon without that, and F1 to
+`/dev/uinput`, the keyboard is set up within about 30 seconds. When the
+daemon stops, at a shutdown or reboot too, it hands the keyboard back to
+its own profile, and F1 to F12 type as before. A crash or a kill stops the daemon without that, and F1 to
 F12 then type nothing until it starts again or the keyboard is switched off
 and on. While another account or a text console has the screen, the daemon
 hands the keyboard back the same way, so F1 to F12 type there. It sets the
@@ -1156,8 +1303,7 @@ Gearbench writes nothing to the G915 TKL's onboard memory and does not drive
 it over Bluetooth. Linux 7.3 or later, going by the kernel's source, gives
 the keyboard a node of its own behind its receiver. With its udev rule
 installed, any program you run can read what you type on the G915 TKL
-through that node; Gearbench drops those reports unread (see [The udev
-rules](#the-udev-rules)). A color a profile holds for the keypad or a G key stays in the
+through that node; Gearbench drops those reports unread. [The udev rules](#the-udev-rules) says how to limit that grant to one group's accounts on a machine several people use. A color a profile holds for the keypad or a G key stays in the
 profile and is not sent to the keyboard.
 
 ### The G815
@@ -1166,12 +1312,12 @@ A G815 on its cable works too; the G813 has the same id and is taken for
 one. It was built from published listings and logs of its features and its
 quick-start guide. None of it has been tested on a G815 yet. It works as the
 G915 does, with the same lighting, effects and brightness: G1 to G5 and
-their MR layer bound the same way, M1 to M3 and every key a G915 profile
+their G-Shift layer bound the same way, M1 to M3 and every key a G915 profile
 paints. Its tab draws the G915's keys with its own top row, Game Mode and
 Brightness where the G915 has LIGHTSPEED and Bluetooth. The G815 has no
 battery, so its tab has no Battery row. With its udev rule installed, any
 program you run can read what you type on the G815 through its control
-interface; Gearbench drops those reports unread (see [The udev rules](#the-udev-rules)).
+interface; Gearbench drops those reports unread. [The udev rules](#the-udev-rules) says how to limit that grant to one group's accounts on a machine several people use.
 Nothing is written to its onboard memory. Whether it dims by itself after
 its idle time has not been checked.
 
@@ -1183,20 +1329,23 @@ for it and its setup guide. None of it has been tested on a PRO X TKL yet.
 Its F1 to F12 work as the G915 TKL's do. While the daemon runs, it types
 them itself, and each types its own F key until it is bound. The keyboard
 stays on its onboard profile while the daemon has no virtual keyboard or
-another account has the screen. They bind under their own names, PROXTKL-F1
-to PROXTKL-F12, so a binding made for a G915 TKL's F1 stays on that
-keyboard. It has no M keys or MR: its M profiles are switched from the M
-profile group and the tray icon's menu, and an MR layer binding is never
-reached on it.
+another account or a text console has the screen. They bind under their own
+names, PROXTKL-F1 to PROXTKL-F12, so a binding made for a G915 TKL's F1
+stays on that keyboard. It has no M keys or MR: its M profiles are switched
+from the M profile group and the tray icon's menu, and its G-Shift layer is
+held by one of its own F keys, a mouse button or a headset's G key bound to
+`g-shift` (see [G keys and G-Shift](#g-keys-and-g-shift)).
 
 The PRO X TKL's tab draws its own keys, with its brightness button and its
-media keys, which light. Groups leaves out G keys, Keypad and Logo. Through
-its receiver it works on a node of its own, with a Battery row and the
-G915's low-battery notices. With its udev rule installed, any program you
+media keys, which light. Groups leaves out G keys, Keypad and Logo. Its tab
+has a Battery row. Through its receiver it works on a node of its own, with
+the G915's low-battery notices. With its udev rule installed, any program you
 run can read what you type on the PRO X TKL through that node; Gearbench
-drops those reports unread (see [The udev rules](#the-udev-rules)). It does not tell
+drops those reports unread. [The udev rules](#the-udev-rules) says how to limit that grant to one group's accounts on a machine several people use. It does not tell
 Gearbench when FN is held, so its keys do not light for FN as a G515's do.
-Gearbench writes nothing to its onboard memory and does not drive it over
+Gearbench sets its brightness each time it lights the board, and the
+keyboard may store it as a G515 does (see [Brightness](#brightness)). It
+writes nothing else to its onboard memory and does not drive it over
 Bluetooth.
 
 ### The G915 X, G316 X and G512 X models
@@ -1204,12 +1353,13 @@ Bluetooth.
 The G515's newer relatives work too: the G915 X, the G915 X LIGHTSPEED and
 the G915 X LIGHTSPEED TKL; the G316 X and G316 X 98; and the G512 X 75 and
 G512 X 98. Each works on its cable, and the two G915 X LIGHTSPEED models
-through their receiver as well. They were built from published listings of
-their features, the key layouts G HUB draws for them and, for the G316 X and
-G512 X, their firmware. The G915 X LIGHTSPEED has since been tested, on its
-cable and through its receiver; none of the others has. Gearbench drives
-them as it drives the G515: per-key lighting, the effects each reports,
-brightness, the FN keys lit while FN is held (see [The FN keys](#the-fn-keys)) and Game
+through their receiver as well. They were built from the key layouts G HUB
+draws for them, published listings of the G915 X's and G915 X LIGHTSPEED's
+features, which the G915 X LIGHTSPEED TKL is taken to share, and the
+firmware of the G316 X and G512 X models. The G915 X LIGHTSPEED has since
+been tested, on its cable and through its receiver; none of the others has.
+Gearbench drives them as it drives the G515: per-key lighting, the effects
+each reports, brightness, the FN keys lit while FN is held (see [The FN keys](#the-fn-keys)) and Game
 Mode's state. Each tab draws its own keys: on the G915 X, G1 to G5 down its
 left and G6 to G9 above its F row; on the G915 X LIGHTSPEED TKL, its media
 keys; on the G316 X and G512 X, their 98% and 75% boards. Their light bars,
@@ -1223,22 +1373,25 @@ G915 X and G915 X LIGHTSPEED; for F1 to F12, G915XTKL-F1 to G915XTKL-F12,
 G316X-F1 to G316X-F12 on both G316 X models, G512X75-F1 to G512X75-F12 and
 G512X98-F1 to G512X98-F12. The setting that makes a key report to Gearbench
 has been tested on the G915 X LIGHTSPEED alone, and its G1 to G9 take their
-bindings. Gearbench sets all nine to report to it, bound or not, so while it
-runs, a G key left unbound does nothing. Without Gearbench, G1 to G9 send
-F13 to F21. GNOME takes F13 for Settings (G1), F20 for mic mute (G8) and F21
-for the touchpad (G9). To have G1 open Settings again, bind it to F13.
-Gearbench sets the G keys back when it stops, and while another account or a
-text console has the screen. A crash or a kill stops Gearbench without that
-and leaves the G keys doing nothing until it starts again or the keyboard
+bindings. Gearbench sets all nine to report to it, bound or not, so while they are set, a G key left unbound does nothing. Without Gearbench, G1, G2, G8 and
+G9 send F13, F14, F20 and F21. G3 to G7 were read sending F15 to F19 only in
+the keyboard's host mode, described below. GNOME takes F13 for Settings
+(G1), F20 for mic mute (G8) and F21 for the touchpad (G9). To have G1 open
+Settings again, bind it to F13.
+Gearbench sets the G keys back when it stops and while another account or a
+text console has the screen, and sets none of them while it has no virtual
+keyboard (see [No virtual keyboard](#no-virtual-keyboard)). The G keys then send
+what they send without Gearbench, as given above. A crash or a kill stops
+Gearbench without setting the G
+keys back and leaves them doing nothing until it starts again or the keyboard
 loses power, its cable out and the keyboard switched off. When FN+F1 turns
 the keyboard's custom assignments off, G1 to G9 send F13 to F21 too, bound
-or not, until FN+F1 turns them back on. A notice says so: "G915 X
-LIGHTSPEED: custom assignments off", with "Its G keys send F13 to F21 until
-FN+F1 turns them on" under it. FN+F1 again brings "custom assignments on",
-with "Its G keys run their bindings until FN+F1 turns them off". On the
-others, the tab has no Bind G keys, and the Custom assignments row says the
-bindings wait for a test. `gearbench-ctl bind` saves a binding and says so;
-meanwhile the keys do what they do without Gearbench.
+or not, until FN+F1 turns them back on. Each turn brings a notice (see
+[Custom assignments](#custom-assignments) under "Battery and DPI notices").
+On the others, the tab's Bind G keys, or Bind F keys on a model whose F1 to
+F12 bind, is grayed out with "Bindings wait for a test on this model" on its
+row. `gearbench-ctl bind` saves a binding and says so; meanwhile the keys
+send what the keyboard sends for them in its host mode, described below.
 
 While Gearbench runs, it puts each of these keyboards and each G515 in the
 keyboard's own host mode, as G HUB does. It puts the keyboard back in its
@@ -1253,7 +1406,7 @@ A LIGHTSPEED model's group has a Battery row with the charge the keyboard
 reports. Through its receiver it works on a node of its own, as the G515
 LIGHTSPEED TKL does, with the G915's low-battery notices. With its udev rule
 installed, any program you run can read what you type on it through that
-node; Gearbench drops those reports unread (see [The udev rules](#the-udev-rules)). Gearbench
+node; Gearbench drops those reports unread. [The udev rules](#the-udev-rules) says how to limit that grant to one group's accounts on a machine several people use. Gearbench
 does not drive it over Bluetooth. The G512 X's analog keys are not set yet.
 A G915 X LIGHTSPEED stores each brightness level Gearbench sets, and the
 others may (see [Brightness](#brightness)). Nothing else is written to their onboard
@@ -1268,11 +1421,11 @@ its features and G HUB's description and key layout of it. None of it has
 run on a G213 yet. Gearbench shows one color on the whole keyboard, a color
 on each of its five areas or one of its animations: Breathe, Cycle and Wave.
 Wave runs left to right, right to left, from the center out or from the
-edges in. Its tab's Effect row lists Static, Per-area and those. It has no
-Brightness row: its own brightness key sets the brightness, and a mouse that
+edges in. Its tab's Effect row lists Static, Per-area and those, then Off
+where the keyboard lists it. It has no Brightness row: its own brightness key sets the brightness, and a mouse that
 follows it shows each color whole.
 
-In Per-area the tab draws the G213, and a click on a key paints the whole
+The tab draws the G213, and in Per-area a click on a key paints the whole
 area the key is in. The five areas are:
 
 - the left of the board, from the logo, Esc and F1 to F3 down to C and the
@@ -1291,22 +1444,25 @@ painted in one color light their whole area.
 
 Its M profiles are switched from the M profile group and the tray icon's
 menu. It does not tell Gearbench when it has been idle, so it does not dim
-when you stop typing, and its page has no Never dim, Dim after or Lights off
-after rows. With Lights off when locked on, it still goes dark while the
-screen is locked. Its F1 to F12 cannot be bound. With its udev rule
-installed, any program you run can read what you type on the G213 through
-its control interface; Gearbench drops those reports unread (see [The udev
-rules](#the-udev-rules)). It has not been checked yet whether Gearbench's colors stay out of
-the G213's memory, so that it shows its own lighting again once Gearbench
-stops or it is unplugged.
+when you stop typing, and its tab has no Never dim, Dim after or Lights off
+after rows. With Lights off when locked on, it goes dark while the screen
+is locked, where the keyboard lists Off. Its F1 to F12 cannot be bound. Its control interface is
+taken to carry what you type on the G213, as the G815's does, so with its
+udev rule installed any program you run can read it there; Gearbench drops
+those reports unread. [The udev rules](#the-udev-rules) says how to limit that grant to one group's accounts on a machine several people use. It has not
+been checked yet whether Gearbench's colors stay out of the G213's memory,
+so that it shows its own lighting again once Gearbench stops or it is
+unplugged.
 
 ## Game profiles
 
 A game profile is one JSON file in `~/.config/gearbench/profiles/`, loaded
 on top of the active M profile. Until it is unloaded, it replaces the
-lighting, the G-key bindings with their MR layer, and the mouse button
-bindings. On a mouse in host mode, DPI stages or a report rate of its own
-replace onboard profile 1's too (see [Stages and rate per game profile](#stages-and-rate-per-game-profile)).
+lighting, the G-key bindings with their G-Shift layer, and the mouse button
+bindings with their G-Shift layer. Save as…, Save to M profile and the
+G HUB import carry both layers. On a mouse in host mode, the game profile's
+own DPI stages or report rate replace onboard profile 1's too (see [Stages
+and rate per game profile](#stages-and-rate-per-game-profile)).
 A mouse that follows the keyboard shows the profile's mouse color, where it
 has one (see [The Game profiles dialog](#the-game-profiles-dialog)). The M keys keep switching M
 profiles.
@@ -1316,8 +1472,9 @@ and save its file. The editing commands are `color`, `effect`, `bind`,
 `mouse-bind` and `mouse-factory-bindings`. So are `mouse-dpi-stages` and
 `mouse-rate` for a mouse that has host mode, with host mode switched on,
 whether or not it took (see [Stages and rate per game profile](#stages-and-rate-per-game-profile)). The
-Keyboard and Mouse tabs say which layer they edit, in an Editing row at the
-top of the keys and of the Buttons group:
+Keyboard and Mouse tabs and the Headset tab's G keys group say which layer
+they edit, in an Editing row over the drawn keyboard and under the Layer
+row of the Buttons and G keys groups:
 `Editing Doom, loaded for DOOMEternalx64vk.exe`, `Editing Doom` for one
 loaded by hand, or `Editing M1 · Profile 1`.
 
@@ -1335,9 +1492,9 @@ The Keyboard tab's Game profile group, from the top:
   Loaded and Reload from disk still work.
 - Keep loaded shows while a game profile is loaded; see [Hold-offs and Keep
   loaded](#hold-offs-and-keep-loaded).
+- Auto-load lists the loaded profile's programs, with Edit….
 - While focus is followed and a game profile names a program, a row says
   which profile is active and why (see [Following the game in front](#following-the-game-in-front)).
-- Auto-load lists the loaded profile's programs, with Edit….
 - During a hold-off, a row says so, with Load it now (see [Hold-offs and
   Keep loaded](#hold-offs-and-keep-loaded)).
 - Save as…, on the Save row (`gearbench-ctl save-profile`), saves what shows
@@ -1351,13 +1508,14 @@ The Keyboard tab's Game profile group, from the top:
   background. The loaded game profile's mouse color goes with it; from an
   M profile, none does.
 - Save to M profile, on the Save row (`gearbench-ctl promote`), writes the
-  loaded game profile's lighting and its G-key, MR and mouse bindings into
-  the active M profile, then unloads the game profile. The lighting goes
-  whole: its animation with its speeds and direction, its mode, painted keys
-  and every color. The game profile's own DPI stages, rate and mouse color
-  stay with it, since an M profile has none. With a game profile loaded it
-  asks first, Replace M1 with Doom?, since it writes over the M profile. With
-  none loaded, it saves the active M profile as it shows, at once.
+  loaded game profile's lighting and its G-key, G-Shift and mouse button
+  bindings into the active M profile, then unloads the game profile. The
+  lighting goes whole: its animation with its speeds and direction, its mode,
+  painted keys and every color. The game profile's own DPI stages, rate and
+  mouse color stay with it, since an M profile has none. With a game profile
+  loaded it first asks `Replace M1 · Profile 1 with Doom?`, since it writes
+  over the M profile. With none loaded, it saves the active M profile as it
+  shows, at once.
 
 Manage…, beside the group's heading, opens the Game profiles dialog.
 
@@ -1385,18 +1543,18 @@ a second repaints the keyboard once.
 
 Focus comes from the Gearbench focus extension, which sees every
 window, native Wayland ones included. It reports the focused window's
-process id only to the daemon `gearbench.service` runs. So a daemon you run
-by hand in a terminal follows focus on Xwayland.
+process id only to the daemon that `gearbench.service` runs, so a daemon you
+run by hand in a terminal follows focus on Xwayland.
 
-`install.sh` installs and enables the extension, and GNOME loads it at your
-next login. If GNOME's Extensions switch is off, or its settings allow no
-extensions from your home folder, `install.sh` says so. The extension does
-not run until that changes, and turning the switch on starts your other
-extensions too. If the settings lock which extensions run, `install.sh` says
-so and cannot enable the extension. Once they no longer lock it, run
-`install.sh` again or the `gnome-extensions enable` command below. With the
-Debian package, log out and back in once: the window's banner then has Turn
-on, which enables the extension, as this command does:
+With a package, log out and back in once: the window's banner then has Turn
+on, which enables the extension. From a checkout, `install.sh` installs and
+enables the extension, and GNOME loads it at your next login. If GNOME's
+Extensions switch is off, or its settings allow no extensions from your home
+folder, `install.sh` says so. The extension does not run until that changes,
+and turning the switch on starts your other extensions too. If the settings
+lock which extensions run, `install.sh` says so and cannot enable the
+extension. Once they no longer lock it, run `install.sh` again or this
+command, which does what Turn on does:
 
 ```
 gnome-extensions enable gearbench-focus@gearbench.github.io
@@ -1413,10 +1571,12 @@ counts as no program.
 `gnome-extensions info gearbench-focus@gearbench.github.io` says why the
 extension is off:
 
-- `Enabled: No` needs the command above.
+- `Enabled: No` needs the command above. While GNOME's Extensions switch is
+  off, it still reads `No` after the command: turn the switch on in the
+  Extensions app.
 - A `State:` of `ERROR` means GNOME could not load it;
   `journalctl --user -b -t gnome-shell | grep -i gearbench` shows the error.
-- `OUT OF DATE` means your GNOME is not version 50, the only one the
+- `OUT OF DATE` means your GNOME is neither 50 nor 51, the two versions the
   extension is marked for.
 - `doesn't exist` means GNOME has not found it. Either it was installed
   after your login, so log out and back in, or `install.sh` put it in your
@@ -1443,14 +1603,14 @@ time a profile loads or unloads for it.
 
 ### The Game profiles dialog
 
-![The Game profiles dialog](images/game-profiles.png)
+![The Game profiles dialog with the Arc Raiders profile open: its name, the program PioneerGame.exe, Add a running program, Add by name, Mouse color and Delete profile](images/game-profiles.png)
 
-Game profiles… in the main menu, or Manage… beside the Game profile heading,
+Game profiles in the main menu, or Manage… beside the Game profile heading,
 lists every game profile. The filter at the top shows the profiles whose
 name or programs hold what you type, in any case. `doom` finds Doom, and
 `r5apex` finds the profile that loads for `r5apex_dx12.exe`. Open one to see
 the programs that load it, remove a program (the dialog asks first), type
-one into Add by name, or pick one from Add a running program.
+one in the dialog Add by name… opens, or pick one from Add a running program.
 
 Adding or removing a program loads and unloads nothing by itself. Within 5 s
 the daemon checks again: it loads the profile if one of its programs has
@@ -1471,9 +1631,8 @@ the launcher and not the game. `profile-programs` and
 
 The Name row renames a profile, as `gearbench-ctl rename-profile OLD NEW`
 does. Everything that named the profile follows, and nothing is loaded or
-unloaded. A name another game profile has is refused. Names match in any
-case, with punctuation and symbols counted as spaces (`Doom: Eternal` is
-`Doom Eternal`; a name with no letter or digit keeps its symbols). Renaming
+unloaded. A name another game profile has is refused, with names compared as in
+[Game profiles](#game-profiles): `Doom: Eternal` is `Doom Eternal`. Renaming
 the loaded profile after its file was edited by hand is refused too, until
 Reload from disk takes the edit or `gearbench-ctl save` writes over it (see
 [Settings files](#settings-files)). A profile that is not loaded is read from its file at the
@@ -1481,12 +1640,12 @@ rename, so a hand edit goes with it to the new file.
 
 A profile's name and its programs cannot hold a control character (Unicode
 category Cc, such as ESC or BEL) or a lone surrogate. Emoji and combining
-marks are fine. A file with one cannot be read, and neither can a file whose
-profile's name runs past 1,000 characters, a name a rename refuses too. The
-white space at the two ends of a profile's name, a tab or a newline
-included, is cut off before these checks. At a program's two ends only
-spaces are cut off. `profile-programs`, `save-profile --process` and a file
-refuse a tab or a newline there, and Add by name cuts it off first.
+marks are fine. A file with one cannot be read, nor can a file whose
+profile's name runs past 1,000 characters, a name a save or a rename
+refuses too. White space at the ends of a name, a tab or a newline
+included, is cut off before these checks. At a program's ends it is cut off
+too, but `profile-programs`, `save-profile --process` and a file refuse a
+tab or a newline there; Add by name… cuts it off first.
 
 Mouse color sets the color a mouse that follows the keyboard shows while
 the profile is loaded, at the keyboard's brightness, with the window's
@@ -1540,8 +1699,8 @@ the keyboard shows its dark background.
 Import the pack again: where such a profile still has the pack's lighting,
 it takes the pack's mouse color without asking, its bindings, programs and
 name left as they are, and the review says so. One whose lighting you
-changed is asked about as before; you can also pick a color in its Mouse
-color row (see [The Game profiles dialog](#the-game-profiles-dialog)).
+changed is asked about on the review page; you can also pick a color in
+its Mouse color row (see [The Game profiles dialog](#the-game-profiles-dialog)).
 
 Import pack…, at the top left of the Game profiles dialog, lists the pack's
 game profiles and macros, each one ticked. A game profile's line says what
@@ -1553,7 +1712,7 @@ cannot read, that holds more than lighting, or that repeats another file's
 name is listed under Left out, with why, and never imported.
 
 Next shows what will be written, as the G HUB import does. A pack profile is
-lighting only: it brings no G-key bindings, MR layer, mouse buttons, DPI
+lighting only: it brings no G-key bindings, G-Shift layer, mouse buttons, DPI
 stages or report rate.
 
 Where you have a game profile or macro of the same name, compared as a
@@ -1561,13 +1720,12 @@ rename compares names, the review page asks about each one. Keep mine, the
 default, leaves yours as it is. Use the pack's writes the pack's name, as
 the pack spells it, lighting and mouse color over your game profile, and the
 pack's programs while Load for is ticked. It leaves your
-bindings, MR layer, mouse buttons, DPI stages and report rate. For a macro,
+bindings, G-Shift layer, mouse buttons, DPI stages and report rate. For a macro,
 it writes the pack's macro over yours.
 
 The pack's lighting is drawn for the G915. Use the pack's writes the G915's
 and leaves your profile's lighting for another keyboard as it is. A keyboard
-with none of its own copies another model's (see [More than one keyboard](#more-than-one-keyboard)), the
-G915's where the profile has no other. A game profile of
+with none of its own copies another model's: the leader's, else one with the same keys, else the first model with lighting in the profile, the G915's first (see [More than one keyboard](#more-than-one-keyboard)). A game profile of
 yours with the same lighting for the G915 and the same mouse color, or a
 macro with the same steps and Repeat, is already there, and nothing is
 asked or written for it. One with the same lighting and no mouse color of
@@ -1629,18 +1787,21 @@ gearbench-ctl import-pack --without-programs          each loads by hand
 
 With no names, `import-pack` imports all of the pack. Wherever a name is
 taken it keeps yours, filling in only a missing mouse color as above; it
-imports the rest, and says so when the daemon wrote everything it sent.
+imports the rest, and says so if every write of the import succeeds.
 `--replace NAME` takes the pack's for that name, and can be given more than
-once. With names given, NAME must be one of them.
+once. A name already there keeps yours as it is, and one that takes only the
+pack's mouse color keeps the rest of yours, programs included. With names
+given, NAME must be one of them.
 
 ### Hold-offs and Keep loaded
 
-Choosing a profile by hand is a choice in the Loaded row or the tray menu's
-Game profile, with Save as… or Save to M profile, or with `load`, `unload`
-or `promote`. It holds off the profile that is showing for a program that
-has focus, or for a program that runs where focus is not followed, however
-that profile was loaded: the next check does not put that profile straight
-back. The hold-off lasts until focus moves away from the profile's programs
+A hold-off keeps the next check from putting a program's profile straight
+back after you choose a profile by hand. Choosing a profile by hand is a
+choice in the Loaded row or the tray menu's Game profile, with Save as… or
+Save to M profile, or with `load`, `unload` or `promote`. It holds off the
+profile that is showing for a program that has focus, or for a program that
+runs where focus is not followed, however that profile was loaded. The
+hold-off lasts until focus moves away from the profile's programs
 or, where focus is not followed, until none of them runs. The hold-off follows
 focus, or the running program, to another of the profile's programs. It
 follows a name edited in the profile's file too, when that file is the one
@@ -1664,9 +1825,11 @@ its place. Where focus is not followed, another game's program that starts
 during a hold-off still loads its own profile, and the hold-off stays. A
 hand edit that leaves a profile's file unreadable ends no hold-off. Nor does
 it unload a profile its program loaded while that program runs or has focus:
-the profile keeps what it held. `gearbench-ctl status` and the window's
-banner give the file's error until a reload reads it or `gearbench-ctl save`
-writes over it.
+the profile keeps what it held. While that profile stays loaded,
+`gearbench-ctl status` and the window's banner give the file's error until a reload reads it or, unless the profiles
+folder could not be listed or the file could not be opened, `gearbench-ctl save` writes over it. A held-off
+profile is not loaded, so its file gets only a dimmed row in the window and
+a warning in the journal.
 
 Keep loaded (`gearbench-ctl keep-loaded on|off`) keeps a profile you loaded
 by hand when a program that would load another profile gets focus, or starts
@@ -1684,7 +1847,8 @@ A G key or a mouse button bound to `macro:NAME` runs a macro: a list of
 steps, kept as one JSON file per macro in `~/.config/gearbench/macros/`.
 
 The Macros tab has the list of macros on the left, with New and Delete…, and
-one macro's editor on the right: its Name and Repeat rows and its Steps.
+one macro's editor on the right: its Name and Repeat rows and its Steps,
+with Run and Save in a bar that stays at the bottom.
 Pick a step type from the dropdown and press Add, or press Record…. A Key,
 Key down or Key up step has Change… to pick another key; the other steps are
 edited on their rows. A step's menu, at the row's end, has Move up, Move
@@ -1693,11 +1857,13 @@ row to take that row's place. Undo, on the message that says a step was
 removed, puts it back if the macro is below the 64-step limit and no step
 has been removed, moved or replaced since. Opening a macro, New and a
 recording replace the steps. Each macro in the list says which keys and
-buttons run it, and in which profile; deleting a macro names them. While
-`config.json` cannot be read, the daemon may hold bindings the window does
-not. A macro the window finds bound to no key or button then says nothing of
-which run it, and deleting it says only that the file is removed. Run and
-Save stay in a bar at the bottom.
+buttons run it, and in which profile, such as "G1 on M1" or, for a binding
+on the G-Shift layer, "G502 X PLUS G4 with G-Shift on M1"; deleting a macro
+names them. While
+`config.json` or the loaded game profile's file cannot be read, or before the
+window has read the game profiles, which it does once the daemon answers, the
+daemon may hold bindings the window does not. A macro the window finds bound to no key or button then says nothing of
+which run it, and deleting it says only that the file is removed.
 
 A file that cannot be read costs only that macro, and the Macros tab lists it
 in a dimmed row, with the reason. Two files can hold one name, compared as
@@ -1737,7 +1903,7 @@ A macro file looks like this:
 | `key_up` | `value` | releases them, in reverse |
 | `text` | `value` | types a string, one tap per character |
 | `delay` | `ms` | waits |
-| `click` | `button` | presses and releases `left`, `right`, `middle`, `side` or `extra` on the virtual mouse |
+| `click` | `button` | presses and releases `left`, `right`, `middle`, `side` or `extra` on the virtual mouse; the window calls `side` Back and `extra` Forward |
 | `click_down` | `button` | presses that button and holds it |
 | `click_up` | `button` | releases it |
 
@@ -1767,12 +1933,13 @@ pressed, in reverse order, when:
 - the macro is deleted or saved over while it runs, or its key no longer
   runs it after a rebind, an M profile switch, or a game profile loading or
   unloading;
-- the screen locks or blanks, the machine is about to suspend, or another
-  account or a text console takes the screen;
+- the screen locks, GNOME blanks the screen, the machine is about to suspend,
+  or another account or a text console takes the screen;
 - Stop or `gearbench-ctl macro-stop` stops it.
 
-A Toggle or Once macro a G key started keeps running while the keyboard is
-switched off or out of range.
+A Toggle or Once macro a G key started keeps running while its keyboard or
+headset is switched off or out of range. A While held one a headset's G key
+started stops at the end of the pass in progress, as if its key had come up.
 
 A macro that presses without releasing is allowed. The editor warns about
 it under the steps, and about a release of a key no earlier step left down,
@@ -1793,9 +1960,9 @@ Text steps send key codes, so what they type depends on your keyboard
 layout; they assume US ANSI. A text step takes only what that layout types:
 letters, digits, its punctuation, space, tab and newline. Any other
 character is refused when the macro is saved; in the window, Save and Run
-say which step by the number on its row. The pack and G HUB imports, in the
-window and on the command line, show a newline in a text step as ⏎ and a
-tab as ⇥.
+say which step by the number on its row and which character by its place
+in the text. The pack import, in the window and
+on the command line, shows a newline in a text step as ⏎ and a tab as ⇥.
 
 ### Repeat modes and limits
 
@@ -1810,7 +1977,7 @@ times a second. End a repeating macro with a delay longer than 0 ms, or a
 game may read a release and the next press as no release at all; the editor
 warns when it does not.
 
-One macro runs at a time: a new press cancels the one running. A toggled
+One macro runs at a time: starting one cancels the one running. A toggled
 macro has no key held down, so `gearbench-ctl status` names the macro
 running, `gearbench-ctl macros` stars it, and the window shows a banner with
 Stop.
@@ -1818,8 +1985,9 @@ Stop.
 The limits are 1,000 characters in a name, 64 steps, 256 characters in a
 text step, 60 s in a delay, and 50 ms between the starts of two passes.
 
-No macro starts while the screen is locked or blank, or while the machine is
-about to suspend. The journal says why a macro stopped or did not start, and
+No macro starts while the screen is locked, while GNOME has blanked it, or
+while the machine is about to suspend. The journal says when a lock, a blank
+or a suspend stops a macro or keeps a key or button from starting one, and
 Run and `macro-run` are refused with the reason. A G key bound to a key
 still works while the screen is locked.
 
@@ -1843,19 +2011,19 @@ the window with unsaved changes asks first. Save writes the open macro
 without asking, and asks only when its name belongs to another macro. Names
 match the way the files are named, so "my macro" belongs to "My Macro".
 Changing the name and saving renames the macro, and every binding that names
-it follows, except in a file changed on disk, one that could not be read or one
-whose save failed: that file keeps the old name, with a warning in the
-journal. A name cannot hold a control character, such as ESC, and a file
+it follows, except in a file changed on disk since the daemon read it, one
+that could not be read, one listed dimmed because another file of the same
+name is read instead, or one whose save failed: that file keeps the old
+name. The journal warns of each, but the rename does not read a game
+profile file listed dimmed, other than the loaded profile's: the journal
+names that file only as skipped. A name cannot hold a control character, such as ESC, and a file
 whose macro's name holds one, or runs past 1,000 characters, cannot be read;
 the white space at a name's two ends is cut off first. A save the daemon
 refuses stays in the editor, unsaved, with the reason. While a save or a
 delete is on its way, the list, New, Delete… and Save are grayed out. One the
 daemon does not answer keeps them grayed out until the daemon answers a
-request sent after it, or that one goes unanswered too. The macro files are
-then read, and a toast says whether the save or the delete went through, or
-that the files could not be read. When the `macros` folder cannot be listed,
-that save or delete gets no toast, and the tab shows the folder as one
-dimmed row.
+later request, or that one goes unanswered too. The tab then says whether it
+went through, or why the macros could not be read.
 
 ### Running a macro
 
@@ -1867,8 +2035,8 @@ runs, whatever started it, and its Stop stops any of them.
 
 A macro run this way has no key held down, so Once and While held run one pass,
 and Toggle runs until it is stopped: by Stop, `gearbench-ctl macro-stop`,
-another macro, a save or delete of it, a lock, a blank, a suspend, a switch
-to another session, or the daemon stopping. Rebinding a key or switching
+another macro, a save or delete of it, a lock, GNOME's screen blank, a
+suspend, a switch to another session, or the daemon stopping. Rebinding a key or switching
 profile leaves it running.
 
 `gearbench-ctl macro-run NAME` runs a saved macro the same way, and `--delay
@@ -1908,19 +2076,21 @@ the dialog is recorded.
   AltGr is Alt: AltGr+Q is `alt+q`, as the Press a key dialog binds it. A
   modifier pressed alone is recorded like any other key, keeping its side:
   tapped, the left Shift is `key shift` and the right `key rshift`; held, it
-  is `key_down`, the time, `key_up`. A Super tapped alone goes to GNOME's
+  is `key_down`, a delay, `key_up`. A Super tapped alone goes to GNOME's
   Activities overview and is not recorded.
 - A modifier held over a click is recorded where it went down and where it
   came up, and the macro plays it that way. Held over keys typed one after
   another, it goes into each key's step instead: Shift held over A and then
-  B records `key shift+a`, a delay and `key shift+b`. When a modifier has
-  been recorded on its own and is still held, a key pressed under it leaves
-  that modifier out of its step: Shift held, a click, then A held under it
-  records `key_down shift`, the click, `key_down a`, `key_up a` and, where
-  Shift came up, `key_up shift`, with the delays between them. When keys
-  overlap under a modifier, as in fast typing, a key's `key_up` can leave
-  the modifier out, or the modifier can get a `key_down` or `key_up` step of
-  its own, as it does when a click follows a capital with Shift still down.
+  B records `key shift+a`, a delay and `key shift+b`. When a left modifier
+  has been recorded on its own, as when a click came under it, and is still
+  held, it stays out of the steps of keys pressed under it and comes up at
+  its own `key_up`. A right one stays in their steps, spelled without its
+  side: the right Shift held over a click and a held A records
+  `key_down rshift`, the click, `key_down shift+a`, `key_up shift+a` and
+  `key_up rshift`. When keys overlap under a modifier, as in fast typing, a
+  key's `key_up` can leave the modifier out, or the modifier can get a
+  `key_down` or `key_up` step of its own, as it does when a click follows a
+  capital with Shift still down.
 - A key or button released in under 35 ms, with nothing recorded in between,
   is one `key` or `click` step. Held longer, it becomes a `_down` step, a
   delay and an `_up` step. Auto-repeat is dropped.
@@ -1940,7 +2110,7 @@ the dialog is recorded.
   is recorded as held when you press Stop, unless fewer than three steps are
   left before the limit: then it is left out, and nothing says so. A
   modifier still held after the key it went with, as Shift after a capital,
-  is left out at Stop.
+  with nothing recorded since, is left out at Stop.
 
 Stop hands the steps to the editor, replacing what is there, and asks first
 if the editor holds any steps. A recording with no steps replaces nothing: a
@@ -1957,7 +2127,7 @@ you let go of it: Space held on Record… is not recorded.
 The Mouse tab covers every mouse attached. From the top:
 
 - with two mice or more, a switcher with a button for each
-- the mouse's group, with Status, Battery and Host mode
+- the mouse's group, with Status, Battery, Battery notices, Firmware and Host mode
 - Tuning, with DPI, Report rate and DPI notices
 - DPI stages
 - Lighting
@@ -1981,8 +2151,11 @@ back, and Gearbench keeps the choice for its next start.
 To reach one mouse whatever the tab shows, as a script should, name it. Each
 command for one mouse takes `--mouse` with a model name or product id, as in
 `gearbench-ctl mouse-dpi 1600 --mouse c08b`. `4099` and `c095` both name a
-G502 X PLUS, on its receiver or its cable. When a command changes a mouse,
-its first line names that mouse: `mouse: G502 X PLUS (4099)`.
+G502 X PLUS, on its receiver or its cable. When a command for one mouse
+writes to it, its first line names that mouse after `mouse:`, as in
+`G502 X PLUS (4099)`. `mouse-bind` and `mouse-factory-bindings` send the
+mouse nothing. They save its model's bindings and name the model, with no
+id, on a later line.
 
 Pair nothing else to a mouse's receiver. Going by the kernel's
 `hid-logitech-dj.c`, a keyboard paired there could have its keystrokes
@@ -2002,11 +2175,11 @@ until the mouse detaches.
 The G502 X PLUS has six buttons Logitech names G4 to G9. Left, right, the
 wheel click and the wheel tilts cannot be remapped.
 
-| Button | Where | Factory | Default binding |
+| Button | Where | In profile 1 | Factory binding |
 | --- | --- | --- | --- |
 | G4 | side, rear | back | `back` |
 | G5 | side, front | forward | `forward` |
-| G6 | thumb paddle | DPI shift | `dpi-shift` |
+| G6 | paddle | DPI shift | `dpi-shift` |
 | G7 | DPI down | DPI down | `dpi-down` |
 | G8 | DPI up | DPI up | `dpi-up` |
 | G9 | behind the wheel | profile cycle | `none` |
@@ -2018,25 +2191,28 @@ mode did not take, the factory profile makes G4 and G5 back and forward. G6
 to G9 then do their factory jobs on the mouse and send the daemon no button.
 Run `gearbench-ctl mouse-enable-buttons` once, or Enable… under the Mouse
 tab's Onboard profile 1, and G4 to G9 send mouse buttons 11 to 16 at once,
-which the daemon reads. After G HUB on Windows the mouse can be on onboard
-profile 2, where the buttons are the factory ones again; see [The onboard
-profile and its backups](#the-onboard-profile-and-its-backups). If `gearbench-ctl mouse` says the buttons are
-partly enabled, run `gearbench-ctl mouse-enable-buttons` again.
+which the daemon reads. After another program that drives these devices,
+the mouse can be on onboard profile 2, where the buttons are the factory
+ones again; see [The onboard
+profile and its backups](#the-onboard-profile-and-its-backups). Outside host
+mode, if `gearbench-ctl mouse` says the buttons are partly enabled and names
+`gearbench-ctl mouse-enable-buttons`, run it again.
 
 Onboard profile 1 decides what G4 to G9 do whenever the mouse runs it in
 onboard mode: at the login screen, with the daemon stopped, on another
-computer without G HUB, and while the daemon runs without host mode. Two
-writes set it, and each replaces the other:
+computer with no program that drives these devices, and while the daemon
+runs without host mode. Besides a restore of a backup (see
+[Restoring a backup](#restoring-a-backup)), two writes set it, and each
+replaces the other:
 
 - The fallback, `gearbench-ctl mouse-fallback-buttons` or Write fallback… on
   the Mouse tab, is for a mouse in host mode. It gives G4 to G8 their
-  factory jobs back, which are also their default bindings. It makes G9 do
+  factory jobs back, which match their factory bindings. It makes G9 do
   nothing: from the factory G9 cycles the onboard profiles, and on profile 2
-  nothing Gearbench writes is in effect. In host mode, all six buttons still
+  nothing written to profile 1 is in effect. In host mode, all six buttons still
   reach the daemon whatever profile 1 holds, so their bindings still apply,
   but not on a mouse left in host mode with its buttons dead (see [Host
-  mode](#host-mode)). Without the daemon, G4 and G5 go back and forward, and G6 to G8
-  shift and step the DPI.
+  mode](#host-mode)).
 - The enable write, `gearbench-ctl mouse-enable-buttons` or Enable… outside
   host mode, is for a mouse that runs in onboard mode while the daemon runs,
   with `mouse-host off` or where host mode did not take. The bindings of G4
@@ -2064,16 +2240,20 @@ what profile 1 has that button do, and the group says why.
 `gearbench-ctl mouse` lists the same under `in profile 1:`.
 
 Each button has a dropdown on the Mouse tab: Nothing, Back, Forward, DPI
-shift, DPI up, DPI down, DPI cycle, then Keystroke…, which opens the Press a
-key dialog (see [G keys and the MR layer](#g-keys-and-the-mr-layer)), and Macro…, which opens that
-dialog on its macro list. A row bound to a key or a macro has Change… to
-pick another. Nothing clears the button, and Undo, on the message that says
-so, binds it again, as it does after a binding that took another's place;
-the dialog has no Unbind here.
+shift, DPI up, DPI down, DPI cycle, G-Shift (hold), Balance toward game,
+Balance toward chat, then Keystroke…, which opens the Press a key dialog
+(see [G keys and G-Shift](#g-keys-and-g-shift)), and Macro…, which opens that
+dialog on its macro list. The two balance entries move the balance of
+[Outputs](#outputs), and a row bound to one says Needs Outputs while
+Outputs is not running. A row bound to a key or a macro has Change… to pick
+another. Nothing clears the button, and Undo, on the message that names
+Nothing, binds it again, as it does after a binding that took another's
+place; the dialog has no Unbind here.
 
 From the command line: `gearbench-ctl mouse-bind G9 ctrl+f15`. With
 `--mouse`, it binds a button of that model, connected or not. Without it, it
-binds a button of the mouse every mouse command acts on, the first of these:
+binds a button of the first of these mice, which while a mouse is connected is
+the one every mouse command acts on:
 
 1. the selected one (see `gearbench-ctl mouse-select`), while it is
    connected
@@ -2084,41 +2264,67 @@ binds a button of the mouse every mouse command acts on, the first of these:
 With none of these, the command is refused, since the daemon cannot tell
 which model the binding is for. A button the mouse lacks is refused with its
 buttons named. The bindings belong to the M profile or the loaded game profile,
-beside the G keys, and the Editing row at the top of the Buttons group says
-which.
+beside the G keys, and the Buttons group's Editing row says which.
 
 - `back` and `forward` go out as the mouse's back and forward from a virtual
   mouse, pressed and released with the button. The actions match in any
   case, so `Back` is the mouse's back; `key_back` binds the Back key.
-- `dpi-shift` drops to the shift stage while the button is held and puts the
+- `dpi-shift` goes to the shift stage while the button is held and puts the
   DPI back at the release. While the button is held, a DPI chosen with DPI
   up, DPI down, DPI cycle, the DPI row, the tray or
   `gearbench-ctl mouse-dpi` stays, and the release puts nothing back. The
   same goes when, in host mode, a game profile with stages of its own for
   the mouse loads or unloads under the held button. If the mouse's link
-  drops, a read of its event node fails or the daemon stops while the button
-  is held, or the mouse does not answer the release, the DPI from before the
-  shift is put back as soon as it can be. That is when the mouse links again
-  or answers, when you next press and release the button, or at the stop.
+  drops, a read of its event node fails outside host mode, the daemon
+  stops while the button is held, or the mouse does not answer the release,
+  the DPI from before the shift is put back as soon as it can be. That is
+  when the mouse links again or answers, when you next press and release
+  the button, or at the stop. A
+  mouse that may have been switched off and on in the meantime gets the DPI
+  remembered for it instead, and keeps the DPI it is on when none is
+  remembered.
 - `dpi-up` and `dpi-down` step through the stage list from the nearest
   stage, with a desktop notice (see [Battery and DPI notices](#battery-and-dpi-notices)). `dpi-cycle`
   steps up as `dpi-up` does, and from the last stage goes back to the first,
   as the PRO WIRELESS's DPI button does from the factory. Its notice is the
   same. A stage that comes out at the DPI the mouse is already on, as two
   stages of a game profile edited by hand can, is skipped.
-
+- `g-shift` holds G-Shift while the button is held, as with
+  `gearbench-ctl mouse-bind G6 g-shift` for the G502 X PLUS's thumb paddle.
+  Every keyboard's G keys, every mouse's buttons and a headset's G keys then
+  send their G-Shift bindings, and the MR LED of each keyboard that has one is
+  lit until you let go. A button that holds the shift sends no G-Shift binding of its own. If
+  the mouse goes away while the button is held, the shift ends with it.
+- `balance-chat` and `balance-game` move the balance between voice chat and
+  the game one stop at each press (see [Outputs](#outputs)).
 - A key binding or `macro:NAME` works as on a G key. The key binding is held
   as long as the button is, and the macro runs by its repeat mode (see
-  [Repeat modes and limits](#repeat-modes-and-limits)). A lock, a blank, a suspend or a switch to
+  [Repeat modes and limits](#repeat-modes-and-limits)). A lock, GNOME's screen blank, a suspend or a switch to
   another session releases a held key, `back` or `forward`. While another
   session has the screen, none of them types.
 
-  Use factory bindings…, after a confirmation, or `gearbench-ctl
-  mouse-factory-bindings` (`mouse-defaults`, its name in Gearbench 1.1.0,
-  too) puts the shown or selected mouse's buttons, or with `--mouse` the
-  named model's, back to their factory bindings. On the
-  G502 X PLUS, those are the default bindings in the table above. The dialog
-  names each one. Another mouse model's bindings stay as they are.
+Each mouse model's buttons have a G-Shift layer too, which they send while
+MR, a G key or a button holds the shift. `gearbench-ctl mouse-bind G4 f13
+--g-shift` binds G4 there; `gearbench-ctl mouse-bind G4 clear --g-shift`
+takes it away, and G4 then sends its base binding while shifted, as does
+every button with nothing on the layer. `gearbench-ctl mouse-bind G4 none
+--g-shift` makes G4 do nothing while shifted. `gearbench-ctl mouse` lists a
+button's G-Shift binding, where it has one, beside its own. On the Mouse tab, pick G-Shift on
+the Layer row at the top of the Buttons group: each row shows the button's
+G-Shift binding, and a pick binds it there. A button with no G-Shift binding
+shows Same as Base, the first entry on that layer, and does the same as on
+Base while shifted, as its tooltip says; picking Same as Base clears a button's
+G-Shift binding, and Nothing makes it do nothing while shifted. The list on
+that layer has no G-Shift (hold): a button holds G-Shift from its base layer
+alone.
+
+Use factory bindings…, after a confirmation, or `gearbench-ctl
+mouse-factory-bindings` (`mouse-defaults`, its name in Gearbench 1.1.0,
+too) puts the shown or selected mouse's buttons, or with `--mouse` the
+named model's, back to their factory bindings. On the
+G502 X PLUS, those are the factory bindings in the table above. The dialog
+names each one. Another mouse model's bindings stay as they are, and the
+G-Shift layer stays as it is.
 
 ### DPI and stages
 
@@ -2147,13 +2353,13 @@ profile](#stages-and-rate-per-game-profile)).
 
 The stage list is what the DPI buttons step through: one to five distinct
 values, in onboard profile 1, written lowest first. It has a default stage and
-a shift stage, the one the paddle drops to. In host mode a loaded game profile
-can have its own.
+a shift stage, the one the DPI goes to while the DPI shift button is held. In
+host mode a loaded game profile can have its own.
 
 On the Mouse tab each stage has a row, titled with its number and whether it
 is the default or the shift stage: `Stage 3 · default`. Where Gearbench
-knows the model's colors, the row has a dot in the color the mouse flashes
-on that stage. A G502 HERO, G502 LIGHTSPEED, PRO WIRELESS, G903 LIGHTSPEED
+knows the model's colors, the row has a dot in the color of the mouse's DPI
+light on that stage. A G502 HERO, G502 LIGHTSPEED, PRO WIRELESS, G903 LIGHTSPEED
 HERO or G203 LIGHTSYNC gets no dots. The dot's tooltip names the color, and a screen reader
 reads the same words.
 
@@ -2162,8 +2368,8 @@ one list, sent whole and written lowest first, so a stage you add lands in
 its place, and the default and shift stage stay on their DPI. A stage outside
 the sensor's range is refused with the range named, and nothing is written. A
 value inside it snaps to the sensor's step. A row's trash button removes its
-stage once you confirm; a stage's row emptied and applied is refused. Add a
-stage shows an empty row for a new one, sent when you apply it. Before you
+stage once you confirm, and is grayed out while only one stage is saved; a
+stage's row emptied and applied is refused. Add a stage shows an empty row for a new one, sent when you apply it. Before you
 apply it, that row's trash button takes it away without asking.
 
 The Default stage and Shift stage rows pick which stage is which. The mouse
@@ -2184,14 +2390,17 @@ After a stage edit, a remembered DPI becomes what the mouse reads then. Edit
 the stage it is on without moving it past another stage, and it is at the
 new value at once and after the next power-on. In host mode, a stage you
 add or change elsewhere leaves the mouse on its DPI while the list still
-holds it, and when the stage it is on changes value it goes to the stage at
-the same place in the list. In onboard mode Gearbench sends the mouse no
+holds it, and when the stage it is on changes value or is removed it goes to
+the stage at the same place in the list. Where the new list ends before that
+place, the mouse stays on its DPI. In onboard mode Gearbench sends the mouse no
 DPI, and the mouse keeps its place in the list, so an edit that changes the
-order puts it on the stage now at that place. With the paddle held, the
-remembered DPI becomes the DPI from before the paddle, kept while the list
-holds it and else at its place in the new list. Letting go of the paddle
-puts the mouse there. With no DPI remembered, nothing is stored and the
-mouse stays on its own stage.
+order puts it on the stage now at that place. With the DPI shift button
+held, the remembered DPI becomes the DPI from before the button was pressed,
+kept while the list holds it and else at its place in the new list. Letting
+go of the DPI shift button puts the mouse there. While a loaded game profile
+has set the mouse's DPI, the remembered DPI is kept the same way, and
+forgotten where the new list ends before its place. With no DPI remembered,
+nothing is stored and the mouse stays on its own stage.
 
 Use factory stages…, after a confirmation, or
 `gearbench-ctl mouse-dpi-stages --factory` writes the factory stages,
@@ -2209,7 +2418,7 @@ on or off with `gearbench-ctl mouse-host on|off`, the Host mode switch on the Mo
 concerns, and says whether host mode took and why not. For a mouse asleep or
 switched off that has not taken host mode yet, the switch says host mode is
 tried once the mouse answers. With the switch off, it also says when the
-mouse has not yet gone back to onboard profile 1. Outside host mode it says
+mouse has not yet left host mode. Outside host mode it says
 when the mouse runs a profile other than profile 1.
 
 The switch concerns the G502 X PLUS, on its receiver or its cable. Moving
@@ -2221,49 +2430,48 @@ rules](#the-udev-rules)). Until the daemon has that group, `gearbench-ctl status
 Mouse tab's banner say what is missing. So does the Programmable buttons
 row, once the buttons are enabled.
 
-The switch also concerns the mice whose buttons in host mode are not yet
-tested on the hardware: the G502 HERO, the G502 X, the G502 X LIGHTSPEED,
-the G502 X PLUS MILLENNIUM FALCON, the G502 LIGHTSPEED, the PRO X
-SUPERLIGHT, the PRO WIRELESS, the G903 LIGHTSPEED HERO and the G203
-LIGHTSYNC, and the PRO X SUPERLIGHT 2, its DEX, its 2c and the PRO X2
-SUPERSTRIKE. The last four take their DPI and their rate from Gearbench in
-host mode alone. In host mode each mouse in that list works as below, with
-these differences. Their event nodes are not read.
-So with the switch off, their buttons do what the onboard profile they run
-gives them, and the Buttons group shows what profile 1 gives them. On each
+The switch also concerns each mouse under [Mouse models](#mouse-models),
+whose buttons in host mode are not yet tested on the hardware. Of these, the
+PRO X SUPERLIGHT 2, its DEX, its 2c and the PRO X2 SUPERSTRIKE take their DPI
+and their rate from Gearbench in host mode alone.
+
+Each mouse under Mouse models works as below, with these differences.
+Gearbench does not read their event nodes, so with the switch off their
+buttons do what the onboard profile they run gives them, and the Buttons
+group shows what profile 1 gives them. On each
 but the G502 HERO, `gearbench-ctl mouse-rate` and the Report rate row set
 the rate live, with nothing written to the mouse's onboard memory. Gearbench
 keeps the rate for the model in `config.json` and sends it again each time
-it sets the mouse up in host mode: after a replug and at its next start. The
-mouse's onboard profile keeps its own rate. When the daemon stops, each but
+it sets the mouse up in host mode: after a power-on or a replug, when host
+mode is turned on, and at its next start. The mouse's onboard profile keeps
+its own rate. When the daemon stops, each but
 the G502 HERO goes back to the onboard profile it runs, since Gearbench does
 not switch their profiles yet. The G502 HERO's rate and profile go as the
-G502 X PLUS's do (see [The G502 HERO](#the-g502-hero)). Leaving host mode, the G502 HERO's
-firmware writes its running profile's two lighting records, unchanged, into
-its own settings memory.
+G502 X PLUS's do (see [The G502 HERO](#the-g502-hero)).
 
-While the daemon runs with host mode on, a G502 X PLUS is in host mode. No
-onboard profile runs, and G4 to G9 reach the daemon as the mouse's button
-reports, with no write to its onboard memory. The DPI stages and the report
-rate are onboard profile 1's, or a loaded game profile's own, sent live.
-`gearbench-ctl mouse` starts its `mode:` line with `host`. The wheel tilts
-scroll sideways as before, one notch at the tilt and one every 100 ms while
-it is held. The daemon makes these, and a tilt cannot be bound. A DPI set to
-one of the stages, by a DPI button, the paddle, the DPI row, the tray or
+While the daemon runs with host mode on, a G502 X PLUS is in host mode, and
+G4 to G9 reach the daemon with no write to its onboard memory. The DPI
+stages and the report rate are onboard profile 1's, or a loaded game
+profile's own. `gearbench-ctl mouse` starts its `mode:` line with `host`.
+The wheel tilts scroll sideways as in onboard mode, one notch at the tilt
+and one every 100 ms while it is held. The daemon makes these, and a tilt cannot be bound. A DPI set to
+one of the stages, by a DPI button, the DPI shift button, the DPI row, the tray or
 `mouse-dpi`, flashes the stage's color and leaves the mouse dark, as in
 onboard mode. The lighting comes back 5 s later.
 
-A mouse that refuses host mode runs profile 1 as with the switch off (or,
-for a mouse not yet tested or if the switch to profile 1 does not take, the profile
-it was on). `gearbench-ctl status` and a banner on the Mouse tab say host
+A mouse that refuses host mode runs profile 1 as with the switch off. It
+stays on the profile it was on if it is a model not yet tested, if profile 1
+fails its checksum (CRC), or if the switch to profile 1 does not take.
+`gearbench-ctl status` and a banner on the Mouse tab say host
 mode did not take, with the reason. If the mouse then also fails to switch
 back to onboard mode, it is left in host mode with its programmable buttons
 dead. `gearbench-ctl status` and the banner say so. In both cases Gearbench
 tries again when the mouse is next switched on or attaches, and at
 `gearbench-ctl mouse-host on`.
 
-When the daemon stops, the mouse goes back to onboard mode on profile 1, at
-the DPI it had outside a game profile's own stages. G4 to G9 then do what
+When the daemon stops, the mouse goes back to onboard mode at the DPI it had
+outside a game profile's own stages. It is then on profile 1, or, where
+profile 1 fails its CRC, on the profile it runs. G4 to G9 then do what
 profile 1 says (see [The buttons, G4 to G9](#the-buttons-g4-to-g9)). A mouse asleep at the stop is
 asked a second time, once the first request has woken it.
 
@@ -2283,10 +2491,11 @@ live. Against a mouse left in host mode by something else, it falls back to
 a live write, which takes no backup. The reply says which happened. With a
 game profile loaded, in host mode, it is that profile's own rate instead. On
 a mouse whose onboard profile Gearbench does not write yet, in host mode,
-the rate is sent live alone and kept for the model, and sent again at each
-setup in host mode (see [Host mode](#host-mode)). Outside host mode it is refused. The
+the rate is sent live alone and kept for the model (see [Host
+mode](#host-mode)). Outside host mode it is refused. A mouse without
+onboard profiles has the rate set live, and the row says so. The
 PRO X SUPERLIGHT 2 models and the PRO X2 SUPERSTRIKE list rates up to
-2000 Hz, or 8000 Hz on later firmware: the row offers 125 to 1000 Hz. While
+2000 Hz, or 8000 Hz on later firmware: the row lists 125 to 1000 Hz. While
 the mouse runs a higher rate, the row shows the rate profile 1 stores, or a
 dash where profile 1 stores none of these. `gearbench-ctl mouse` shows the
 rate the mouse runs.
@@ -2302,9 +2511,9 @@ are sent live, and nothing is written to the mouse's onboard memory.
   `gearbench-ctl mouse-dpi-stages` and `gearbench-ctl mouse-rate`, and the
   stage and rate rows on the Mouse tab, save to the game profile and leave
   profile 1 as it is. The reply says so. A profile with no stages of its own
-  starts from profile 1's. Left out, `--default` and `--shift` stay on
-  profile 1's default and shift DPIs, or on their places in the list when
-  those DPIs are gone. With host mode off, and on the G305, the commands and
+  starts from profile 1's. Left out, `--default` and `--shift` keep the
+  DPIs they had (profile 1's, on a profile with no stages of its own), or
+  their places in the list when those DPIs are gone. With host mode off, and on the G305, the commands and
   rows go on as with no game profile loaded.
 - The rows show the profile's own while it is loaded, and the Game profile
   row at the top of the DPI stages group says whose they are.
@@ -2321,17 +2530,17 @@ are sent live, and nothing is written to the mouse's onboard memory.
   stages, the DPI goes to its default stage. When the profile unloads, or
   one without its own stages takes its place, the DPI goes back to where it
   was before the profile loaded. None of these flashes the stage's color.
-- The DPI buttons, the paddle and the tray menu use the profile's own
+- The DPI buttons, the DPI shift button and the tray menu use the profile's own
   stages. A DPI chosen under them, with a button, the tray or `mouse-dpi`,
   is put back after a power cycle while the profile stays loaded. The DPI
   remembered for the desktop is left as it was.
 - An edit to the loaded profile's stages, or `gearbench-ctl reload` after a
   hand edit to its file, leaves the mouse on its DPI while the new list still
-  holds it. When the stage it is on changes value, it goes to the stage at the
-  same place in the list, and where the new list ends before that place, its
-  DPI stays as it is. With the paddle held, letting go puts the mouse on the
-  DPI it had before the paddle, followed through the edit the same way, as on
-  profile 1. If the mouse
+  holds it. When the stage it is on changes value or is removed, it goes to
+  the stage at the same place in the list, and where the new list ends
+  before that place, its DPI stays as it is. With the DPI shift button held,
+  letting go puts the mouse on the DPI it had before the button was pressed,
+  followed through the edit the same way, as on profile 1. If the mouse
   refused the profile's stages when it loaded and has not taken them since,
   the edit moves it as a load does. A stage a hand edit puts between the
   sensor's steps, or outside its range, is taken at the nearest DPI the
@@ -2341,9 +2550,9 @@ are sent live, and nothing is written to the mouse's onboard memory.
   not yet tested included. On a mouse not yet tested, the stage and rate rows
   stay on while they edit a game profile.
 - A profile's own stages and rate do not apply on the G305, on another mouse
-  with no host mode (its lookup of the button reports was refused, or found
-  none), or with `mouse-host off`. Such a mouse runs an onboard profile. The
-  G305, the G502 X PLUS and the G502 HERO run profile 1, and the two commands
+  with no host mode (its lookup of the button reports was refused or found
+  none, or it has no onboard profiles), or with `mouse-host off`. Such a
+  mouse runs an onboard profile, if it has any. The G305, the G502 X PLUS and the G502 HERO run profile 1, and the two commands
   and the rows write it; the reply says so. A mouse not yet tested keeps the
   profile it runs: the commands are refused, with nothing written to its
   onboard profile, and the rows are grayed out (see [Mouse models](#mouse-models)).
@@ -2366,15 +2575,16 @@ row in the Mouse tab's Lighting group, set the mouse's own color and effect,
 live as you drag. `mouse-effect` without `--color` keeps the mouse's color,
 or uses blue, `#0080ff`, where it has none. The Effect row shows the effect last set, which the daemon
 does not read from the mouse. It shows Static for a color of its own, or
-when none has been set since the daemon started. The mouse's color is not
-stored: `gearbench-ctl mouse` reports what was last written since the daemon
+when none has been set since the daemon started. Under Off, and under an
+effect with no color of its own such as Cycle, the picker is grayed out
+and says why, as on the Keyboard tab. The mouse's color is not stored: `gearbench-ctl mouse` reports what was last written since the daemon
 started.
 
-`gearbench-ctl mouse-sync on`, or the Mouse tab's Follow the keyboard switch,
-Follow the G915 with a G915 leading, makes every mouse with lights follow the
+`gearbench-ctl mouse-sync on`, or the Mouse tab's Follow the keyboard switch
+(Follow the G915 while a G915 leads), makes every mouse with lights follow the
 keyboard that leads. Such a mouse shows the background under Per-key,
-the Static color under Static and, steady, under the animations, and
-black under `disabled`. Live previews go to the mouse too. While a game
+the Static color under Static and, without the animation, under the
+animations, and black under `disabled`. Live previews go to the mouse too. While a game
 profile with a mouse color is loaded, the mouse shows that color instead,
 and a change to the keyboard's color leaves the mouse as it is. A mouse
 with no
@@ -2383,7 +2593,8 @@ lighting Gearbench drives, such as the G305, is left as it is, and
 scales its color by the keyboard's brightness. At 50%, the default, the
 mouse shows half of each color, and at 100% the color itself. A G213
 Prodigy has no brightness Gearbench can set, so while it is the leader the
-mouse shows each color whole. The mouse goes off with the screen lock. It dims
+mouse shows each color whole. With Lights off when locked on, as it is by
+default, the mouse goes off with the screen lock. It dims
 with the keyboard's idle dimming once nothing on the desktop, the mouse
 included, has been touched for the keyboard's Dim after time (see [Idle, lock
 and suspend](#idle-lock-and-suspend)).
@@ -2436,10 +2647,13 @@ took.
 
 The Onboard profile 1 group on the Mouse tab shows what profile 1 holds: its
 stages and rate in one line, whatever a game profile's rows above show; the
-button write on the G502 X PLUS; and the backup. When a write failed and
-profile 1 could not be read back, or profile 1 fails its CRC, the Stages and
-rate row says so before the stages. Until that is settled, the Programmable
-buttons row says the buttons are not known and suggests neither write.
+buttons, with their write on the G502 X PLUS and, in host mode, on the G502
+HERO; and the backup. When a write failed and profile 1 could not be read
+back, or profile 1 fails its CRC, the Stages and rate row says so before the
+stages. Until that is settled, on a mouse whose onboard profile Gearbench
+writes, the Programmable buttons row and the `programmable buttons:` line of
+`gearbench-ctl mouse` say the buttons are not known and suggest neither
+write.
 
 Every write:
 
@@ -2458,31 +2672,36 @@ Every write:
   instead. In host mode, where no profile runs, the daemon takes the stages
   and rate from profile 1 at once, except any a loaded game profile has of
   its own. The mouse runs profile 1 when the daemon stops. The reply says
-  what holds while the daemon runs and what changes once it stops. After a
-  restore or a report rate change in host mode, the reply also says if the
-  mouse did not take the report rate. After the other writes in host mode,
-  it says if the mouse stopped answering. If the mouse did not answer, the
-  daemon sends the rate once it does. Otherwise the rate waits for the
-  mouse's next setup, as after it is switched off and on.
+  what holds while the daemon runs and what changes once it stops. In host
+  mode the reply also says if the mouse stopped answering after the write
+  or the live send of the report rate failed. If the mouse did not answer, the
+  daemon sends the rate once it does. Otherwise the daemon sets the mouse
+  up again a moment later, and that setup sends the rate again.
 
-The window locks those rows while a write is on its way, with a spinner
-beside the heading of the group whose row started it: Tuning for the
-Report rate, DPI stages for the stages, Onboard profile 1 for its own
-rows. A screen reader hears where the write goes, onboard profile 1 or
-the game profile. A toast says when the write is in effect. A write takes
-about a second when the mouse answers.
+The window locks the Report rate row, the DPI stages rows and Onboard
+profile 1's buttons and backup while a write is on its way and until the
+mouse is read back after it, with a
+spinner beside the heading of the group whose row started it: Tuning for
+the Report rate, DPI
+stages for the stages, Onboard profile 1 for its own rows. A screen reader
+hears where the write goes, onboard profile 1 or the game profile. A toast
+says when the write is in effect; in host mode, while the mouse runs another
+profile, or when a game profile's own stages or rate are saved, that is
+behind the toast's Details button. A write takes about a second when the
+mouse answers.
 
-The daemon keeps the mouse on profile 1. G HUB can leave the G502 X PLUS on
-profile 2, where G4 and G5 are back and forward again and nothing written to
-profile 1 shows. At attach and after each power-on, the daemon switches it
-back, which writes nothing to the mouse's memory, and puts the remembered
-DPI back. The journal notes the switch, and warns with the reason if it does
-not take. The daemon never switches to a profile 1 that fails its CRC, since
-what the mouse would run from it is not known. The journal and
-`gearbench-ctl status` say so, and say that writing the newest good backup
-over it with Restore profile backup… mends it. Outside host mode, where that
-other profile then runs, `gearbench-ctl status` says the mouse runs another
-profile and the Mouse tab shows a banner. Before a write, the Enable… and
+The daemon keeps the mouse on profile 1. Another program that drives these
+devices can leave the G502 X PLUS on profile 2, where G4 and G5 are back and
+forward again and nothing written to profile 1 shows. At attach and after
+each power-on, the daemon switches it back, which writes nothing to the
+mouse's memory, and puts the remembered DPI back. The journal notes the
+switch, and warns with the reason if it does not take. The daemon never
+switches to a profile 1 that fails its CRC, since what the mouse would run
+from it is not known. The journal and `gearbench-ctl status` say so, and say
+to write the newest good backup over it with Restore profile backup… before
+switching the mouse off. Outside host mode, where that other profile then
+runs, `gearbench-ctl status` says the mouse runs another profile and the
+Mouse tab shows a banner. Before a write, the Enable… and
 Restore profile backup… dialogs say that the write is not in effect while
 that profile runs. `gearbench-ctl mouse` names the profile on its `running:`
 line. In host mode no profile runs, and the daemon tries the switch again
@@ -2490,8 +2709,8 @@ when host mode ends.
 
 The enable write and the fallback live in the mouse's own memory, and no
 Gearbench setting records them. The mouse keeps either on another computer
-and through a reinstall of Gearbench. A different G502 X PLUS is on its
-factory profile until it gets its own write. `mouse-rate` and
+and through a reinstall of Gearbench. A different G502 X PLUS keeps what its
+own memory holds until it gets its own write. `mouse-rate` and
 `mouse-dpi-stages` change their own bytes and carry the button entries
 across.
 
@@ -2504,22 +2723,24 @@ Re-apply…, which writes the same entries again.
 
 In host mode, `gearbench-ctl mouse` starts the line by saying G4 to G9 come
 in the mouse's button reports. The row says first that G4 to G9 reach
-Gearbench directly. The group's description says the mouse runs profile 1
-without Gearbench. The row then has Write fallback… in place of Enable…, in
+Gearbench directly. The row then has Write fallback… in place of Enable…, in
 the accent color until profile 1 holds the fallback. Its dialog says what
-the write does and that every profile sector is backed up first.
+the write does and that every profile sector is backed up first. While the
+mouse does not answer and host mode is not set up on it yet, the line and
+the row read as outside host mode.
 
 On a mouse whose onboard profile Gearbench does not write yet, such as the
 G502 X LIGHTSPEED, the `programmable buttons:` line names no write. It gives
-each of the mouse's buttons and its job in profile 1, and says why. Outside
+each of the mouse's buttons and its job in profile 1, and the report's last
+line, `writes:`, says why. Outside
 host mode the `bindings:` line says the bindings work in host mode only, and
 the `in profile 1:` lines under it give each button's job. The Programmable
-buttons row gives the same buttons and jobs and offers neither write: its
-buttons are grayed out, neither in the accent color. In host mode the row
+buttons row gives the same buttons and jobs, and its write button is grayed
+out and not in the accent color. In host mode the row
 says first that the buttons reach Gearbench directly. Once Gearbench stops,
 this mouse runs the profile it ran before, since Gearbench does not switch
-it to profile 1. While profile 1 fails its CRC, the row gives no jobs and
-says the buttons are not known.
+it to profile 1. While profile 1 fails its CRC, as a blank one does, the
+line and the row still give the jobs.
 
 If a mouse refused the switch back to onboard mode, or answered and did not
 take it, it stays in host mode with its programmable buttons doing nothing.
@@ -2559,10 +2780,12 @@ Until the mouse moves, clicks or reports, the daemon sends it nothing on its
 own but a probe: 30 s after it went quiet, then at doubling intervals up to
 two minutes. It sends none while the mouse's receiver says the link is down.
 A command that writes to it, such as `gearbench-ctl mouse-dpi`, still tries
-it. `gearbench-ctl mouse` and the Mouse tab send it nothing: they show what
+it. A color or effect for a G502 LIGHTSPEED, a PRO WIRELESS or a mouse still
+showing its own lighting waits until the mouse answers.
+`gearbench-ctl mouse` and the Mouse tab send it nothing: they show what
 was last read from it. `gearbench-ctl mouse`, and the window's 5 s read on
-any tab while the window is on screen, bring its next probe within 30 s
-unless its receiver says the link is down. The G502 X PLUS's receiver says
+any tab while the window is on screen, bring the next probe of the mouse
+they show within 30 s unless its receiver says the link is down. The G502 X PLUS's receiver says
 when the mouse is switched on, and the daemon sets the mouse up again at
 once, lighting and DPI included.
 
@@ -2578,7 +2801,9 @@ A mouse off when the daemon starts is set up as soon as its receiver says it
 is switched on, or it moves, clicks or reports. Failing that, it is looked
 for again after 10 s, then less often, up to every two minutes. With no
 other mouse attached, `gearbench-ctl mouse`, or the window's 5 s read on any
-tab while the window is on screen, brings the next try within 30 s.
+tab while the window is on screen, brings the next try within 30 s. A mouse
+that could not be set up is tried again as soon as its receiver or cable is
+plugged back in.
 
 ## Mouse models
 
@@ -2589,12 +2814,13 @@ other twelve has been tested on one yet; Gearbench writes nothing to their
 onboard memory. What the thirteen share comes first. Each section then says
 what its model was built from, does and lacks.
 
-The DPI row and `gearbench-ctl mouse-dpi` set the DPI live, in steps of 50.
+The DPI row and `gearbench-ctl mouse-dpi` set the DPI live.
 The DPI goes from 100 to 25600 on the G502 HERO, the G502 X LIGHTSPEED, the
 PRO X SUPERLIGHT, the G502 X, the G502 X PLUS MILLENNIUM FALCON, the G502
 LIGHTSPEED, the PRO WIRELESS and the G903 LIGHTSPEED HERO, and from 200 to
-8000 on the G203 LIGHTSYNC. On the PRO X SUPERLIGHT 2 models and the PRO X2
-SUPERSTRIKE, they set it in host mode alone, as their sections say. The
+8000 on the G203 LIGHTSYNC, both in steps of 50. On the PRO X SUPERLIGHT 2
+models and the PRO X2 SUPERSTRIKE, they set it in host mode alone, as their
+sections say. The
 daemon puts back the DPI you chose when a wired one is plugged in again, and
 when a wireless one is switched on again or moves between its receiver and
 its cable.
@@ -2608,16 +2834,13 @@ profile](#stages-and-rate-per-game-profile)). With host mode off, a mouse's butt
 it runs gives them.
 
 On each of the twelve, the report rate, the stages and onboard profile 1 show
-as the mouse holds them. Writing any of them is refused with nothing sent.
+as the mouse holds them. Writing any of them is refused with nothing written.
 The stage rows, Programmable buttons and Profile backup are grayed out. The
-DPI stages and Onboard profile 1 groups say writes to profile 1 wait for a
-test on this model. Outside host mode, the rate row is grayed out too and
-says the rate is set live in host mode only. `mouse-rate`,
+DPI stages and Onboard profile 1 groups say writes to onboard profile 1 wait
+for a test on this model. Outside host mode, the rate row is grayed out too
+and says the rate is set live in host mode only. `mouse-rate`,
 `mouse-dpi-stages`, `mouse-enable-buttons`, `mouse-fallback-buttons` and
-`mouse-restore` refuse the same way. Each then says what stays as it is for
-that write: the rate or the stages as the profile holds them, the buttons
-doing what it holds outside host mode and without Gearbench, or the profile
-itself.
+`mouse-restore` refuse the same way.
 
 Gearbench never switches one of the twelve to profile 1, since whether that
 switch stays in the mouse's memory is not known yet. The mouse keeps the
@@ -2627,40 +2850,42 @@ On the G502 HERO, the G502 X and the G203 LIGHTSYNC, the udev rule grants the
 interface that carries the mouse's control protocol. That interface also
 carries the keystrokes the mouse sends for a button its onboard profile binds
 to a key; a program you run can read them there. Going by the kernel's
-source, a mouse's own node behind its receiver carries them too. "The udev
-rules" says how to limit these grants to one group's accounts on a machine
-several people use.
+source, a mouse's own node behind its receiver carries them too. [The udev
+rules](#the-udev-rules) says how to limit these grants to one group's accounts
+on a machine several people use.
 
 ### The G502 HERO
 
-The G502 HERO was built from published logs of the mouse, and tested in part
-on a G502 SE HERO on 2026-10-17 and, its lighting included, on 2026-10-18. It
-attaches on its cable alone. Its tab has the mouse's group, the DPI and
-Report rate rows, the DPI stages, Lighting, Buttons and Onboard profile 1.
+The G502 HERO was built from published logs of the mouse, its firmware and
+G HUB's description of it, and tested in part on a G502 SE HERO on
+2026-10-17 and, its lighting included, on 2026-10-18. It
+attaches on its cable alone. Its tab has the mouse's group, Tuning with the
+DPI and Report rate rows, DPI stages, Lighting, Buttons and Onboard profile 1.
 
 Its Lighting group, `gearbench-ctl mouse-color`, `mouse-effect` and
-`mouse-sync` drive its two zones, the logo and the DPI stage lights, with
-the effects the mouse reports: static, breathe, cycle and disabled. The DPI
-stage lights, which `gearbench-ctl mouse` calls `primary`, show the zone's
-color on the light of the stage in use alone. Until the mouse is given a
-color or an effect, it shows the lighting its onboard profile holds. Until
-then, Gearbench sends it nothing for its lighting, after a replug or a
-resume too. The one exception is a release as it connects, in case a daemon
-that crashed still held its lighting. The first color or effect set for it,
-or its Follow switch turned on, hands its lighting to Gearbench. When no
-color or effect has been set for it since the daemon started, its Follow
-switch turned off gives it its own lighting back. So does Show its own lighting under
-Lighting, or `gearbench-ctl mouse-effect --release`, which also forgets the
-color or effect set for it. The Lighting group says under its title which
-of the two the mouse shows, and `gearbench-ctl status` says it under its
-`mouse:` line.
+`mouse-sync` drive its two zones, the logo and the DPI lights, with
+the effects the mouse reports: static, breathe, cycle and `disabled`, which
+the Effect row calls Off. The DPI lights, which `gearbench-ctl mouse`
+calls `primary`, show the zone's color on the light of the stage in use
+alone. Until the mouse is given a color or an effect, it shows the lighting
+its onboard profile holds. Until then, Gearbench writes nothing to its
+lighting, after a replug or a resume too. The one exception is a release as
+it connects, in case a daemon that crashed still held its lighting. The
+first color or effect set for it, or its Follow switch turned on, hands its
+lighting to Gearbench. When no color or effect has been set for it since the
+daemon started, its Follow switch turned off gives it its own lighting back.
+So does Show its own lighting under Lighting, or
+`gearbench-ctl mouse-effect --release`, which also forgets the color or
+effect set for it. The Lighting group says under its title which of the two
+the mouse shows, and `gearbench-ctl status` says it under its `mouse:` line.
 
 Its onboard profile 1 is written as the G502 X PLUS's is: the stages, the
 default and shift stage and Use factory stages…, the report rate, Write
 fallback… and Restore profile backup…, each after the profile's sectors are
-backed up. The stage write was tested on the hardware on 2026-10-21, a
-stage changed and put back, with a replug between; the others have not run
-on it yet.
+backed up. The stage write was tested on the hardware on 2026-10-21 with
+host mode off: a stage changed and put back, with a replug between. The
+stage write in host mode, the default, and the others have not run on it
+yet.
 Enable… is not offered on it, and `gearbench-ctl mouse-enable-buttons` is
 refused with nothing sent: Gearbench reads its buttons in host mode
 alone, so enabled they would do nothing outside it. Found on another
@@ -2684,9 +2909,9 @@ the switch or when the daemon stops, its firmware writes its running
 profile's two lighting records, unchanged, into its own settings memory.
 
 If another program that drives these devices never wrote to the mouse, its
-profile 1 may be blank, which fails its CRC. Gearbench then writes nothing
-over it and does not switch the mouse to it. With no backup of it to
-restore, RECOVERY in `man gearbench-ctl` says how to write the factory
+profile 1 may be blank, which fails its CRC. Gearbench then refuses each
+edit of it and does not switch the mouse to it; Restore profile backup…
+writes the newest good backup over it. With no backup of it to restore, RECOVERY in `man gearbench-ctl` says how to write the factory
 copy back.
 
 ### The G502 X LIGHTSPEED
@@ -2694,8 +2919,8 @@ copy back.
 The G502 X LIGHTSPEED is the G502 X PLUS without lighting. It was built from
 G HUB's description of the model and a published listing of its features. It
 attaches through its LIGHTSPEED receiver and on its cable. Its tab has the
-mouse's group with the battery, the DPI and Report rate rows, the DPI
-stages, Buttons and Onboard profile 1, with no Lighting group.
+mouse's group with the battery, Tuning with the DPI and Report rate rows,
+DPI stages, Buttons and Onboard profile 1, with no Lighting group.
 
 In host mode, the default, its G4 to G9 and wheel tilts work as the G502 X
 PLUS's, whose button layout it is taken to have. As on the G502 X PLUS, a
@@ -2706,35 +2931,37 @@ setup puts back the wheel's high resolution (see [Asleep or switched off](#aslee
 The PRO X SUPERLIGHT was built from its firmware, a published listing of its
 features and G HUB's description of it. It attaches through its LIGHTSPEED
 receiver and on its cable. It has five buttons and no lighting you can set.
-So its tab has the mouse's group with the battery, the DPI and Report rate
-rows, the DPI stages, Buttons and Onboard profile 1, with no Lighting group.
-`mouse-color` and `mouse-effect` say it has no lighting, and it does not
-follow the keyboard.
+So its tab has the mouse's group with the battery, Tuning with the DPI and
+Report rate rows, DPI stages, Buttons and Onboard profile 1, with no
+Lighting group.
+`mouse-color` and `mouse-effect` say it has no lighting Gearbench drives,
+and it does not follow the keyboard.
 
 In host mode, the default, its side buttons, G4 and G5, reach Gearbench and
 take their bindings, back and forward unless you bind them to something
 else. The left, right and middle buttons work as any mouse's.
 
-When the DPI is one of its stages, the mouse's DPI indicator light takes the
+When the DPI is one of its stages, the mouse's DPI light takes the
 stage's color: yellow, white, orange, pink and purple, stage 1 first.
 
 ### The G502 X
 
-The G502 X is the wired model of the G502 X family, with no lights and no
-battery. It was built from a published log of one unit and published
+The G502 X is the wired model of the G502 X family, with no lighting you can
+set and no battery. It was built from a published log of one unit and published
 listings of its features. It attaches on its cable. Its tab has the mouse's
-group, the DPI and Report rate rows, the DPI stages, Buttons and Onboard
-profile 1, with no Battery row and no Lighting group. In host mode, the
+group, Tuning with the DPI and Report rate rows, DPI stages, Buttons and
+Onboard profile 1, with no Battery row and no Lighting group. In host mode, the
 default, its G4 to G9 and wheel tilts work as the G502 X PLUS's.
 
 ### The G502 X PLUS MILLENNIUM FALCON
 
 The G502 X PLUS MILLENNIUM FALCON is an edition of the G502 X PLUS with ids
-of its own. No published source lists its features, so Gearbench takes all
-of them from the G502 X PLUS, as G HUB's description of it does. It attaches
+of its own. No published source lists its features, so all of them are taken
+to be the G502 X PLUS's, as G HUB's description of it has them. It attaches
 through its LIGHTSPEED receiver and on its cable. Its tab has the mouse's
-group with the battery, the DPI and Report rate rows, the DPI stages,
-Lighting, Buttons and Onboard profile 1. In host mode, the default, its G4
+group with the battery, Tuning with the DPI and Report rate rows, DPI
+stages, Lighting, Buttons and Onboard profile 1. In host mode, the default,
+its G4
 to G9 and wheel tilts work as the G502 X PLUS's.
 
 Its Lighting group, `gearbench-ctl mouse-color`, `mouse-effect` and
@@ -2753,19 +2980,19 @@ keeps for power saving. The G502 X PLUS's names are refused on it.
 The G502 LIGHTSPEED, the G502 HERO's wireless model, was built from G HUB's
 description of it and published logs of the mouse. It attaches through its
 LIGHTSPEED receiver, or a POWERPLAY mat's, and on its cable. Its tab has the
-mouse's group with the battery, the DPI and Report rate rows, the DPI
-stages, Lighting, Buttons and Onboard profile 1.
+mouse's group with the battery, Tuning with the DPI and Report rate rows,
+DPI stages, Lighting, Buttons and Onboard profile 1.
 
 Its two zones, the primary zone and the logo, take colors and effects as the
-G502 HERO's do: static, breathe, cycle and disabled, each for the mouse's
-working memory alone. The mouse shows its own lighting until it is given a
-color or an effect. Going by the firmware of the PRO WIRELESS, whose
-lighting answers the same, a color sent while Gearbench does not hold the
-lighting is stored in the mouse. The mouse lets go of that hold when its
-power state changes, as when it goes to sleep. So Gearbench takes hold of
-the lighting again right before each color or effect it sends, and sends it
-only once the mouse has answered that. `gearbench-ctl status` says its
-lighting is not yet tested.
+G502 HERO's do: static, breathe, cycle and `disabled`, which the Effect row
+calls Off, each for the mouse's working memory alone. The mouse shows its
+own lighting until it is given a color or an effect, or its Follow switch
+is turned on. Gearbench takes hold
+of the lighting right before each color or effect it sends, and sends it
+only once the mouse has answered that: going by the firmware of the PRO
+WIRELESS, whose lighting answers the same, a color sent otherwise can be
+stored in the mouse. `gearbench-ctl status` says its lighting is not yet
+tested.
 
 The mouse reports only its voltage, and the Battery row's percentage comes
 from G HUB's curves for its cell. While it charges, the percentage climbs to
@@ -2783,17 +3010,15 @@ high-resolution wheel to keep.
 The PRO WIRELESS, an ambidextrous mouse, was built from its firmware, a
 published log of the mouse and G HUB's description of it. It attaches
 through its LIGHTSPEED receiver and on its cable. Gearbench treats it as the
-G502 LIGHTSPEED (see [The G502 LIGHTSPEED](#the-g502-lightspeed)): the same tab, the same live DPI
-and refusals, and the same battery curves, which G HUB gives both mice. It
-has the same two zones, taken hold of right before each color or effect,
-here because its own firmware stores a color sent otherwise. It has no
-high-resolution wheel.
+G502 LIGHTSPEED (see [The G502 LIGHTSPEED](#the-g502-lightspeed)): the same tab and the same
+battery curves, which G HUB gives both mice. It has the same two zones,
+taken hold of right before each color or effect, here because its own
+firmware stores a color sent otherwise. It has no high-resolution wheel.
 
 Its buttons are G4 and G5 on the left side, G6 its DPI button, and G7 and G8
 on the right side. In host mode, the default, they reach Gearbench as on the
 G502 LIGHTSPEED, each at its own default: back and forward on each side, and
-DPI cycle on the DPI button. DPI cycle steps up through the stages and from
-the last back to the first, as from the factory. Its firmware keeps host
+DPI cycle on the DPI button, as from the factory. Its firmware keeps host
 mode in its working memory and reloads the profile it runs on leaving it.
 With host mode off, the Buttons group shows what profile 1 gives the
 buttons, grayed out.
@@ -2804,22 +3029,22 @@ The G903 LIGHTSPEED HERO was built from its firmware, a published log of the
 mouse and G HUB's description of it. It is not the older G903, which
 Gearbench does not match. It attaches through its LIGHTSPEED receiver, or a
 POWERPLAY mat's, and on its cable. Its tab has the mouse's group with the
-battery, the DPI and Report rate rows, the DPI stages, Lighting, Buttons and
-Onboard profile 1.
+battery, Tuning with the DPI and Report rate rows, DPI stages, Lighting,
+Buttons and Onboard profile 1.
 
 Its Lighting group, `gearbench-ctl mouse-color`, `mouse-effect` and
 `mouse-sync` drive its two zones, the primary zone and the logo, with the
-effects the mouse reports: static, breathe, cycle and disabled, each for the
-mouse's working memory alone. Holding its lighting also hands the mouse's
-power saving to Gearbench, which puts no mouse to sleep. So, as on the G502
-HERO, Gearbench takes the lighting only once the mouse is given a color or
-an effect, or its Follow switch is turned on. Until then the mouse is sent nothing
-for its lighting but one release when it connects, and it dims and sleeps on
-its own. The Lighting group says under its title which lighting it shows. A
-color is each zone's static effect: the mouse has no per-key lighting.
-Whether the mouse still dims and goes to sleep on its own while Gearbench
-holds its lighting has not been tested. `gearbench-ctl status` says its
-lighting is not yet tested.
+effects the mouse reports: static, breathe, cycle and `disabled`, which the
+Effect row calls Off, each for the mouse's working memory alone. Holding its
+lighting also hands the mouse's power saving to Gearbench, which puts no
+mouse to sleep. So, as on the G502 HERO, Gearbench takes the lighting only
+once the mouse is given a color or an effect, or its Follow switch is turned
+on. Until then Gearbench writes nothing to its lighting but one release when
+it connects, and the mouse dims and sleeps on its own. The Lighting group
+says under its title which lighting it shows. A color is each zone's static
+effect: the mouse has no per-key lighting. Whether the mouse still dims and
+goes to sleep on its own while Gearbench holds its lighting has not been
+tested. `gearbench-ctl status` says its lighting is not yet tested.
 
 Its buttons are G4 and G5 on the left side, G6 and G7 on the right side, and
 G8 and G9, its DPI down and up buttons. Which DPI button has which printed
@@ -2846,9 +3071,10 @@ lists the 2c's features, so all of them are taken to be the SUPERLIGHT 2's.
 The PRO X SUPERLIGHT 2 SE has the SUPERLIGHT 2's ids and shows under that
 name. Each attaches through its LIGHTSPEED receiver and on its cable. Each
 has five buttons and no lighting you can set, so its tab has the mouse's
-group with the battery, the DPI and Report rate rows, the DPI stages,
-Buttons and Onboard profile 1, with no Lighting group. `mouse-color` and
-`mouse-effect` say it has no lighting, and it does not follow the keyboard.
+group with the battery, Tuning with the DPI and Report rate rows, DPI
+stages, Buttons and Onboard profile 1, with no Lighting group. `mouse-color` and
+`mouse-effect` say it has no lighting Gearbench drives, and it does not
+follow the keyboard.
 
 These mice take a DPI and a report rate from Gearbench in host mode alone,
 the default. With host mode off, the mouse runs the DPI and the rate of the
@@ -2867,9 +3093,10 @@ DPI row's tooltip gives the range with its finest and its coarsest step, and
 a click on its + or - moves the DPI by the coarsest.
 The mouse's lift-off distance stays as the mouse holds it. The mice list
 report rates up to 2000 Hz, or 8000 Hz on later firmware; Gearbench sets
-125 to 1000 Hz. When the DPI is one of its stages, the DPI indicator light
-takes the stage's color, by G HUB's description: white, orange, green,
-yellow and pink, stage 1 first.
+125 to 1000 Hz. Each stage's row has a dot in the color G HUB's description
+gives the DPI light for that stage: white, orange, green, yellow
+and pink, stage 1 first. The DPI Gearbench sets names no stage, so the light
+is expected to stay dark.
 
 The receiver can pair a second device. Pair nothing else to it: going by
 the kernel's source, a keyboard paired after the mouse could type on the
@@ -2881,8 +3108,8 @@ The PRO X2 SUPERSTRIKE was built from a published listing of its features
 and G HUB's description of it. It lists the PRO X SUPERLIGHT 2's features
 and its main buttons' tuning, and attaches on the same kind of receiver and
 on its cable. Gearbench drives it as the PRO X SUPERLIGHT 2 (see [The PRO X
-SUPERLIGHT 2, DEX and 2c](#the-pro-x-superlight-2-dex-and-2c)): the battery, G4 and G5, and in host mode alone
-the DPI, to 44000 by retailers' figures, and the report rate. Its own
+SUPERLIGHT 2, DEX and 2c](#the-pro-x-superlight-2-dex-and-2c)): the battery, and in host mode alone G4
+and G5, the DPI, to 44000 by retailers' figures, and the report rate. Its own
 settings, the main buttons' actuation point, rapid trigger and click
 haptics, are not set yet: they stay as the mouse holds them, and wait for a
 device report from one (see [Reporting a device](#reporting-a-device)), which reads them.
@@ -2893,7 +3120,7 @@ The G203 LIGHTSYNC was built from a published listing of its features,
 published logs of two units and G HUB's description of it. The G102
 LIGHTSYNC is the same mouse under another name and shares its ids: it shows
 as the G203 LIGHTSYNC. It attaches on its cable alone and has no battery.
-Its tab has the mouse's group with the DPI and Report rate rows, the DPI
+Its tab has the mouse's group, Tuning with the DPI and Report rate rows, DPI
 stages, Lighting, Buttons and Onboard profile 1.
 
 Its Lighting group, `gearbench-ctl mouse-color`, `mouse-effect` and
@@ -2915,14 +3142,22 @@ shows what profile 1 gives the buttons, grayed out.
 
 ![The Headset tab on the Astro A50 Gen 4: its status group, Microphone and Equalizer](images/headset.png)
 
-The Headset tab has a page for each headset plugged in, and a switcher at
-its top picks one while more than one is plugged in. This section covers the
-Astro A50 Gen 4's page, and the Mic input and Input level rows every
-headset's page has. Each other headset's page and commands have a section of
-their own. "The Logitech G432" has its ten relatives under it in "Other
-Logitech G headsets". The page in "The Astro A50 X and A50 Gen 5" also shows
+The Headset tab has a page for each of three families of headset, the A50
+Gen 4's, the G432's and the A50 X's, and Gearbench drives one headset of each
+family at a time. A switcher at the tab's top picks a page while more than
+one shows. This section covers the
+Astro A50 Gen 4's page, the Mic input and Input level rows every
+headset's page has, and noise suppression. Each other headset's page and commands have a section of
+their own. [The Logitech G432](#the-logitech-g432) has the ten others of its
+family under it in [Other Logitech G headsets](#other-logitech-g-headsets). The page in
+[The Astro A50 X and A50 Gen 5](#the-astro-a50-x-and-a50-gen-5) also shows
 the PRO X 2, G522 and G325 LIGHTSPEED (see [The PRO X 2, G522 and G325
-LIGHTSPEED](#the-pro-x-2-g522-and-g325-lightspeed)). "Spatial sound" covers the group every page ends with.
+LIGHTSPEED](#the-pro-x-2-g522-and-g325-lightspeed)). [Spatial
+sound](#spatial-sound) and [Outputs](#outputs) cover the groups every page
+ends with: Headset for computer sound,
+which shows while more than one headset is plugged in or once you have
+picked one, then Outputs and Spatial sound, which the tab also shows while
+no headset is plugged in.
 
 The A50 Gen 4's page and the `gearbench-ctl headset` commands cover the
 Astro A50 Gen 4 through its base station, on USB with its switch on PC
@@ -2947,42 +3182,51 @@ The tab asks the daemon to read every setting and preset again, as
 `gearbench-ctl headset --read` does: the first time the tab shows with the
 base station answering, and again after the base station or the daemon was
 lost. The daemon also reads them all again when the headset links to its
-base station, after a save and after a resume, since the base station may
-have lost what its memory held. While a save runs, the read waits for it to
-end.
+base station and after a save. It reads them again after a resume too,
+since a base station that lost power in the suspend has its memory back at
+what flash holds. While a save runs, the tab's read and the daemon's own wait
+for it to end; `gearbench-ctl headset --read` reads nothing then and shows
+what the daemon last read.
 
 The A50 Gen 4's page, from the top:
 
-- the Astro A50 Gen 4 group with its status, Battery, Firmware, Balance, Game
-  output and Chat output
+- the Astro A50 Gen 4 group with its status, Battery, Battery notices,
+  Firmware, Balance, Game output and Chat output
 - Microphone
 - Equalizer
 - Stream mix
 - Base station
 - Revert to saved
+- Headset for computer sound, while more than one headset is plugged in or
+  once you have picked one
+- Outputs
 - Spatial sound
 
-The A50's two outputs in GNOME's Sound settings come from `install.sh` and
-the package (see [Game and Chat](#game-and-chat)), and the page sets their volume.
+The A50's two outputs, Astro A50 Game and Astro A50 Chat, come from
+`install.sh` and the package (see [Game and Chat](#game-and-chat)), and the
+page sets their volume.
 
 ### Status and battery
 
 The status group is titled with the model, Astro A50 Gen 4. Its Status row
 says Through its base station, with a green check mark, while the headset
 is on and linked to its base station. While the headset has no link to its
-base station, it says, in amber, Switched off or out of range. While the
-headset sits on its base station switched off, it says Switched off, docked.
-While the base station does not answer, it says, in amber, that the base
-station is not answering, with what to do. The Status row's tooltip gives
-the node. The Firmware row gives the versions of the base station and, once
-it has been on, the headset, or Not read.
+base station, the row has an amber warning sign and says Switched off or out
+of range; switch it on, or bring it near its base station. While the headset
+sits switched off on its base station, it says Switched off, docked instead.
+While the base station does not answer, it has the same sign and says that
+the base station is not answering, with what to do. The Status row's
+tooltip and its description give the node. The Firmware row gives the base
+station's version and, once the headset has been on, the headset's; it is
+hidden until the base station gives one.
 
 The Battery row gives the headset's charge, with charging after it while it
-charges, or Fully charged, amber below 30% and red below 15% while not
-charging. At 100% on its base station it says Fully charged, though the base
-station no longer reports it charging. While the headset is on, the daemon reads the
-battery once a minute, and again when the headset is put on or taken off its
-base station.
+charges, or Fully charged at 100% on its base station. While the headset is
+not charging, the row's icon is amber below 30% and red below 15%, or below
+10% and 5% with Battery notices set to At 10% and 5%. Under it, Battery
+notices sets the headset's low-battery notices, as on every device tab.
+While the headset is on, the daemon reads the battery once a minute, and
+again when the headset is put on or taken off its base station.
 
 While the headset is off or the base station does not answer, the row keeps
 the last reading and adds the time it was read, with the date for a reading
@@ -3006,12 +3250,14 @@ while its output is not there (see [Game and Chat](#game-and-chat)). `gearbench-
 headset-volume a50` prints both and the microphone's, and `gearbench-ctl
 headset-volume a50 chat 60` sets one, with no daemon.
 
-`gearbench-ctl headset` prints the same, a line each: `headset:`, which
-reads `on` or `switched off or out of range`, and `on, docked` or
-`switched off, docked` while the headset sits on its base station;
-`firmware:`; `battery:`; and `balance:`. While the base station does not
-answer, the command says so and gives the time of the readings below, dated
-when they are from an earlier day. Before the first full read, it says the
+`gearbench-ctl headset` opens with the status group's readings, except the
+two outputs, a line each: `device:`; `headset:`, which reads `on` or
+`switched off or out of range`, and `on, docked` or `switched off, docked`
+while the headset sits on its base station; `battery:` while there is a
+reading; `firmware:` where the base station gave a version; and `balance:`
+while there is a reading. While the base station does not
+answer, the command says so and gives the time its settings were last read
+in full, dated when that is an earlier day. Before the first full read, it says the
 settings have not all been read yet. `gearbench-ctl status` says whether a
 base station is attached.
 
@@ -3028,13 +3274,16 @@ the window is not the active one.
 | Sidetone: your voice in the earcups | `gearbench-ctl headset-set sidetone 40` | 0 to 100% |
 | Noise gate | `gearbench-ctl headset-set noise-gate home` | Streaming, Night, Home, Tournament |
 | Mic EQ | `gearbench-ctl headset-set mic-eq bright` | Bright, Airy, Warm |
+| Noise suppression | `gearbench-ctl headset-noise --headset a50 on` | Off, On |
 
 Streaming is the lightest gate and Tournament the strongest, which gates the
 sidetone too; Home is Astro's default. Each noise gate's entry in the list
 has a tooltip that says what it is for. A slider is sent once it has stayed
 put for 0.3 s, or when the window closes, so a drag is one write.
 `gearbench-ctl headset-set` answers with the value read back, and the saved
-value while flash holds another.
+value while flash holds another. Noise suppression runs on the computer,
+not in the base station, so Save leaves it out (see [Noise
+suppression](#noise-suppression)).
 
 ### Mic input
 
@@ -3076,11 +3325,82 @@ again every 5 seconds while it shows:
 
 | Line | What to do |
 | --- | --- |
-| Not in PipeWire | Plug the headset in, and in GNOME's Sound settings pick a Configuration for it that has a microphone. |
-| pw-record is not installed | Install PipeWire's tools, the `pipewire-bin` package on Debian and Ubuntu. |
+| Not in PipeWire | Plug the headset in, and pick a profile for it that has a microphone (its Configuration in GNOME's Sound settings, Profile in KDE Plasma's). |
+| pw-record is not installed | Install PipeWire's tools: the `pipewire-bin` package on Debian and Ubuntu, `pipewire-utils` on Fedora, `pipewire-audio` on Arch and CachyOS. |
 | pw-record did not run: ... | The rest of the line says why. |
-| PipeWire could not be read: ... | The rest of the line says why. |
+| PipeWire could not be read (...) | The words in parentheses say why. |
 | pw-record stopped | Its tooltip gives what pw-record said, or how it ended. |
+
+### Noise suppression
+
+Noise suppression makes a cleaned-up input from a headset's microphone,
+G432 Microphone (Noise Filter) from the G432's, Astro A50 X Microphone
+(Noise Filter) from the A50 X's, so the lists of inputs tell it apart from
+the microphone it is made from. It is meant for steady background noise,
+such as a fan or a hum. In a test without a headset, steady white noise came
+through about 18 dB lower (measured 2026-10-18). If the game or chat app has
+noise suppression of its own, keep one of the two on, not both.
+
+It is off until you switch it on. Switching it on makes it the default
+input, so a game or chat app set to the default input uses it. The
+headset's own microphone stays as it is, so a program that records that one
+hears it unchanged. Switched on, it reads the microphone only while a
+program records its input, and GNOME's microphone icon in the top bar shows
+only then.
+
+Switching it off gives back the input that was the default before, as
+Outputs does with the default output. If you picked another input in the
+meantime, switching it off leaves that one. An input given back that is
+unplugged by then becomes the default again once it is back, and another
+input is the default meanwhile. With two headsets' noise suppression on,
+switching both off, in either order, gives back the input there was before
+the first.
+
+The account's last logout stops it with nothing given back (with lingering
+on, a restart does). The default input is then the one you picked before it,
+and switching it on and off again in the next session gives that one back.
+
+Every headset has it but the PRO X 2 LIGHTSPEED and the G325 LIGHTSPEED,
+whose noise suppression is in the headset (see [The PRO X 2, G522 and G325
+LIGHTSPEED](#the-pro-x-2-g522-and-g325-lightspeed)). In the window it is the
+Noise suppression switch in each headset page's Microphone group, above Mic
+input. It stays while the headset is away, since it runs without it.
+
+It is PipeWire's own echo-cancel module with its webrtc plugin, so nothing
+is installed for it. Its automatic gain stays off, so your voice keeps the
+level you set. Its echo canceler also runs, on the sound the headset plays,
+whichever output is the default, so it covers a program on Gearbench Game,
+Chat or Media. On the Astro A50 Gen 4 and the A50 X it reads their Game
+output, so it leaves out Gearbench Chat, which plays on their Chat output.
+If the headset's profile (Configuration in GNOME's Sound settings, Profile in
+KDE Plasma's) has no output when you switch it on, it reads the default
+output.
+`gearbench-ctl headset-noise on` and `off` do the same as the switch, and
+`gearbench-ctl headset-noise` says whether it runs and what it
+cleans, with no daemon (`g432-noise`, its name in Gearbench 1.2.0, does the
+same). It acts on a headset plugged in, chosen in this order: the one of the
+G432's family the daemon drives or would drive, then the Astro A50 Gen 4,
+then the others. With none plugged in, it acts on the G432.
+`--headset a50x` picks one by its key, as `headset-spatial` takes it.
+Switching it on writes its PipeWire configuration to
+`$XDG_RUNTIME_DIR/gearbench-g432-mic.conf` and starts it as
+`gearbench-g432-mic.service`; on another headset both take its key in place of
+`g432`. It also stops when PipeWire does. It refuses
+while the headset is not plugged in, or while its profile has no microphone.
+The A50 Gen 5 and the G522 play under PipeWire's own audio profiles, so
+Gearbench does not know which of their inputs is the microphone: while one
+lists more than one input, switching it on refuses and names each, until a
+device report from one shows which (see [Reporting a
+device](#reporting-a-device)). It has been heard on the G432, the G933, the
+Astro A50 Gen 4 and the A50 X (2026-10-28), not yet in a call.
+
+Test the microphone, under the switch, lets you hear what a game or chat app
+gets. Its line counts "Recording in 3", 2, 1, so you can start speaking as
+it starts, then records 5 seconds of the cleaned-up input, counting down
+the seconds left, then plays them back on the default output. It works while
+noise suppression is on and linked to the microphone. The recording stays in
+memory and goes when it has played: nothing is written to a file.
+`gearbench-ctl headset-noise test` counts the same way in a terminal.
 
 ### Equalizer
 
@@ -3089,14 +3409,20 @@ and plays the active one. The Preset row lists them by number and name and
 switches the active one, as `gearbench-ctl headset-set preset 2` does. The
 rows under it edit the active preset:
 
-- Name, sent with its apply button: 1 to 49 bytes, with no control
-  character. `gearbench-ctl headset-eq --name "Night"` does the same.
+- Name, sent with its apply button: 1 to 49 bytes, not spaces alone, with
+  no control character. `gearbench-ctl headset-eq --name "Night"` does the same.
 - Band 1 to Band 5: each row's slider is the band's gain, -7 to +7 dB, and
   its subtitle gives the frequency and the gain, as 2.5 kHz, +3 dB. Expanded, a band shows
   Frequency, 80 to 15000 Hz. Bands 2 to 4 also show Width, 0.1 to 3.0: the
   band's width as a multiple of its frequency (1/Q), where 2.0 is wide and
   0.5 narrow. Bands 1 and 5 are shelves and have no width. A gain is sent
-  after 0.3 s at rest, a frequency or a width after 0.6 s.
+  after 0.3 s at rest, a frequency or a width after 0.6 s. A frequency or a
+  width typed outside its range, or a word, puts back the value the row showed.
+
+The window waits up to 10 seconds for the base station to answer a write to
+a preset: a gain, a frequency, a width, the name, Reset to default or an
+import. While it waits, a spinner turns beside the Equalizer heading, and a
+screen reader hears Writing to the base station.
 
 `gearbench-ctl headset-eq` changes any slot's preset with `--slot N`
 (`--preset N`, its name in Gearbench 1.1.0, too), and the active one
@@ -3115,18 +3441,18 @@ same for any slot.
 A file that does not parse, or holds a value that is missing, out of range
 or not a number (a whole number for a gain or a frequency), is refused
 before anything is sent, and the message names it. A `Name` that holds a
-control character is refused too. Both refuse anything but a regular file,
-such as a named pipe or a device, and a file over 16 KiB. In the name, a
+control character is refused too. The window's import and `headset-import`
+refuse anything but a regular file, such as a named pipe or a device, and a
+file over 16 KiB. In the name, a
 line or paragraph separator, or a character that turns the direction of the
 text after it, becomes U+FFFD.
 
 Reset to default, under Save as new preset…, writes the active slot's
 default to the base station, its name with its gains and bands: Media in
-slot 1, Gaming in 2 and Everyday in 3, the names of the G432's shipped
-presets too. Gearbench designed the three from published measurements of
+slot 1, Gaming in 2 and Everyday in 3. Gearbench designed the three from published measurements of
 the A50 Gen 4 and a model of the base station's filters. Media adds a
 little bass and cuts the low mids, Gaming takes the bass down and lifts the
-footstep range, and Everyday is the daily one, nearest neutral. Gearbench
+footstep range, and Everyday is nearest neutral. Gearbench
 1.1.0 named Media "Rock and Alt" and Gaming "FPS Spatial", with the same
 sound, and a slot that holds one of those names keeps it until it is
 reset. The row's tooltip names the default. Like any change, a reset is
@@ -3134,33 +3460,43 @@ unsaved until Save, and an edit of the preset still settling is dropped.
 `gearbench-ctl headset-eq --reset` does the same, `--slot 2` for slot 2,
 and the other options then change the default before it is sent.
 
-Which preset is active is not on the unsaved list, since the base station
-gives no saved value to compare it with.
+Which preset is active is not on the unsaved list, even after a switch:
+the base station gives no saved value to compare it with, and Gearbench
+does not mark a switch as written, as it marks Auto shut-off.
 
 ### The preset library
 
 Gearbench keeps up to 16 presets of your own on this computer, apart from
-the base station's three. Save as new preset…, under Load preset to headset… in
-Equalizer,
-keeps the active preset's sound as its rows show it, a slider still settling
-included. You type its name, which starts as the active preset's own; while
+the base station's three slots. Save as new preset… is under Load preset to
+headset… in Equalizer. It keeps the active preset's sound as its rows show
+it, a slider still settling included. You type its name, which starts as the active preset's own; while
 the name is one a preset cannot take, the entry is red, the dialog says
-why in place of its line, and Save waits; a Name row turns red the same
-way. With
-16 saved it is grayed out: delete one in Load preset to headset… first.
-`gearbench-ctl headset-eq --save-as "Night"` does the same after its other
-options, and `--save-as` with no name keeps the preset's own name.
+why in place of its line, and Save waits. The window's other name, Hex and
+DPI stage entries turn red the same way while their text would be refused,
+and the text stays for you to fix. Enter in such a row says why, as Save or
+Run does for a macro's name; a dialog says it in its line, and its button
+waits. With
+16 saved it is grayed out and the Equalizer group's line says why, as the
+line over the dialog's Add from Astro Command Center… does: delete one in
+Load preset to headset… first.
+`gearbench-ctl headset-library --save-as "Night"` does the same, and
+`gearbench-ctl headset-eq --save-as "Night"` after its other options;
+`--save-as` with no name keeps the preset's own name.
 
-Load preset to headset…, under Import from Astro Command Center… in
-Equalizer, opens a dialog that
-lists the presets in the library by number and name, each with its five
-gains. With none in it yet,
-the dialog says to use Save as new preset…. Under the list, Load into picks slot
+Load preset to headset… is under Import from Astro Command Center… in
+Equalizer. It opens a dialog that lists the presets in the library by number
+and name, each with its five gains. With none in it yet,
+the dialog says to use Save as new preset…. Above the list, Load into picks slot
 1, 2 or 3, the active one each time the dialog opens. A preset's Load puts
 it in that slot: its name, gains and all five bands. The Equalizer group
 shows them when that slot is the active one; either way they are unsaved
 until Save, as any change is. Load needs the base station attached and
-answering, with no save running; the rest of the dialog works without it.
+answering, with no save running; until then it is grayed out and the line
+under Load into says so. The rest of the dialog works without it,
+but the dialog opens only from the Equalizer group, which shows once the
+window has found the base station and its presets. Until then,
+`gearbench-ctl headset-library` and `gearbench-ctl headset-import --library`
+work on the library.
 
 The menu button beside a preset's Load holds:
 
@@ -3169,12 +3505,13 @@ The menu button beside a preset's Load holds:
   active preset's gains and bands as its rows show them and keeps its name.
   To change how one sounds, load it into the active slot, shape it with the
   Equalizer's sliders, then replace.
-- Delete…, which takes it out once you confirm; those after it move up a
-  number. A slot it was loaded into keeps it.
+- Delete…, which takes it out once you confirm; those after it go a number
+  lower. A slot it was loaded into keeps it.
 
 Add from Astro Command Center…, at the bottom of the dialog, adds an
 `.astroeq` file to the library, read and refused as the Equalizer's
-import reads and refuses one.
+import reads and refuses one. With 16 saved it is grayed out, as Save as
+new preset… is.
 `gearbench-ctl headset-import "Night.astroeq" --library` does the same.
 
 `gearbench-ctl headset-library` lists the library's presets by number, each with
@@ -3182,18 +3519,20 @@ its five bands, and `headset-library 2` shows the second. With a number,
 `--from-slot` takes the active slot's gains and bands, or `--from-slot 3`
 slot 3's, `--gains` and `--band` change them as `headset-eq` takes them,
 `--name` renames the preset, and `--write 1` then writes it to slot 1.
-`--delete`, alone, deletes it. Everything given is checked before anything
-is saved or sent. With `--write`, the change is saved to the library first,
+`--delete`, alone, deletes it. `--save-as`, with no number, saves the
+active slot as a new preset, or with `--from-slot 3` slot 3. Everything
+given is checked before anything is saved or sent. With `--write`, the change is saved to the library first,
 and it stays there if the write to the slot then fails, as with no base
 station found. The library is the file `a50-eq.json` (see [Settings files](#settings-files));
 the daemon never reads it, and `headset-library` asks the daemon only for
-`--from-slot` and `--write`.
+`--from-slot`, `--save-as` and `--write`.
 
 ### Stream mix
 
 Game, Voice, Mic and Aux, 0 to 100%, set the mix the base station sends to
 its stream port: `gearbench-ctl headset-set stream-game 80`, and likewise
-`stream-chat` for Voice, `stream-mic` and `stream-aux`. These have not run on the
+`stream-voice` for Voice (`stream-chat`, its name in Gearbench 1.2.1, too),
+`stream-mic` and `stream-aux`. These have not run on the
 hardware yet.
 
 ### Base station
@@ -3202,7 +3541,7 @@ hardware yet.
 | --- | --- | --- |
 | Default balance | `gearbench-ctl headset-set default-balance 128` | 0, all Voice, to 255, all Game |
 | Alert volume | `gearbench-ctl headset-set alert-volume 50` | 0 to 100% |
-| Auto shut-off | `gearbench-ctl headset-set auto-off 30` | 10, 15, 20, 25 or 30 minutes |
+| Auto shut-off | `gearbench-ctl headset-set auto-shut-off 30`, or `auto-off` | 10, 15, 20, 25 or 30 minutes |
 
 The Default balance slider has ticks at 25, 50 and 75%. Released within 10
 steps (about 4%) of a tick, by the pointer or a finger on a touchscreen, it
@@ -3214,7 +3553,7 @@ saved cannot put it back. For the same reason, Auto shut-off is on the
 unsaved list from the time it is written until a save works, the base
 station is unplugged or the daemon restarts. There is no row for the base
 station's light brightness: the base station stores it, but setting it did
-not change its lights.
+not change its lights (measured 2026-09-27).
 
 ### Saving
 
@@ -3237,8 +3576,9 @@ daemon's read then finds differences.
 
 Save, or `gearbench-ctl headset-save`, writes every setting and preset to
 flash. A slider, frequency or width not sent yet goes first. While the save
-runs, the banner says so with no button, and the rows are grayed out (Load
-preset to headset… still opens, with its Load grayed out). Until it ends,
+runs, the banner says so with no button, and the rows of the base station's
+settings and presets are grayed out (Load preset to headset… still opens,
+with its Load grayed out). Until it ends,
 `gearbench-ctl headset` says it is saving, and any other change is refused.
 
 A save started with Save ends with a toast saying it worked or why not; one
@@ -3256,15 +3596,22 @@ unplug, the list is empty whether or not the save got through.
 Revert to saved…, under the Base station group, asks first, with Cancel the
 default. It then puts every setting and preset that differs back to what
 flash holds, and reads everything again. `gearbench-ctl headset-revert` does
-the same. The row is grayed out while nothing is unsaved.
+the same without asking. The row is grayed out while nothing is unsaved.
 
 Which preset is active stays as it is. A written Auto shut-off stays too,
 since it has no saved value to go back to, and a note says so. A value the
 base station refuses, or one Gearbench refuses before sending it, is named
 in a note unless reading everything again finds it back at its flash value,
-and the rest go back. The tab shows a note as a toast. When something still
+and the rest go back. So is a saved value Gearbench cannot write back
+exactly, such as a band width finer than a tenth or a preset name that is
+not UTF-8, which another program that drives these devices can save: it is
+not sent. The tab shows a note as a toast. When something still
 differs from flash afterward, or a refused value could not be read again,
 `gearbench-ctl headset-revert` names it and exits 1.
+
+A difference too fine to show, such as two widths that both read as 1.7,
+still puts the preset on the unsaved list, and `gearbench-ctl headset`
+prints no saved value beside it.
 
 ### Game and Chat
 
@@ -3280,33 +3627,32 @@ program's output to Astro A50 Chat in its own settings.
 
 With no output chosen before, Game is the default: the rule ranks it above
 Chat. The first time, each output starts at 40% and the microphone at
-100%; WirePlumber keeps each level from then on, and the tab's Game output
-and Chat output rows set it. The profile set keeps
-PipeWire's automatic profiles (`auto-profiles = yes`). With them, beside the
-profile with both outputs, the card has Game, Chat or the microphone alone,
-and Game or Chat with the microphone. The profile with both outputs ranks
-highest, and Sound settings can list the others under a Configuration row
-for the A50. The node names stay PipeWire's own,
+100%; WirePlumber keeps each level from then on, and the tab's Game output,
+Chat output and Mic input rows set them. Beside the profile with both
+outputs, the card has Game, Chat or the microphone alone, and Game or Chat
+with the microphone. The profile with both outputs ranks highest, and Sound
+settings can list the others as the A50's profile (Configuration in GNOME's
+Sound settings, Profile in KDE Plasma's). The node names stay PipeWire's
+own,
 `alsa_output.usb-Astro_Gaming_Astro_A50-00.stereo-game` and `.stereo-chat`,
 so a default output or a program's saved choice still points at the same
 output.
 
 WirePlumber reads the two files only when it starts, and it starts with your
 user manager. Until it restarts, GNOME lists one entry, and while Gearbench
-Spatial plays to the A50, the Spatial sound group shows its Outputs row. To
-restart it, log out of every session and back in (with lingering on, restart
-the machine instead), or run `systemctl --user restart wireplumber`, which
-stops all sound for a moment. `install.sh` restarts a running WirePlumber
+Spatial plays to the A50, the Spatial sound group shows its Headset outputs
+row. To restart it, log out of every session and back in (with lingering on,
+restart the machine instead), or run `systemctl --user restart wireplumber`,
+which stops all sound for a moment. `install.sh` restarts a running WirePlumber
 when one of its audio files is new or changed.
 
 ### The headset's own buttons
 
 - Dolby switches the base station's Dolby processing, Pro Logic IIx and
   Dolby Headphone, on the Game channel: the headphone icon is on, the star
-  off. The button is its only switch. No USB command turns it on or reads
-  it, so the tab has no Dolby switch and Gearbench cannot tell which state
-  it is in. Keep it on the star while a game plays on Gearbench Spatial on
-  the A50.
+  off. No USB command switches it or reads it, so the tab has no Dolby
+  switch and Gearbench cannot tell which state it is in. Keep it on the star
+  while a game plays on Gearbench Spatial on the A50.
 - EQ switches the active preset in the base station. The Preset row
   follows within 5 s, or within 10 s while the window is not the active one.
   `gearbench-ctl headset` asks the base station when it runs, so its
@@ -3356,10 +3702,8 @@ adapter's one output twice, as analog and as digital stereo. Only the analog
 one moves the adapter's own volume, and a switch between the two stops the
 sound and pauses players. With the rule, the adapter has the analog output
 alone, and the microphone. The node names stay the ones PipeWire gave them
-before, such as
-`alsa_output.usb-Logitech_G432_Gaming_Headset_<serial>-00.analog-stereo`,
-where `<serial>` is what the adapter reports. So a saved volume or a
-program's saved choice still points at the same output. WirePlumber reads
+before, so a saved volume or a program's saved choice still points at the
+same output. WirePlumber reads
 the rule when it starts, as with the A50's files (see [Game and Chat](#game-and-chat)).
 
 ![The Headset tab on the G432, picked on its switcher beside the Astro A50 Gen 4: Microphone with Sidetone and Noise suppression, and Equalizer](images/g432.png)
@@ -3372,17 +3716,19 @@ from the top:
 
 - G432. Its Status row says Through its USB adapter, with the adapter's node in
   its tooltip. Its Firmware row gives the version the adapter reported when
-  it was plugged in, such as U1 42.00.B0001, or Not read.
+  it was plugged in, such as U1 42.00.B0001, and is hidden where it gave none.
 - Microphone, with the slider Sidetone: your voice in the earcups, whose row
   gives the level, such as 40%, or Not read; Put back, which names the
-  level it puts back; the Noise suppression switch; Mic input (see [Mic
-  input](#mic-input)); and Input level (see [Input level](#input-level)).
+  level it puts back; the Noise suppression switch and Test the microphone
+  under it (see [Noise suppression](#noise-suppression)); Mic input (see
+  [Mic input](#mic-input)); and Input level (see [Input level](#input-level)).
 - Equalizer, with the Logitech G432 Equalizer switch, Preset, Name, a slider
   each for the bass, the ten bands and the treble, Copy from Astro A50 Gen 4, Save
-  as new preset…, Reset to default… and Delete preset. Copy…, Reset to default…
-  and Delete preset ask first, since none can be undone.
-- Spatial sound, the same group as on the A50 Gen 4's page (see [Spatial
-  sound](#spatial-sound)).
+  as new preset, Reset to default and Delete preset. Copy…, Reset… and Delete…
+  ask first, since none can be undone.
+- Headset for computer sound while it shows, then Outputs and Spatial sound,
+  the groups every headset's page ends with (see [Outputs](#outputs) and
+  [Spatial sound](#spatial-sound)).
 
 The Sidetone and equalizer sliders send a change once you stop moving them.
 
@@ -3390,34 +3736,17 @@ The sidetone is your voice in the earcups: how loud the microphone is in
 them, from 0 to 100. `gearbench-ctl g432-sidetone` shows the firmware
 version and reads the level from the headset, and
 `gearbench-ctl g432-sidetone 20` sets it. If you hear nothing, open the
-microphone in a program, such as the input level meter in GNOME's Sound
-settings, and listen again. The headset keeps its level through an unplug.
+microphone in a program and listen again: the Input level row on the G432's
+page opens it while the page shows. The headset keeps its level through an unplug.
 The daemon reads the level each time the adapter is plugged in, and keeps
 the first level it read since it started, through an unplug too.
 `gearbench-ctl g432-sidetone put-back` (`reset`, its name in Gearbench
 1.1.0, too) puts that level back, or 0 when no read found one before the
 first write.
 
-Noise suppression, in the Microphone group, makes Logitech G432 Microphone,
-a cleaned-up input from the G432's microphone. Pick it as the input in a
-game or chat app, or in GNOME's Sound settings. It is meant for steady
-background noise, such as a fan or a hum. In a test without a headset,
-steady white noise came through about 18 dB lower (measured 2026-10-18). The
-G432's own microphone stays as it is, so a program that records that one
-hears it unchanged. It is off until you switch it on, and Gearbench never
-makes it the default input.
-
-Noise suppression is PipeWire's own echo-cancel module with its webrtc
-plugin, so nothing is installed for it. Its automatic gain stays off, so
-your voice keeps the level you set. Its echo canceler also runs, on the
-sound of the default output. `gearbench-ctl g432-noise on` and `off` do the
-same, and `gearbench-ctl g432-noise` says whether it runs and what it
-cleans. Switching it on writes its PipeWire configuration to
-`$XDG_RUNTIME_DIR/gearbench-g432-mic.conf` and starts it as
-`gearbench-g432-mic.service`, which runs until you switch it off, log out or
-PipeWire stops. It refuses while the G432 is not plugged in, or while its
-Configuration in GNOME's Sound settings has no microphone. It has been heard
-on a G432, not yet in a call.
+Noise suppression, in the Microphone group, makes G432 Microphone (Noise
+Filter), a cleaned-up input from the G432's microphone (see [Noise
+suppression](#noise-suppression)).
 
 While the daemon drives it, Gearbench asks the adapter which features it has
 and reads its firmware version when it is plugged in, and otherwise only
@@ -3426,30 +3755,33 @@ reads and writes the sidetone. When the daemon is not running,
 Only Gearbench should talk to the adapter: another program that drives
 these devices sees Gearbench's replies and mixes its own in.
 
-The equalizer is not in the headset: it is a separate output, Logitech G432
-Equalizer, that plays to the G432 and to no other output. It is off until
-you switch it on. Switching it on makes it the default output while the
-G432's own output is the default, and in two cases below. Otherwise, pick it
-in GNOME's Sound settings or in a program's own output setting. It has ten
-bands an octave apart, from 32 Hz to 16 kHz, and a bass shelf at 100 Hz and
-a treble shelf at 8 kHz, each
+The equalizer is a separate output, Logitech G432 Equalizer, not part of the
+headset; it plays to the G432 and to no other output. It is off until you
+switch it on. Switching it on makes it the default output while the G432's
+own output is the default, and in two cases below. Otherwise, pick it in the
+desktop's sound settings or in a program's own output setting, unless
+Outputs plays to the G432. Then Gearbench Game, Chat and Media already play
+through the equalizer, and picking it takes the programs that follow the
+default output off Gearbench Game. It has ten bands an octave apart, from 32 Hz to 16 kHz,
+and a bass shelf at 100 Hz and a treble shelf at 8 kHz, each
 from -12 to +12 dB. A boost raises its band on top of the volume and leaves
 the rest of the sound as it was, so near full volume a boosted band can
 clip. If a loud passage crackles, lower the volume or the boost.
 
 The equalizer plays one of its presets, each a name and its gains. A change
 in the tab goes to the one playing: pick it in Preset and rename it in Name.
-Save as new preset… asks for a name, the playing one's to start, as on the
-A50 Gen 4's page, then keeps the one playing, as it sounds now, as a new
+Save as new preset's Save… asks for a name, the playing one's to start, as on
+the A50 Gen 4's page, then keeps the one playing, as it sounds now, as a new
 preset under that name, and plays it. There can be 16 presets in all, and
-with 16 the row is grayed out. The G432
+with 16 the row is grayed out and says so. The G432
 has presets of its own, apart from the A50's. Three are shipped, and Reset
 to default puts back a shipped preset's own name and gains. A preset saved
-as new has no default. Delete preset takes it out once you confirm, and the
+as new has no default, and its Reset to default row is grayed out and says
+so. Delete preset takes it out once you confirm, and the
 preset before it plays in its place, as `gearbench-ctl g432-eq --delete`
 does. A shipped one is never deleted.
 
-The shipped three are the A50's three, made for the G432 from published
+The shipped three are the Astro A50 Gen 4's three, made for the G432 from published
 measurements of it. They aim at the Harman over-ear target, the response
 most listeners prefer in Harman's studies. On a G432 the gains as designed
 sounded too subtle, so each preset ships at 2.5 times them. Everyday adds
@@ -3466,7 +3798,8 @@ unmuted. So the equalizer's volume and mute set how loud it is. Switching
 the equalizer on sets its volume to sound as loud as the G432's own output
 did, and mutes it if the G432 was muted. Switching it off sets the G432's
 own volume to sound as loud as the equalizer did, and mutes the G432 if the
-equalizer was muted. The two show
+equalizer was muted. After a switch-on that skips the hold, in the cases below,
+a switch-off leaves the G432's volume and mute as they are. The two show
 different numbers for the same loudness, since the equalizer's 100% is the
 G432's 0 dB. The G432 at 40% is the equalizer at about 48%. With the G432
 above 83%, the equalizer starts at 100%, a little quieter than the G432
@@ -3484,20 +3817,22 @@ unplugged and plugged back while the equalizer is on is held at 0 dB again
 within a few seconds of its return. With the equalizer off, a replug
 changes nothing.
 
-If the hold or the put-back fails, the window or `gearbench-ctl g432-eq`
-says so, and the equalizer still switches. If the equalizer's volume cannot
+If the hold fails at a switch-on, or setting the G432's own volume fails at a
+switch-off, the window or `gearbench-ctl g432-eq` says so, and the equalizer
+still switches. If the equalizer's volume cannot
 be set at a switch-on, it says so too, and the G432's own output is not
 held, so both volumes apply. If the equalizer cannot be made the default at
 a switch-on while the G432's own output is the default, it says so, and the
 G432 is not held either. What plays there stays at the G432's own volume.
-Switch the equalizer off and on to try again. After either, the switch-on
-does not wait for Gearbench Spatial or for what plays straight to the G432,
-and says nothing of them.
+Switch the equalizer off and on to try again.
 
 While the equalizer is on, Gearbench Spatial on the G432 plays through it
-(see [Spatial sound](#spatial-sound)), and after a switch-off straight to the G432 again. A
-switch-on waits up to 2 s, before the hold, for Gearbench Spatial to move to
-the equalizer. If it has not moved by then, or Gearbench could not read
+(see [Spatial sound](#spatial-sound)), and after a switch-off straight to the G432 again.
+While Outputs is on, it plays into Gearbench Game, which plays through the
+equalizer while that is on, and stays there through either switch, so a
+switch-on does not wait for it to move. With Outputs
+off, a switch-on waits up to 2 s, before the hold, for Gearbench Spatial to move
+to the equalizer. If it has not moved by then, or Gearbench could not read
 where it plays, the switch-on says so and does not hold the G432, so
 spatial sound is no louder. Switch the equalizer off and on to try again.
 
@@ -3505,35 +3840,38 @@ Switching the equalizer on while the G432's own output is the default makes
 the equalizer the default, and says so. What plays on the G432 and follows
 the default output then moves to the equalizer, as loud as before.
 Switching it off while it is the default output makes the G432's own output
-the default first, and says so. What plays on the equalizer then moves to
-the G432 before the equalizer goes.
-Switching it on again while the G432's own output is still the default makes
-the equalizer the default again. With another output the default, such as
-one you picked after the switch-off, a switch-on leaves your pick as it is.
+the default first, and says so. What plays on the equalizer and follows the
+default output then moves to the G432 before the equalizer goes.
+With another output the default, such as one you picked after the
+switch-off, a switch-on leaves your pick as it is.
 Only after a switch-off as the default with the G432 unplugged, or on a
-Configuration with no output, does the next switch-on make the equalizer the
-default again whatever the default is, and say so.
+profile with no output (Configuration in GNOME's Sound settings, Profile in
+KDE Plasma's), does the next switch-on make the equalizer the
+default again whatever the default is, and say so. The exception is
+Gearbench Game as the default: the switch-on then picks nothing, since Outputs
+plays Game through the equalizer when it plays to the G432.
 
 ```
 gearbench-ctl g432-eq on                      switch it on; the G432 must be plugged in
 gearbench-ctl g432-eq --pick 2                play preset 2, Gaming; --select, its 1.1.0 name, too
-gearbench-ctl g432-eq --band 1000:4 --bass 3  change the playing preset's gains, on or off
+gearbench-ctl g432-eq --gain 1000:4 --bass 3  change the playing preset's gains, on or off; --band, its 1.2.1 name, too
 gearbench-ctl g432-eq --preset 1 --name Mine  rename preset 1; --preset names the preset changed
 gearbench-ctl g432-eq --reset                 a shipped preset back to its default name and gains
 gearbench-ctl g432-eq --save-as Night         the playing preset kept as a new one, 4, which plays
 gearbench-ctl g432-eq --preset 4 --delete     preset 4, saved as new, deleted; alone, the playing one
 gearbench-ctl g432-eq --flat                  every gain of the preset back to 0 dB
 gearbench-ctl g432-eq off                     switch it off, which removes the output
-gearbench-ctl g432-noise on                   noise suppression on: Logitech G432 Microphone
+gearbench-ctl headset-noise on                noise suppression on: G432 Microphone (Noise Filter)
+gearbench-ctl headset-noise test              count 3, record 5 s of it, then play them back
 ```
 
 Copy from Astro A50 Gen 4 loads one of the presets in the A50's base station into
-the playing preset, once the daemon has read them (see [Saving](#saving)) and while
-it is plugged in. Pick it in the row's list, then Copy…, and once you confirm
+the playing preset, once the daemon has read them (see [The headset](#the-headset)) and
+while the base station is plugged in. Pick it in the row's list, then Copy…, and once you confirm
 the playing preset takes its name, and its sound as the A50 makes it,
 fitted onto the G432's ten bands with the bass and treble at 0. With none
 to list, the row
-says why. For the A50's own presets the fit is 0.5 to 0.8 dB from the A50's
+says why. For the A50's own presets the fit is 0.4 to 0.5 dB from the A50's
 curve on average. Those presets were made to correct the A50's own
 sound, though, so on the G432 the same preset sounds different.
 
@@ -3545,8 +3883,8 @@ it or move it away. The Equalizer group says why, and
 
 Switching the equalizer on writes its PipeWire configuration to
 `$XDG_RUNTIME_DIR/gearbench-g432-eq.conf` and starts it as
-`gearbench-g432-eq.service`, which runs until you switch it off, log out or
-PipeWire stops. After a login or a PipeWire restart it is off, and the G432
+`gearbench-g432-eq.service`, which runs until you switch it off, your last
+session ends or PipeWire stops. After a login or a PipeWire restart it is off, and the G432
 is back at its own volume. Beside it,
 `gearbench-g432-eq-watch.service` watches PipeWire for the G432's return and
 stops with it. If it cannot start, the switch-on says so, and switching the
@@ -3556,10 +3894,11 @@ once the G432 is back.
 
 ### Other Logitech G headsets
 
-Ten more headsets are the G432's relatives, and Gearbench drives each the
-way it drives the G432's sidetone: the G431 and G433 on their USB adapters,
+Ten more headsets are in the G432's family, and Gearbench drives each as it
+drives the G432: the G431 and G433 on their USB adapters,
 the G633 and G635 on their cables, and the G533, G535, G733, G933, G935
-and PRO X Wireless through their receivers. The G933s and the G633s use
+and PRO X Wireless through their receivers. It drives one of them or the
+G432 at a time. The G933s and the G633s use
 the G935's and the G635's ids and attach as those. Only the G933 has been
 tested on one. They were built from G HUB's description of each, Logitech's own
 battery curves from G HUB's files, published listings of what some of them
@@ -3567,13 +3906,22 @@ report, and another program's drivers for them. For each one's ids, see
 [The models and their ids](#the-models-and-their-ids).
 
 The Headset tab shows the page of whichever of them is plugged in, as it
-shows the G432's, titled with its name, and the switcher at the top names
-it beside the Astro A50 Gen 4. One of them is driven at a time: with two plugged
-in, Gearbench takes the first it finds. The page has the G432's Microphone
+shows the G432's, titled with its name, and while a headset the tab shows
+on another page is plugged in too, such as the Astro A50 Gen 4, the
+switcher at the top names each. With two of the family plugged in, the G432
+among them or not, Gearbench drives the one it found first. A line names
+the other and how to switch, such as
+`G933 not driven; unplug the G432's USB adapter to use it`,
+on the Headset tab's banner, in the tray's menu and under problems
+in `gearbench-ctl status`. Once the one driven is unplugged, Gearbench
+drives the other within a few seconds. Switching a wireless one off is not
+enough: its receiver stays plugged in. `gearbench-ctl g432-eq` and
+`headset-noise` act on the one driven too. The page has the G432's Microphone
 group, and on a model with no equalizer of its own the
-G432's Equalizer group, each under the model's name. Its status group has
-two more rows on the wireless ones, Battery under the status row and Auto
-shut-off last:
+G432's Equalizer group. Its status group has
+three more rows on a headset that reports a battery, such as the G933:
+Battery under the status row, Battery notices above the Firmware row (see
+[Low battery](#low-battery)), and Auto shut-off last:
 
 - Battery, the percentage from the headset's own battery curve with its
   state after a comma when it is not on battery, such as 62% or 62%,
@@ -3582,12 +3930,13 @@ shut-off last:
   switched off with its receiver plugged in, the row keeps the last
   reading with the time it was read. The Status row then turns amber and
   says the headset is asleep or switched off, and to switch it on or bring
-  it near its receiver, and the headset's own rows are grayed out. While a
-  headset charges past
+  it near its receiver, and the headset's own rows are grayed out. The
+  Lighting group's follow switch still turns on and off, as the Mouse
+  tab's does, since Gearbench keeps it. While a headset charges past
   the point where its curve no longer tells the charge, the row says
   charging, nearly full, with no percentage. The second G733 (046d:0afe)
-  gives no percentage while it charges at all: its curve stays at one
-  voltage from 7% to full.
+  gives no percentage while it charges at all: its charging curve moves
+  only 10 mV from 7% to full.
 - Auto shut-off, how long the headset waits with no sound before it
   switches itself off: Never, 5, 15, 30 or 60 minutes. The G933 and the
   G733 report it; on a model that does not, the row is grayed out on Not
@@ -3615,10 +3964,13 @@ every band at 0 dB, and, while the bands match none of these, Custom, which
 only names them and cannot be picked. Picking a preset sends its gains to the
 headset, and Gearbench sends it again each time the headset connects, so it
 comes back after the headset powers off; Flat stops that.
-Under the bands, Save as new preset… asks for a name and saves the gains the
-headset plays as a preset of your own, and while a preset of the library
-plays, the three it starts with included, Name renames it and Delete preset
-deletes it. Each model's library starts with
+Under Preset, while a preset of the library plays, the three it starts with
+included, Name renames it. Under the bands, Save as new preset… asks for a
+name and saves the gains the sliders show as a preset of your own, unless
+a preset of the library has them already. While a preset of the library
+plays, Save as new preset… is grayed out, its tooltip naming that preset,
+and Delete preset deletes it. Each model's
+library starts with
 Media, Gaming and Everyday, made to sound like the A50 X's (see [The Astro
 A50 X and A50 Gen 5](#the-astro-a50-x-and-a50-gen-5)) from published measurements of the model: the G933's
 take its bass and its 3 to 4 kHz down, where it has more than the A50 X, and
@@ -3627,13 +3979,14 @@ of a G633 is published, and it is the G933's wired twin with the same
 driver, so how close they come on a G633 is not known.
 
 On a
-headset that reports the first version of its equalizer, as one published
-G935 does, the sliders are grayed out and the group says changes wait for a
+headset that reports the first version of its equalizer, as the G935 in
+one published listing does, the sliders are grayed out and the group says changes wait for a
 test on this model, since that version may keep what it is sent. `gearbench-ctl g432-headset-eq` shows the bands,
 the gains the headset plays and the preset picked, `--gains` sets one gain a
 band, low to high, and `--flat` sets every band to 0 dB and stops sending a
 preset again. `gearbench-ctl g432-headset-presets` lists the library, saves the
-gains the headset plays with `--save-as NAME`, and with a number renames
+gains the headset plays with `--save-as NAME` (refused when a preset has them
+already), and with a number renames
 (`--name`), deletes (`--delete`) or picks (`--pick`) a preset.
 
 The G431, G433, G533, G535, G635, G733 and PRO X Wireless have no equalizer
@@ -3642,14 +3995,17 @@ Logitech G432](#the-logitech-g432)): a separate output under the model's name, s
 G733 Equalizer, with the same bands, presets and switch, its presets kept in
 a file of its own, `~/.config/gearbench/g733-eq.json` on the G733. Its three
 shipped presets are the G432's, made from measurements of the G432, so on
-another model they sound different. Each of the G432's relatives, the G933,
-G935 and G633 included, gets the G432's noise suppression in the same way:
-Logitech G733 Microphone on the G733. Both find the headset by its USB ids.
-Neither has been tested on any of these models.
+another model they sound different. Each other headset of the G432's family, the G933,
+G935 and G633 included, gets noise suppression in the same way (see [Noise
+suppression](#noise-suppression)): G733 Microphone (Noise Filter) on the
+G733.
+Both find the headset by its USB ids. The noise suppression has been heard
+on the G933 (2026-10-28); the equalizer on the computer has not been tested
+on any of the seven models without one of their own.
 
-`gearbench-ctl g432-eq` and `gearbench-ctl g432-noise` act on whichever of
-the G432 and its relatives is plugged in, found as the daemon finds it, or
-on the G432 with none. `--headset` picks one by its key, as `headset-spatial` does. On
+`gearbench-ctl g432-eq` acts on the headset of the G432's family the
+daemon drives, with two plugged in too, or the one it would drive, or on
+the G432 with none. `--headset` picks one by its key, as `headset-spatial` does. On
 a G933, G935 or G633, `g432-eq` refuses and names `g432-headset-eq`; on
 any other model, `g432-headset-eq` and `g432-headset-presets` refuse and name
 `g432-eq`.
@@ -3660,25 +4016,32 @@ headset lists, such as Static, Breathe, Cycle or Off, and a Color, both
 for every zone of the headset, and Show its own lighting. An effect or a color goes to the headset as you
 pick it, and it shows until the headset powers off or you pick Show its own
 lighting, which gives the lighting back to the headset, as Gearbench does
-when it stops. On a model tested on one, the group says under its title
-which of the two the headset shows, as the Mouse tab's does. Gearbench
-corrects each color for the headset's lights, so a dark red or an orange
-looks as it does on a keyboard. Save as its own lighting… asks first, then keeps the
-effect and color shown in the headset, which then shows them without
-Gearbench, after a power-off too; it works while Gearbench shows the
-lighting. On a headset
+when it stops. Cycle and Off take no color, and the picker is grayed out
+under them, as on the Keyboard tab. On a model tested on one, the group says under its title
+whether the headset shows its own lighting or the lighting Gearbench sends,
+as the Mouse tab's does. Gearbench
+corrects each color it shows on the headset's lights, so a dark red or an orange
+looks as it does on a keyboard. Save as its own lighting… works while Gearbench shows
+the lighting. It asks first, then keeps the effect and color shown in the
+headset, at full brightness whatever a G key set; the headset then shows
+them without Gearbench, after a power-off too. On a headset
 whose lights have a startup effect, the G933's among them, Startup effect
-turns it on or off: the lights play it as the headset switches on. The
+turns it on or off: the lights play it as the headset switches on. Where
+Gearbench could not read the setting, the row is grayed out and says Not
+read until a later read works; the other lighting rows still work. The
 headset keeps both, so on a model not yet tested on one both rows are
 grayed out: Startup effect says it waits for a test on this model, and the
-group says so of Save as its own lighting. On a headset whose lights do not
-take Gearbench's control, every row but Follow the keyboard is grayed out
-and the group says changes wait for a test on this model, since the headset
-may keep an effect it is sent.
+group says so of Save as its own lighting. Once the first effect or color
+Gearbench sends finds that a headset's lights do not take its control,
+every row but Follow the keyboard is grayed out until the headset is
+plugged in again, and the group says changes wait for a test on this
+model, since the headset may keep an effect it is sent.
 `gearbench-ctl g432-lights`
 shows the zones and the effects, `gearbench-ctl g432-lights breathe --color
-"#00ff00"` sends one, and without `--color` it keeps the color shown.
-`--color` alone recolors the effect shown, `--release` gives them back,
+"#00ff00"` sends one, and without `--color` it takes the color Gearbench
+last showed on that model since the daemon started, #0080ff before any. `--color`
+alone recolors the effect Gearbench last showed since then, static before any,
+`--release` gives them back,
 `--store` keeps the one shown in the headset, and `--startup on` or `off`
 sets the startup effect.
 
@@ -3688,25 +4051,29 @@ keyboard that leads, as a mouse's lighting does (see [Lighting and following
 the keyboard](#lighting-and-following-the-keyboard)).
 Every zone shows the keyboard's color, the background under Per-key, at
 the keyboard's brightness and live as you drag, dims with the keyboard's
-idle dimming and goes off with the screen lock. While a game profile with a
-mouse color is loaded, the lights show that color. Meanwhile Effect, Color,
-Show its own lighting and Save as its own lighting… are grayed out, the Color
-picker shows the keyboard's color, `g432-lights` refuses an effect,
+idle dimming and, with Lights off when locked on, goes off with the screen lock. While a game profile with a
+mouse color is loaded, the lights show that color. While the lights follow
+the keyboard, Effect, Color, Show its own lighting and Save as its own
+lighting… are grayed out, the Color picker shows the color the lights take,
+`g432-lights` refuses an effect or `--color`,
 `--release` and `--store`, and a G key's lighting step steps the keyboard's
 brightness instead (below); Startup effect still works. A headset switched off takes the color when it is back.
 When the machine shuts down, the lights go dark with the keyboard and stay
 dark. `headset-sync off` gives the lights back what Gearbench showed on them
 before, or the headset's own lighting. The setting is `headset_sync_color`
-in `config.json`, one for every headset and every profile. A headset whose
-lights Gearbench does not drive, such as the G432, is left as it is, and
-`headset-sync on` names it.
+in `config.json`, one for every headset and every profile. A headset of the
+G432's family whose lights Gearbench does not drive, such as the G432, is
+left as it is, and `headset-sync on` names it, as it does lights none of
+whose zones has a static effect, which are sent nothing; a headset of
+another family, such as the Astro A50 X, is left as it is and not named.
 
 On a G933, G935, G633 or G635, the page has a G keys group, a row for each of
 G1, G2 and G3 on the left earcup, as the Mouse tab has for its buttons. A key
 can do nothing, step the lighting's brightness, turn the lighting off or on,
 play the next preset of the equalizer's library, turn sidetone off or back on
-at its level, or press a keystroke or run a macro, picked in the same dialog
-as a keyboard's G key. Each binding goes in the profile the Editing row
+at its level, hold G-Shift, move the balance of [Outputs](#outputs) as a
+mouse button can, or press a keystroke or run a macro, picked in the same
+dialog as a keyboard's G key. Each binding goes in the profile the Editing row
 names, the M profile or the game profile loaded, as the keyboard's do, under
 the model's name: G933-G1 to G933-G3 on a G933, G635-G1 to G635-G3 on a G635.
 A binding that clears or takes the place of another has Undo on its message,
@@ -3715,8 +4082,9 @@ Unbound, G1 steps the lighting down, as it does under G HUB on a G933: 50%,
 25%, 12%, off, then full again; G2 and G3 do nothing. The next
 preset does nothing on a G635, whose equalizer runs on the computer. While
 the headset shows its own lighting, a key that steps the brightness takes it
-and shows the effect Gearbench last showed, or Static in blue, #0080ff, at
-50%, and a key that turns the lighting off or on takes it and turns it off.
+and shows the effect Gearbench last showed since the daemon started, or Static in
+blue, #0080ff, at 50%, and a key that turns the lighting off or on takes it and turns it off.
+The Effect row then says the lights were turned off or dimmed, and to what level.
 While the lights follow
 the keyboard, a step sets the keyboard's brightness in their place, as
 `gearbench-ctl brightness` does, and the lights follow it: G1 steps it down
@@ -3725,6 +4093,21 @@ keyboard's off, or back on at full. `gearbench-ctl
 g432-lights` says what a step left showing, such as `breathe, #00ffff, at
 50%` or `off`, `gearbench-ctl g432-sidetone` lists what each key does, and
 `gearbench-ctl bind G933-G2 sidetone-toggle` binds one.
+
+The keys take a binding on the G-Shift layer too, which they send while MR, a G
+key or a mouse button holds the shift (see [G keys and
+G-Shift](#g-keys-and-g-shift)): `gearbench-ctl bind G933-G2 f15 --g-shift`. A
+key with no G-Shift binding does what it does on Base; `gearbench-ctl bind
+G933-G2 clear --g-shift` clears its G-Shift binding, and `gearbench-ctl bind G933-G2 none
+--g-shift` makes it do nothing while shifted. Bound to `g-shift`, a key holds the
+shift itself, for every keyboard, every mouse and a headset's G keys, and lights
+each MR LED; bound
+to `balance-chat` or `balance-game`, it moves the balance between voice chat
+and the game (see [Outputs](#outputs)). A
+headset switched off or out of reach lets go of what its keys hold, the
+shift included. The G keys group has a Layer row as the Mouse tab's Buttons
+group does, for the G-Shift bindings; on G-Shift each list starts with Same as
+Base and has no G-Shift (hold), as a button's does.
 
 ![The Headset tab on the G933, picked on its switcher beside the Astro A50 Gen 4: the equalizer in the headset playing its Gaming preset, Lighting and G keys](images/g933.png)
 
@@ -3742,7 +4125,7 @@ gearbench-ctl g432-headset-eq --flat                        every band at 0 dB, 
 gearbench-ctl g432-headset-presets 1 --pick                 library preset 1, sent again each time it connects
 gearbench-ctl g432-eq on                                    the equalizer of the one plugged in
 gearbench-ctl g432-eq --headset g733 --pick 2               the G733's, preset 2
-gearbench-ctl g432-noise --headset g933 on                  the G933's noise suppression on
+gearbench-ctl headset-noise --headset g933 on               the G933's noise suppression on
 ```
 
 The battery is read when the headset is plugged in, every minute after,
@@ -3755,7 +4138,7 @@ equalizer first, the preset picked waits until the headset next answers
 after showing as asleep, or the computer resumes. Its low-battery
 notices and the tray's battery line work as the A50's do (see [Battery and
 DPI notices](#battery-and-dpi-notices)), except that each notice says to plug in its USB cable to
-charge it.
+charge it, and a reading of 50% or more arms them again only at the second in a row.
 `gearbench-ctl g432-sidetone` reads and sets the sidetone of any of them, as
 for the G432 (see [The Logitech G432](#the-logitech-g432)), and reads the battery of one that
 has one.
@@ -3785,8 +4168,8 @@ each of them on its own output, as on the G432 (see [Spatial sound](#spatial-sou
 
 Gearbench reads the Astro A50 X (`046d:0b0b`) and the Astro A50 Gen 5
 (`046d:0b1c`) through their base station on USB. It changes the A50 X's
-settings, since the A50 X was tested on one on 2026-10-22, each of its
-changes too. Until the A50 Gen 5 has been tested on one, Gearbench changes
+settings, its two equalizers and its stream mix, each tested on one on
+2026-10-22. Until the A50 Gen 5 has been tested on one, Gearbench changes
 nothing on it: the tab shows what the headset holds with its controls off,
 and `gearbench-ctl audio-set`, `audio-mix`, `audio-presets --pick` and
 `audio-eq` with gains or a preset refuse with nothing sent; `audio-eq` with
@@ -3806,21 +4189,23 @@ Switched off under its name and its button grayed out, as on the Mouse
 tab's switcher; it comes back when the headset answers. The page, from the top:
 
 - Astro A50 X, or Astro A50 Gen 5. Its Status row says Through its base
-  station, with the base station's node in its tooltip. Then Battery; on the A50 Gen 5, Not
-  yet tested on this model, with its Device report button; Read only,
-  while Gearbench changes nothing on it; and Balance, the mix of Game and
+  station, with the base station's node in its tooltip and description. Then Battery; on the A50 Gen 5, Not
+    yet tested on this model, with its Device report button; Read only,
+  while Gearbench changes nothing on it; Battery notices (see [Low
+  battery](#low-battery)); and Balance, the mix of Game and
   Voice that the headset's balance dial sets. On the A50 X, Game output and
   Chat output follow, the volume GNOME's Sound settings give A50 X Game and
   A50 X Chat, as on the A50 Gen 4's page (see [Status and battery](#status-and-battery)).
 - Microphone: Boom, Live with the microphone's boom down or Muted with it
   up; Sidetone: your voice in the earcups, from 0 to 6; Noise gate, Off,
   Night, Home or Tournament, each entry with a tooltip that says what it is
-  for, as on the A50 Gen 4; Mic input (see [Mic input](#mic-input)); and Input level
-  (see [Input level](#input-level)).
+  for, as on the A50 Gen 4; Noise suppression and Test the microphone under
+  it (see [Noise suppression](#noise-suppression)); Mic input (see [Mic
+  input](#mic-input)); and Input level (see [Input level](#input-level)).
 - Equalizer: Microphone and Headphones, the headset's two equalizers, each
   with its Preset and its ten bands, from -6 to +6 dB. On the A50 X, the
   microphone's presets are Default, Competition and Broadcast and the
-  headphones' Default, Gaming and Media, the three G HUB offers, which the
+  headphones' Default, Gaming and Media, G HUB's three for each, which the
   headset holds, listed under Headset by name. The A50 Gen 5's are not
   read, so its Preset row has no Headset list and shows once your library
   holds a preset for that equalizer. Under Library come the presets of
@@ -3828,30 +4213,37 @@ tab's switcher; it comes back when the headset answers. The page, from the top:
   Gaming and your library's
   Gaming are told apart by where they are listed, and last Custom, any
   other setting of the bands. Picking one copies its bands
-  into the equalizer. Under the bands, Save as new preset… asks for a name
-  and saves the bands the equalizer plays as a preset of your own, and
-  while a preset of the library plays, Name renames it and Delete preset
-  deletes it.
-- Stream mix: what the base station's stream port sends (Stream Out in
-  GNOME's Sound settings), for streaming software to record: Stream port,
-  its own level, then Game, Voice, Mic and
-  Bluetooth, each from 0 to 32, G HUB's 0 to 100%, with a button that
-  mutes it.
-- Settings: Volume, the headset's own, from 0 to 21; Auto sleep, how long
-  the headset waits idle before it sleeps: Never, 15, 30 or 60 minutes; on
-  the A50 X, Deep sleep, which puts the base station to sleep after 15
-  minutes idle; Brightness, the base station's light, from 0 to 100%; Tones,
-  the sounds the headset plays, None, All or Minimal; and Put back…, which
-  asks first, then writes back every setting, the balance and Microphone's
-  too, as Gearbench first read it. The stream mix and the equalizers are
-  not put back.
-- Spatial sound, the same group as on the A50 Gen 4's page (see [Spatial
+  into the equalizer. Under Preset, while a preset of the library plays,
+  Name renames it. Under the bands, Save as new preset… asks for a name
+  and saves the bands the sliders show as a preset of your own, unless
+  a preset of the library has them already. While a preset of the library
+  plays, Save as new preset… is grayed out, its tooltip naming that
+  preset, and Delete preset deletes it.
+- Stream mix: what the base station's stream port sends (the Stream Out
+  input in the desktop's sound settings), for streaming software to record:
+  Stream port level, then Game, Voice, Mic and Bluetooth, each from 0 to
+  32, G HUB's 0 to 100%; each source has a button that mutes it.
+- Settings:
+  - Headset volume, from 0 to 21
+  - Auto sleep, how long the headset waits idle before it sleeps: Never, 15,
+    30 or 60 minutes
+  - Deep sleep (on the A50 X), which puts the base station to sleep after 15
+    minutes idle
+  - Base station brightness, of its light, from 0 to 100%
+  - Tones, the sounds the headset plays: None, All or Minimal
+  - Put back…, which asks first, then writes back every setting, the
+    balance and Microphone's too, as Gearbench first read it. The stream mix
+    and the equalizers are not put back.
+- Headset for computer sound, while more than one headset is plugged in or
+  once you have picked one, then Outputs and Spatial sound: the same groups
+  as on the A50 Gen 4's page (see [Outputs](#outputs) and [Spatial
   sound](#spatial-sound)).
 
 ![The Headset tab on the Astro A50 X, picked on its switcher beside the Astro A50 Gen 4: its group with Balance and the Game and Chat outputs, Microphone, its two equalizers, Stream mix and Settings](images/a50x.png)
 
 A row says Not read where the headset gave no value, and its control stays
-off. The ranges are those G HUB gives the A50 X.
+off; Balance and Boom are hidden instead. The ranges are those G HUB gives
+the A50 X.
 
 Tones set which turns of the headset's controls play a tone. All plays one
 at each end of the volume wheel, and at each end and the middle of the
@@ -3859,18 +4251,18 @@ balance dial; Minimal plays the balance dial's alone; None plays none, as
 the A50 X's test heard them. One click of the balance dial can move the
 balance by two.
 
-The equalizers are the headset's own. On the A50 X, and on the A50 Gen 5
-once its test lets its writes through, a band moved in the tab goes to the
-headset, the other bands as they were, with no cut anywhere else, so a
+The equalizers are the headset's own. On the A50 X, a band moved in the tab
+goes to the headset; on the A50 Gen 5 it does once its test lets its writes
+through. The other bands stay as they were, with no cut anywhere else, so a
 boost raises its band on top of the volume.
 
 A slider follows a drag live: its number, and the headset, up to five times
 a second, about as fast as the headset's own volume wheel changes it, and
-the value where you let go is always sent. A slider moved with the arrow
-keys sends once the keys stop.
+the value where you let go is sent, unless it is the value last sent or last
+read from the headset. A slider moved with the arrow keys sends once the keys stop.
 
 Each model's library of presets is kept on this computer, up to 16, in a
-file of its own, apart from every other model's: `a50x-eq.json` for the A50
+file of its own: `a50x-eq.json` for the A50
 X, `a50gen5-eq.json` for the A50 Gen 5 (see [Settings files](#settings-files)). The tab and
 `gearbench-ctl audio-presets` show the library of the model plugged in.
 Picking a preset of the library writes its bands into the equalizer the
@@ -3882,8 +4274,8 @@ Media, Gaming and Everyday, tuned by ear on an A50 X. Everyday adds a
 little deep bass, takes a narrow dip at 1.15 kHz and lifts the range near
 3.9 kHz. Gaming keeps the dip and the lift, takes the bass down and lifts
 2.6 kHz too, where footsteps are heard. Media is Everyday with more bass,
-from 40 to 90 Hz, and a little air at 16 kHz. They are yours to rename,
-change or delete, as any you save; one you delete does not come back. The
+from 40 to 90 Hz, and a little air at 16 kHz. They are yours to rename or
+delete, as any you save; one you delete does not come back. The
 A50 Gen 5's library starts with its own Media, Gaming and Everyday, made to
 sound like the A50 X's: on one published rig that measured both, the A50
 Gen 5 has less deep bass and a little more at 1.15 kHz, so its three lift
@@ -3894,15 +4286,16 @@ The daemon reads the headset when its base station is plugged in, and after
 a resume. After that the headset says what changes: its battery, its volume
 wheel, its balance dial, its noise gate and its microphone's boom.
 `gearbench-ctl audio --read`
-reads everything again. The base station answers for the headset while the
-headset is switched off, so the tab shows the headset's settings then too.
+reads everything again. The A50 X's base station answers for the headset
+while the headset is switched off, so the tab shows the headset's settings
+then too; whether the A50 Gen 5's does is not yet checked.
 Gearbench reads no firmware version from it yet.
 
 ```
 gearbench-ctl audio                  the battery, settings and equalizers as last read
 gearbench-ctl audio --read           everything read from the headset again
 gearbench-ctl audio-set volume 12    the volume; put-back puts back the first reads; refused on the Gen 5
-gearbench-ctl audio-eq headphones    the headphones' ten bands; with ten gains, set
+gearbench-ctl audio-eq headphones    the headphones' ten bands; --gains 0,2,0,... sets their ten gains
 gearbench-ctl audio-eq headphones --pick gaming    the Gaming preset copied in
 gearbench-ctl audio-mix game 24      the stream mix's Game at 24 of 32; --mute or --unmute a source
 gearbench-ctl audio-presets          your preset library; --save-as NAME saves the headphones' bands
@@ -3948,22 +4341,28 @@ Its page is the A50 X's (see [The Astro A50 X and A50 Gen 5](#the-astro-a50-x-an
 rows each model has:
 
 - The model's name, with Status, which says Through its receiver, or On its
-  cable for the G522 on its cable, and Battery.
+  cable for the G522 on its cable; Battery; Not yet tested on this model,
+  with its Device report button; Read only, while Gearbench changes nothing
+  on it; and Battery notices.
 - Microphone: Sidetone: your voice in the earcups, from 0 to 100% on the PRO
-  X 2 and from 0 to 9 on the G522 and the G325; Noise suppression on the
-  PRO X 2 and the G325; Mic input (see [Mic input](#mic-input)); and Input level (see
-  [Input level](#input-level)).
+  X 2 and from 0 to 9 on the G522 and the G325; Noise suppression, the
+  headset's own on the PRO X 2 and the G325 and the computer's on the G522,
+  with Test the microphone under it on the G522 (see [Noise
+  suppression](#noise-suppression)); Mic input (see [Mic
+  input](#mic-input)); and Input level (see [Input level](#input-level)).
 - Equalizer: Headphones. On the PRO X 2, the five bands the headset keeps
   in itself, at 80, 240 and 750 Hz and 2.2 and 6.6 kHz, from -12 to +12
-  dB, which Gearbench shows and does not change; its library on this
+  dB, which Gearbench shows and does not change, as the group's line says; its library on this
   computer keeps presets of these five bands, in whole dB. On the G522 and the G325, the ten
   bands it plays, from 20 Hz to 20 kHz, each from -6 to +6 dB.
 - Settings: Auto sleep, the minutes the headset waits idle before it
   sleeps, from 1 to 255, or Never at 0, a number you type or step with
   its buttons, sent once you stop, as the Keyboard tab's idle times are;
   Eco mode, the headset's battery saver, on the G522 and the G325; and Put
-  back.
-- Spatial sound.
+  back…, which asks first, as on the A50 X's page.
+- Headset for computer sound, while more than one headset is plugged in or
+  once you have picked one, then Outputs and Spatial sound, as on the A50 X's
+  page.
 
 Each model's library starts with Media, Gaming and Everyday for the
 headphones, in the model's own bands; on the PRO X 2 and the G522 they are
@@ -3987,7 +4386,9 @@ writes to the headset is grayed out; `gearbench-ctl audio` says the
 headset is not answering and gives the same readings, and the tray keeps
 its battery line. Gearbench asks again after 5 seconds, then less often, up to
 once a minute, and reads the headset once it answers. When the headset
-goes away, its receiver says so, and the page shows it asleep at once. On
+goes away, the page shows it asleep as soon as its receiver says so, or
+as soon as the headset does not answer a read, as after the computer
+resumes. On
 its cable, the G522 is read the same way with no receiver between, and
 unplugging the cable is the headset gone. With its receiver plugged in too,
 Gearbench reads the G522 on its cable; plugged in while the headset is in
@@ -4018,7 +4419,7 @@ headset you use:
 
 - the Astro A50 Gen 4, through Astro A50 Game
 - the Astro A50 X, through A50 X Game
-- the Logitech G432 or one of its relatives (see [Other Logitech G headsets](#other-logitech-g-headsets))
+- the Logitech G432 or another headset of its family (see [Other Logitech G headsets](#other-logitech-g-headsets))
 - the first output of an Astro A50 Gen 5, a PRO X 2 LIGHTSPEED, a G522
   LIGHTSPEED or a G325 LIGHTSPEED
 
@@ -4027,7 +4428,7 @@ database's measured head responses. A 5.1 or 7.1 game's rear and side
 sounds then come from behind and beside you. Music and voice chat stay on
 the plain outputs.
 
-To play a game on Gearbench Spatial:
+To play a game on Gearbench Spatial, with its switch on (below):
 
 - Steam: paste the Steam launch option row's
   `PULSE_SINK=gearbench-spatial %command%` into the game's Properties,
@@ -4037,9 +4438,9 @@ To play a game on Gearbench Spatial:
 - Heroic: the game's Settings, Advanced, Environment Variables, with the
   same name and value.
 - A terminal: `PULSE_SINK=gearbench-spatial <the game's command>`.
-- Or choose Gearbench Spatial as the output in GNOME's quick settings before
-  the game starts. GNOME keeps that choice as the default, so pick your usual
-  output again when the game is done.
+- Or pick Gearbench Spatial as your output before the game starts, in
+  GNOME's quick settings or the volume menu in KDE Plasma's panel. It stays
+  your default output, so pick your usual one again when the game is done.
 
 In the game's own audio settings, choose surround, 7.1 or System Default,
 not stereo or headphones. A game with a headphone mode of its own is better
@@ -4050,36 +4451,45 @@ launch option plays on the default output in stereo. If you switch spatial
 sound on later, the game moves to Gearbench Spatial still in stereo; a line
 under the switch's subtitle says to start the game again.
 
-While a game plays on Gearbench Spatial on the A50, keep the headset's Dolby
-button on the star, which is Dolby off. Otherwise the base station processes
-the sound a second time. No USB command reads the button, so the Dolby on
-the star row reminds you. A toast also says so when the Headset tab finds
+While a game plays on Gearbench Spatial on the Astro A50 Gen 4, keep the
+headset's Dolby button on the star, which is Dolby off. Otherwise the base station processes
+the sound a second time. No USB command reads the button, so the Dolby
+button row reminds you. A toast also says so when the Headset tab finds
 something playing there that its last look did not. The tab looks as it
-comes up, as its page changes, and every 5 seconds while it shows. So a
-game started while the window is closed or on another tab gets the toast
-when you next open the tab, if it still plays.
+comes up and every 5 seconds while it shows.
 
 A flatter equalizer preset suits Gearbench Spatial. The head measurements
 assume a neutral headphone, and Astro's ASTRO preset adds 7 dB at 4 and
 7 kHz, where the front and back cues are.
 
+Gearbench Spatial plays quieter than the same game played straight to the
+headset: about 4 to 6 dB for a game in stereo, worked out from its filters,
+not measured. Each ear hears every speaker through the head measurements,
+and loud sounds added up that way would go past the most the headset can
+play, so Gearbench Spatial mixes them at half level. Turn the volume up to
+make up for it.
+
 Once you switch it on, Gearbench Spatial runs from each login as a user
 service of its own, `gearbench-spatial.service`. The service follows
 PipeWire and plays only while a headset's output is there. A headset plugged
 in lacks that output while its card is on a profile without it, such as the
-A50's Chat alone. With none, the output is gone until one comes back.
+A50's Chat alone. With no headset's output there, Gearbench Spatial is gone
+from the desktop's sound settings until one comes back.
 
 With more than one headset plugged in, it plays to the one picked in the
-Headset it plays to row. While that one is unplugged, it plays to the one
-connected first of the others; with none picked, to the one connected
-first. On the G432 it plays through Logitech G432 Equalizer while the
-equalizer is on, so the equalizer shapes spatial sound too. With the
-equalizer off it plays straight to the G432 (see [The Logitech G432](#the-logitech-g432)). One
-of the G432's relatives with an equalizer on the computer works the same way
-with its own. At a pick, and when a plug-in, an unplug or an equalizer
-switch changes where it plays, the output starts again there. A game playing
-on it then goes to the default output for about a second and comes back,
-still in 7.1.
+Headset for computer sound group (below), as Outputs does. While that one
+is unplugged, it plays to the one connected first of the others; with none
+picked, to the one connected first. On the G432 it plays through Logitech
+G432 Equalizer while the equalizer is on, so the equalizer shapes spatial
+sound too. With the
+equalizer off it plays straight to the G432 (see [The Logitech G432](#the-logitech-g432)). Another
+headset of the G432's family with an equalizer on the computer works the same way
+with its own. While Outputs is on, it plays into Gearbench Game instead, on
+any headset, and Gearbench Game plays through the equalizer while that is on
+(see [Outputs](#outputs)). At a pick, and when a plug-in, an unplug, an
+equalizer switch or switching Outputs on or off changes where it plays, the
+output starts again there. A game playing on it then goes to the default
+output for about a second and comes back, still in 7.1.
 
 The Spatial sound group is the last one on each headset's page, and each
 page's group shows the same output and the same settings. The group switches
@@ -4088,17 +4498,27 @@ the service with `systemctl --user` and shows what systemd and PipeWire
 running with the daemon stopped. Without the window or the daemon,
 `gearbench-ctl headset-spatial` does the same from a terminal.
 
-The group's rows:
+The Headset for computer sound group, above Outputs and Spatial sound on
+each headset's page, has one row, Headset: the headset Gearbench Spatial and
+Outputs play to. It shows while more than one headset is plugged in, or once
+you have picked one. Its choices are The one connected first, the default,
+and each headset plugged in, by its name, such as Astro A50 Gen 4 or G432.
+While the tab shows, the list follows a headset plugged in or out within 5
+seconds. While the headset you picked is unplugged, the row shows The one
+connected first, where the sound goes then, and shows your pick again when
+it comes back: the pick stays saved. To drop it while it is unplugged, pick
+another headset and then The one connected first, or run
+`gearbench-ctl headset-spatial --headset first`. Changing the pick restarts
+Gearbench Spatial while it runs.
+`gearbench-ctl headset-spatial --headset` sets the same pick for any
+headset, plugged in or not, by its key, such as `a50` or `g432`.
+
+The Spatial sound group's rows:
 
 - Gearbench Spatial, the switch, is off until you turn it on. On enables the
   service and starts it; off stops it and disables it. On stays on across
   logins and machine restarts. Its subtitle says the state, in the table
   below.
-- Headset it plays to shows while more than one headset is plugged in, or
-  once you have picked one. Its choices are The one connected first, the
-  default; Astro A50 Gen 4; G432, or one of the G432's relatives by its name;
-  Astro A50 X; Astro A50 Gen 5; PRO X 2 LIGHTSPEED; G522 LIGHTSPEED; or G325
-  LIGHTSPEED. Changing it restarts Gearbench Spatial while it runs.
 - Head picks whose measured head is used. KU100, the default, is the Neumann
   KU100 (SADIE II subject D1), which listeners preferred most in SADIE II's
   own test. KEMAR (subject D2) is a dummy head with torso and shoulders.
@@ -4112,28 +4532,29 @@ The group's rows:
   off, no headset plugged in or a start that failed, it applies at its next
   start. If you choose it while Gearbench Spatial is starting, it waits up
   to 2 s for the output. When the change fails or the output is still
-  starting after 2 s, a toast says the room did not change, with the cause
-  behind Details. The room then applies at the next start.
+  starting after 2 s, a toast says why; a room that was saved applies at the
+  next start.
 - Steam launch option shows `PULSE_SINK=gearbench-spatial %command%`, with a
   copy button.
-- Other launchers shows how to set the same variable in the game's
-  environment, with a copy button for `PULSE_SINK=gearbench-spatial`.
-- Or pick it in GNOME says to pick Gearbench Spatial before the game starts,
-  and your usual output after it quits.
-- Dolby on the star shows while the switch is on and the output plays on the
+- Other launchers says to set the same variable in the game's environment,
+  with a copy button for `PULSE_SINK=gearbench-spatial`.
+- Default output says to pick Gearbench Spatial before the game starts, and
+  your usual output after it quits. The desktop's sound settings list it.
+- Dolby button shows while the switch is on and the output plays on the
   A50, or would if it were running (above).
-- Outputs shows while Gearbench Spatial plays to a headset whose outputs
-  GNOME still lists the old way, until WirePlumber restarts. The old way is
-  the A50's Game and Chat as one output, the A50 X with no Game output, or
-  the analog and digital outputs of the G432 or one of its relatives. It
-  also shows while the A50 Gen 5, PRO X 2, G522 or G325 lists outputs other
-  than PipeWire's default gives it. Restarting WirePlumber does not change
-  those: a rule outside Gearbench sets them, and the row says so.
-  It also shows while an A50 or an A50 X is plugged in on another profile
-  set, with no Game output. Gearbench Spatial then has nothing to play to and
-  waits. The A50 X's card falls back to PipeWire's default profile set until
-  WirePlumber restarts, and `gearbench-ctl headset-spatial` says the same on
-  its `outputs:` line.
+- Headset outputs shows while the desktop still lists a headset's outputs the
+  old way, until WirePlumber restarts: the A50's Game and Chat as one output,
+  the A50 X with no Game output, or the analog and digital outputs of the G432
+  or another headset of its family. It shows for the headset Gearbench Spatial plays
+  to, and for an A50 or an A50 X listed that way while no other headset's
+  output is there: Gearbench Spatial then has nothing to play to. On the A50
+  and the A50 X the row asks for the restart, which shows Game and Chat apart.
+  The analog output of the G432's family is there either way, so for
+  them the row says the outputs change at the next restart. It also shows
+  while Gearbench Spatial plays to an A50 Gen 5, PRO X 2, G522 or G325 that
+  lists outputs other than PipeWire's default gives it. Restarting WirePlumber
+  does not change those: a rule outside Gearbench sets them, and the row says
+  so. `gearbench-ctl headset-spatial` says the same on its `outputs:` line.
 
 The switch's subtitle and its status icon:
 
@@ -4143,6 +4564,7 @@ The switch's subtitle and its status icon:
 | `On, linked to` what it plays to, as `Astro A50 Game`, `A50 X Game` or `Logitech G432 Equalizer` | green check mark |
 | `In use: ARC Raiders, 8 channels, 3 streams`, a game playing on it | green check mark |
 | `Starting` | spinner |
+| `Stopping` | spinner |
 | `On, waiting for Astro A50 Game or a Logitech G headset's output` | amber warning sign |
 | `On, but stopped: switch it off and on again` | amber warning sign |
 | `On, but not linked to` the headset or its output, as `Astro A50 Game`, `A50 X Game` or `the G432`, and PipeWire's reason when it gives one | amber warning sign |
@@ -4150,8 +4572,8 @@ The switch's subtitle and its status icon:
 | ``Did not start: `journalctl --user _SYSTEMD_USER_UNIT=gearbench-spatial.service` says why`` | red error sign |
 | `On, but no chain runs: the chain was not written for ...`, with the cause | red error sign |
 | `On, but PipeWire's pw-dump is not installed` | red error sign |
-| `On, but PipeWire could not be read: ...` | red error sign |
-| ``Not installed: run `./install.sh` again, or install the Gearbench package`` | red error sign |
+| `On, but PipeWire could not be read (...)` | red error sign |
+| ``Not installed: run `./install.sh` again, or reinstall the Gearbench package`` | red error sign |
 | `systemctl --user did not answer: ...` | red error sign |
 
 `On, but no chain runs` says what kept Gearbench Spatial from starting on
@@ -4162,10 +4584,11 @@ headset it plays to.
 A game that sends only 2 channels adds a line saying to set its audio output
 to surround or System Default and start it again. A game whose launch option
 names the old `gearbench-a50-spatial` adds one saying to change it. The
-switch and the three choices are grayed out while a change runs, while the
-service is not installed and while systemctl does not answer. While
-systemctl does not answer, the switch and the three launch rows stay where
-they were. The launch rows are hidden while the service is not installed.
+switch, Head, Room and the Headset row above Outputs are grayed out while a
+change runs, while the service is not installed and while systemctl does
+not answer. While systemctl does not answer, the switch and the three launch
+rows stay where they were. The launch rows are hidden while the service is
+not installed.
 
 A change that fails shows a toast saying why: systemctl's or PipeWire's own
 error when it prints one, and Gearbench's words otherwise. An error too long
@@ -4193,21 +4616,145 @@ command its `Did not start` subtitle names.
 service, such as a start refused after five failures, and any line another
 program of yours logs under its name.
 
+## Outputs
+
+Outputs gives your headset three outputs of its own: Gearbench Game for
+games, Gearbench Chat for voice chat, and Gearbench Media for music and
+videos. Each program plays on the one you pick. The headset is the one
+picked in the Headset for computer sound group (see [Spatial
+sound](#spatial-sound)), the one Gearbench Spatial plays to. Outputs is off until you switch it on, with the Game, Chat and
+Media switch in the Outputs group, above Spatial sound on each headset's
+page, or from a terminal:
+
+```
+gearbench-ctl headset-outputs on
+```
+
+Switching it on makes Gearbench Game the default output, so every program
+that follows the default plays there. The window's toast says so, and the
+command prints it on a `note:` line. Pick Gearbench
+Chat as the output in your voice program's own settings.
+
+While Outputs is on, the group's Apps row opens a list of the programs
+playing, each by its name, a game under Proton by the game's. Discord's calls
+and its Mic Test show as Discord (voice), apart from Discord's other sounds.
+Pick Game, Chat, Media or Default output beside a program to move
+it. From a terminal, list the programs, each with its key,
+and move one:
+
+```
+gearbench-ctl headset-outputs
+gearbench-ctl headset-outputs app "Output/Audio:application.name:Firefox" media
+```
+
+The output is `game`, `chat`, `media`, or `default` for the default output.
+WirePlumber keeps the choice, so the program plays there again at its next
+start. Programs that share a key share one choice, and the list says so;
+every music player that marks its sound as music moves together. A program
+whose output is set in its own settings, or in a launch option such as
+`PULSE_SINK=gearbench-spatial`, moves only from there: its row says "Set in
+its settings or launch option" and is grayed out. A program playing on an
+output other than the three, where another program or a new default output
+put it, shows "On" and that output under its name and as its pick, and
+Default output moves it to the default output.
+
+Where the three play:
+
+- On the Astro A50 Gen 4 and the Astro A50 X, Gearbench Chat plays on the
+  headset's Chat output, and Game and Media on its Game output. The headset's
+  own buttons or dial set the balance between them. On the A50 X, music on
+  Media reaches Stream Out, as music on Game already does.
+- On every other headset, all three play on the headset's output, through its
+  equalizer while that is on.
+- Gearbench Spatial plays into Gearbench Game while Outputs is on. Switching
+  Outputs on or off starts Spatial again on its new output, so a music player
+  on Gearbench Spatial pauses once.
+
+The group's Balance slider has 13 stops, from Chat at its left to Game at its
+right. Its line gives Gearbench Chat's and Gearbench Game's levels as GNOME's
+Sound settings give a volume, such as Chat 100% · Game 83% one stop toward
+chat. `gearbench-ctl headset-outputs balance chat` moves the same
+balance one stop toward voice chat, `balance game` toward the game, and
+`balance` with a number takes the stop nearest it, from 0, all chat, to 255,
+all game. In the middle, Gearbench Game and Gearbench Chat both play at full.
+Each stop toward chat turns Gearbench Game down, the first by 4.7 dB, until
+the end silences it, and leaves Chat at full; toward the game it goes the
+other way round. Gearbench Media always plays at full. Outputs keeps the
+balance and starts on it again after a restart or a login. On an A50 Gen 4,
+A50 X or A50 Gen 5 the headset sets its own balance: Game and Chat play at
+full, the group shows no Balance row, and the command refuses the word with
+an error.
+
+OBS's Audio Output Capture of Gearbench Game or Gearbench Chat records what
+is played into that output before the balance turns it down: at a balance of
+0, with the game silent in the headset, a capture of Gearbench Game still
+holds it at its full level (measured 2026-10-28).
+
+A key or a button can move the balance mid-game. Bind a G key, a headset's G
+key or a mouse button to `balance-chat` or `balance-game`, on either layer, as
+with `gearbench-ctl bind G1 balance-chat` or `gearbench-ctl mouse-bind G5
+balance-game`. Each press moves the balance one stop toward voice chat or
+toward the game, and the Balance row follows within 5 seconds. While Outputs
+is off a press does nothing, and the journal of `gearbench.service` says so
+once. Nor does a press while another account or a text console has the
+screen.
+
+When the headset they play on goes away, unplugged or switched off, the
+three wait 2 seconds, then play on the output that was the default before you
+switched Outputs on, or else on the computer's own, until the headset returns.
+A line under the switch says where they play then, as `gearbench-ctl
+headset-outputs` does, such as Playing on Speakers until the G432 returns.
+If they have played on no headset since Outputs started, they skip the
+2-second wait, and the Headset tab still shows the group. The
+default output stays Gearbench Game, so the volume keys still move
+Gearbench Game's volume.
+
+Switching it off, in the group or with `gearbench-ctl headset-outputs off`,
+gives you back the default output you had, unless you picked another since,
+then stops Outputs. If that is a
+headset unplugged at the time, another output plays until it returns, and
+from then on the headset is the default output again. Music playing on
+Gearbench Chat or Media, or on Gearbench Game for a program moved or set
+there, pauses, and stays paused until you play it again. Each program
+keeps the output you moved it to for the next time Outputs is on.
+
+WirePlumber keeps that choice, in
+`~/.local/state/wireplumber/stream-properties` (under `$XDG_STATE_HOME`
+where that is set), and Gearbench shows it only in the program's Apps row,
+while Outputs is on and the program plays. To clear it, pick Default output
+beside the program then, or, with Outputs on or off, run `gearbench-ctl
+headset-outputs` while the program plays and `gearbench-ctl headset-outputs
+app KEY default` with the key it lists.
+
+Outputs runs as a service of its own, `gearbench-outputs.service`. An upgrade
+of the package leaves it running on the version it started with, so nothing
+you play stops; the new version takes over when it next starts, as at your
+next login or when you switch Outputs off and on. A restart of the service,
+with `systemctl --user restart gearbench-outputs.service` or its own after a
+failure, takes the three outputs away for a moment: WirePlumber pauses the
+media players on them, Firefox and Chrome among them, and they stay paused
+until you play them again (measured 2026-10-28). Once the three are back,
+each program you had moved to Game, Chat or Media goes back there, the
+output WirePlumber keeps for it. Outputs does this at each of its starts,
+switching it on included, and moves no program by itself at any other
+time.
+
+EasyEffects can move every program's output to its own. A program another
+program moved stays where it put it, unless WirePlumber still keeps Game,
+Chat or Media for it, as after a patchbay links it elsewhere: the next start
+of Outputs moves it back there.
+
 ## Idle, lock and suspend
 
-The keyboard's lights go off while the screen is locked or blank, and a
-mouse or a headset's lights synced to the keyboard go off with them; a mouse
-with its own color keeps it. While the screen is still locked, any input brings them back: a
-key, the pointer, or a G, M or MR key. After 30 s without input they dim to
-half, and after 60 s they go off again, even while a game keeps the screen
-from going idle. Unlocking brings them back. A keyboard dimmed or turned off
-by its own idle dimming stays so until the next keypress, a lighting change,
-new idle times or Never dim turned on. It also comes back when it is set up
-again, after it is switched off and on, links to its receiver again or the
-computer resumes. A mouse or a headset's lights synced to the keyboard come
-back with any input. The brightness
-you chose is not touched: dim is half of every color. A lighting change made
-while the lights are down is saved and shows in full once they are back.
+The keyboard's lights go off, where it lists Off, while the screen is
+locked or blank, and a mouse or a headset's lights that follow the keyboard
+go off with them; a mouse with its own color keeps it. While the screen is
+still locked, any input brings them back: a key, the pointer, or a G, M or
+MR key. After 30 s without input they dim to half, and after 60 s they go
+off again, even while a game keeps the screen from going idle. Unlocking
+brings them back. The brightness you chose is not touched: dim is half of
+every color. A lighting change made while the lights are down is saved and
+shows in full once they are back.
 
 This is on by default. `gearbench-ctl lock-lights off`, or the Lights off
 when locked switch on the Keyboard tab, turns it off. It follows GNOME:
@@ -4226,21 +4773,30 @@ locked.
 
 The keyboard also dims when left alone: a minute after the last keypress it
 dims to half, and five minutes after that its lights go off. The next
-keypress brings them back. Two keyboards connected dim together, once
-neither has been typed on for that minute, and a key on either, or one
-switched back on or plugged in again, brings both back. So does a lighting
-change from the window or `gearbench-ctl`, which counts as activity at the
-keyboard: made while the keyboard is lit, it starts the count to the dim
-again, so the keyboard does not dim while you edit its lighting with the
-mouse. Reading the settings or
+keypress brings them back, and so does setting the keyboard up again:
+switched off and on, linked to its receiver again, or the computer resumed.
+With more than one keyboard connected, they dim together, once none has
+been typed on for that minute, and a key on any, or one switched back on or
+plugged in again, brings them all back. So does a lighting change from the
+window or `gearbench-ctl`, which counts as activity at the keyboard: made
+while the keyboard is lit, it starts the count to the dim again, so the
+keyboard does not dim while you edit its lighting with the mouse. Reading
+the settings or
 changing the mouse does not count. `gearbench-ctl idle --dim-after SECONDS
---off-after SECONDS` changes the two times, 10 to 3600 s each, and
+--off-after SECONDS` changes the two times, 10 to 3600 s each.
 `gearbench-ctl idle --never-dim on` keeps the lights from dimming or going
-off. New times given while the keyboard is dimmed or dark wake it. The
+off, and lights a keyboard already dimmed or dark.
+`gearbench-ctl idle --never-dim-with-game-profile on` does the same
+while a game profile is loaded, and lights a keyboard that dimmed or went
+dark before the profile loaded; once none is loaded, the keyboard dims again the Dim
+after time after a keypress. The screen lock still turns the lights off.
+New times given while the keyboard is dimmed or dark wake it. The
 Keyboard tab has the same under the Lights off when locked switch: Never dim,
-and Dim after and Lights off after, which are grayed out while Never dim is
-on. A time is sent once it has stayed put for 0.6 s, or when the window
-closes.
+Dim after, Lights off after and Never dim with a game profile, the last three
+grayed out while Never dim is on. A time is sent once it has stayed put for
+0.6 s, or when the window closes. The times are saved either way; when the
+keyboard did not get them, a toast says why: it refused them, is not attached
+or not answering, or has no lighting Gearbench drives.
 
 When the idle dimming and the screen lock overlap, the darker of the two
 shows. Locking over a dimmed keyboard turns it off. Unlocking without a key,
@@ -4250,7 +4806,7 @@ locked wakes both. A lighting change while locked wakes the keyboard from
 its idle dimming but not from the lock: it is saved, and shows at the
 unlock.
 
-A mouse synced to the keyboard dims with it only when you have left both
+A mouse that follows the keyboard dims with it only when you have left both
 alone. While you use the mouse it stays lit, even with the keyboard dimmed
 or dark. Once nothing on the desktop has been touched for the keyboard's Dim
 after time, a minute by default, the mouse takes the keyboard's level: half
@@ -4267,24 +4823,24 @@ follows it does.
 A new Dim after or Never dim starts the mouse over, lit, and so does its
 Follow switch turned on or off while no headset's lights follow the keyboard.
 A headset's Follow switch starts its lights over the same way while the
-mouse's is off. With the keyboard on and in range, a new Lights off
-after wakes it if it has dimmed or gone off, as a new Dim after does, and a
-mouse that follows it lights with it. With the keyboard off or out of range, a new
-Lights off after alone changes only when the mouse goes off. A mouse already
-off comes back to half for a longer time that has not run out yet, and goes
-off once that time runs out. A longer time that has run out already leaves
-the mouse off. Never dim
-keeps the mouse lit too. The mouse also goes off with the screen lock, the
-blank and a suspend, and shows the darker of the lock's level and this one.
+mouse's is off. With the keyboard on and in range, a mouse that follows it
+lights with it when a new Lights off after wakes the keyboard. With the
+keyboard off or out of range, a new Lights off after alone moves only the
+time the mouse goes off: a mouse already off comes back to half while the
+longer time has not run out, and goes off when it does. Never dim keeps the
+mouse lit too, and so does a game profile loaded while Never dim with a game
+profile is on. With Lights off when locked on, the mouse also goes off with
+the screen lock, the blank and a suspend, and shows the darker of the lock's
+level and this one.
 Gearbench learns that the desktop is idle from Mutter's idle monitor:
 without `python3-gi`, or under a desktop that is not GNOME, a mouse that
 follows the keyboard stays lit while the keyboard dims.
 
-A lock, a blank or a suspend also stops a running macro, keeps any macro
+A lock, GNOME's screen blank or a suspend also stops a running macro, keeps any macro
 from starting until the screen is back, and releases what the G keys, MR and
-the mouse buttons hold, whatever the switch says (see [Macros](#macros)). A DPI shift
-paddle held down through any of them still puts the DPI back when you let go
-of it.
+the mouse buttons hold, whatever the switch says (see [Macros](#macros)). A
+button bound to DPI shift and held through any of them still puts the DPI
+back when you let go of it.
 
 Switching to another account or a text console does the same, and until
 your session is back on the screen no G key or mouse button binding types
@@ -4312,8 +4868,8 @@ lights up again at that has not been checked.
 Gearbench's desktop notices need `python3-gi`. Switching Gearbench off in
 GNOME Settings, Notifications turns all of them off, and the DPI notices also
 have a switch of their own. A tray menu choice the daemon refused comes back
-as a notice, with the reason, and so does a keyboard's shortcut turning its
-custom assignments off or on.
+as a notice titled with the choice, such as "1600 DPI: refused", with the
+reason.
 
 ### Low battery
 
@@ -4326,11 +4882,14 @@ voltage, which rises when the lights go off, so a rise does not bring the
 notice back.
 Plugging the cable in takes the notice down and arms both again, and so does
 a reading of 50% or more, for a charge the daemon did not see, such as the
-keyboard charged while switched off. To see a notice without waiting, stop
+keyboard charged while switched off. Where the percentage comes from the
+voltage, that takes two readings in a row of 50% or more, since the voltage
+moves with what the device is doing. To see a notice without waiting, stop
 the service (`systemctl --user stop gearbench`) and run
 `GEARBENCH_ASSUME_BATTERY=29 gearbench-ctl daemon`: every reading for the
-notices is then 29%, the leading keyboard's alone where two are connected, and
-the notice comes a minute after the start. The window, the tray and
+notices is then 29%, the leader's alone where two are connected, and
+the notice comes a minute after the start, unless the keyboard's setting
+(below) is `10/5` or `off`. The window, the tray and
 `gearbench-ctl status` still show the keyboard's own reading. Ctrl+C stops that daemon, and `systemctl --user start gearbench`
 starts the service again.
 
@@ -4338,28 +4897,54 @@ A mouse with a battery gets the same two notices, its name in each, from
 its own battery reports and otherwise from a read once a minute while it
 answers; each says how much is left and to charge it or replace its
 battery. Charging or a reading of 50% or more takes the notice down and
-arms both again. `GEARBENCH_ASSUME_BATTERY` does not reach a mouse.
+arms both again. The G502 LIGHTSPEED, the PRO WIRELESS and the G903
+LIGHTSPEED HERO take their percentage from their voltage, so their reading
+of 50% or more has to come twice in a row. `GEARBENCH_ASSUME_BATTERY` does
+not reach a mouse.
 
 A headset with a battery gets the same two notices, its name in each, from
 its battery readings, each saying how much is left and how to charge it: on
 its base station for an Astro A50, with its USB cable for the others.
 Charging or a reading of 50% or more takes the notice down and arms both
 again, and so does putting an A50 Gen 4 on its base station, even switched
-off (see [Status and battery](#status-and-battery)). `GEARBENCH_ASSUME_BATTERY` does not reach a
-headset.
+off (see [Status and battery](#status-and-battery)). A wireless headset of
+the G432's family, such as the G933, takes its percentage from its voltage,
+so its reading of 50% or more has to come twice in a row.
+`GEARBENCH_ASSUME_BATTERY` does not reach a headset.
+
+Each device's notices have a setting of their own. `30/15`, the default,
+gives the two notices above. `10/5` gives them below 10% and 5%, and the
+tray icon shows the device's low battery below 5%. `off` posts none, while
+the tray icon still shows a low battery below 15%. `30/15-urgent` is `30/15`
+with the second notice urgent: GNOME shows it over a full-screen game and
+leaves it up, expanded, until you close it. Where the kernel gives the
+desktop the device's battery, as it does for a G502 X PLUS on its receiver,
+GNOME and KDE Plasma warn of it too, and the second notice is not urgent;
+on any other desktop it is. A new setting takes the
+notice showing down at the device's next reading, and arms both notices
+again. Each device's tab has the setting in its Battery notices row (see
+[The device tabs](#the-device-tabs)). `gearbench-ctl battery-notices` lists
+the setting of each device attached that has a battery and of each other
+one given a setting, with "GNOME also warns" or "KDE Plasma also warns"
+after a device the desktop warns of.
+`gearbench-ctl battery-notices 10/5 --mouse G305` sets one: `--keyboard`
+and `--mouse` take a model by name or product id, attached or not, and
+`--headset` a headset's key, such as `a50` or `g933`. `30/15-urgent` is
+refused for an attached device the desktop warns of. The settings are kept in
+`config.json`'s `battery_notices` (see [Settings files](#settings-files)).
 
 ### DPI changes
 
 ![A drawing of a DPI notice from Gearbench: G502 X PLUS: 3200 DPI](images/dpi-notice.png)
 
-When a button bound to `dpi-up`, `dpi-down` or `dpi-cycle` steps the DPI
-(G8 and G7 on the G502 X PLUS unless rebound), or a mouse's own DPI button,
-such as the G305's, moves it to another stage, a notice gives the mouse and
-its new DPI. A step within 1.5 s of the last changes the notice in place. A
+A notice gives the mouse and its new DPI when a button bound to `dpi-up`,
+`dpi-down` or `dpi-cycle` steps the DPI (G8 and G7 on the G502 X PLUS unless
+rebound), or when a mouse's own DPI button, such as the G305's, moves it to
+another stage of onboard profile 1. A step within 1.5 s of the last changes the notice in place. A
 later one closes it and posts a new one. Gearbench takes the notice down 5 s
 after the last step. A DPI set from the window, the tray or
-`gearbench-ctl mouse-dpi` posts nothing, and neither does the paddle's shift
-or the DPI put back when a mouse is switched on.
+`gearbench-ctl mouse-dpi` posts nothing, and neither does the DPI shift
+button or the DPI put back when a mouse is switched on.
 DPI notices are on by default: `gearbench-ctl dpi-notices off`, or the DPI
 notices switch in the Mouse tab's Tuning group, turns them off.
 
@@ -4378,23 +4963,28 @@ connecting a keyboard posts none. The notice has no switch of its own.
 
 ## The tray icon
 
-Where the desktop has a tray, an icon in the top bar holds the batteries and
+Where the desktop has a tray, an icon there holds the batteries and
 a menu. Ubuntu's GNOME has a tray, its AppIndicators extension, on by
-default. Stock GNOME has none: there the icon does not show, and nothing
-else changes. `gearbench-ctl status` says which on its `tray icon` line.
+default. On Fedora and Arch, GNOME gets one from the AppIndicator and
+KStatusNotifierItem Support extension once it is installed and turned on.
+KDE Plasma's panel has one. Stock GNOME has none: there the icon does not
+show, and nothing else changes. `gearbench-ctl status` says which on its
+`tray icon` line.
 
-![A drawing of the tray icon's three looks on a dark top bar: Gearbench's own icon with nothing wrong, a low battery, and an error sign for a problem](images/tray-icon.png)
+![A drawing of the tray icon's four looks on a dark top bar: Gearbench's own icon with nothing wrong, a low battery, the warning sign for a device that does not answer, and the error sign for any other problem](images/tray-icon.png)
 
 The icon is Gearbench's own, a headset around a small screen. It turns into:
 
 - the error sign, the one the window's Status rows show in red, while
-  anything is wrong, meaning anything `gearbench-ctl status` lists under
-  problems
+  `gearbench-ctl status` lists a problem other than a device that does not
+  answer
 - the warning sign, the one the Status rows show in amber, while each of
-  the problems is a device asleep, switched off or out of range
+  the problems is a device that does not answer, such as one asleep,
+  switched off or out of range
 - with nothing wrong, a low battery while a keyboard, a mouse or a headset
-  is below 15% and not plugged in; the Astro A50 Gen 4's headset switched
-  off on its base station counts as plugged in
+  is below 15%, or 5% for one whose notices are set to `10/5`, and not
+  plugged in; the Astro A50 Gen 4's headset switched off on its base station
+  counts as plugged in
 
 Where the tray shows tooltips, pointing at the icon gives the problems and
 the batteries, a line each. Ubuntu's tray shows no tooltips; the menu has
@@ -4406,8 +4996,9 @@ A click opens the menu:
 
 - Anything wrong, a line each: what `gearbench-ctl status` lists under
   problems, with the window's sign for it. That is the warning sign for a
-  device asleep, switched off or out of range and the error sign for any
-  other. A line longer than 80 characters is shortened;
+  device that does not answer, such as one asleep, switched off or out of
+  range, and the error sign for any other. Your home folder is written as
+  `~`, and a line longer than 80 characters is shortened;
   `gearbench-ctl status` has the whole of it.
 - Each device's battery: `Astro A50 Gen 4: 91%`. For a device that does not
   answer, or the Astro A50 Gen 4 while its headset is off, the last reading
@@ -4421,13 +5012,17 @@ A click opens the menu:
   G515, is attached: its three M profiles, the active one marked. Choosing
   one switches to it as `gearbench-ctl m-profile` does.
 - Game profile, once there is one: No game profile unloads, a profile's
-  name loads it and the loaded one is marked. Keep loaded is the switch of
+  name loads it and the loaded one is marked. A game or M profile's name
+  longer than 80 characters is shortened. Keep loaded is the switch of
   that name, shown while one is loaded (see [Hold-offs and Keep loaded](#hold-offs-and-keep-loaded)).
-- Lights off when locked and DPI notices, the switches of those names.
+- Lights off when locked, the Keyboard tab's switch, while a keyboard with
+  lighting is attached.
+- DPI notices, the Mouse tab's switch, while a mouse whose DPI Gearbench
+  sets is attached.
 - Mouse follows the G915, named for the keyboard that leads, the Mouse tab's
   Follow switch, while a mouse with lighting is attached.
 - Headset follows the G915, the Follow switch of a headset's Lighting group,
-  while a headset with lights is attached.
+  while a headset with that group is attached.
 
 Opening the menu reads the selected mouse as the Mouse tab does, so its DPI
 and battery are current. The icon and the menu follow changes made anywhere
@@ -4436,14 +5031,18 @@ else within 2 s.
 The icon is on by default. `gearbench-ctl tray off`, or unchecking Tray icon
 in the window's main menu, takes it away. It needs `python3-gi`.
 
-The icon and its menu answer only the tray itself, the program that keeps
-the desktop's list of icons; under GNOME, only GNOME Shell. So another
-program on the session bus cannot ask for the menu or click it. When a line
-of the menu changes, such as a battery level, a switch or the DPI stage, its
-new text or state is still announced on the session bus. Any program that is
-not a Flatpak app can read it there, and so can a Flatpak app given the whole
-session bus. A tray whose icons are drawn by a different program from the one
-keeping that list is refused too, and shows no working icon.
+The icon and its menu answer only the tray itself: the program that keeps
+the desktop's list of icons and, outside GNOME, the program that draws
+them, such as KDE Plasma's panel; under GNOME, only GNOME Shell. So under
+GNOME another program on the session bus cannot ask for the menu or click
+it. Outside GNOME, a program that registers on the bus as one that draws the
+icons can do both. Any program that is not a Flatpak app can do that, and
+so can a Flatpak app given the whole session bus. When a line of the menu
+changes, such as a battery level, a switch or the DPI stage, its new text
+or state is still announced on the session bus. Any program that is not a
+Flatpak app can read it there, and so can a Flatpak app given the whole
+session bus. Turning the icon off, as above, takes the icon and its menu
+off the session bus.
 
 ## The command line
 
@@ -4452,20 +5051,25 @@ before or after the subcommand, prints JSON instead of the formatted output:
 the daemon's raw reply, with the library added for `headset-eq --save-as`;
 what the command read itself, as `probe`, `report`, `headset-library` and
 `audio-presets` do; or, with `--dry-run`, the requests an import would send.
-`gui` and `daemon` ignore it. The exit code is:
+`gui` and `daemon` ignore it. The exit status is:
 
 - 0 when the command did what was asked
 - 1 when the daemon refused or the command refused its arguments or failed,
-  with `error:` and the reason on standard error, or with `--json` the reply
-  on standard output
+  with `error:` and the reason on standard error; with `--json`, the daemon's
+  reply is printed on standard output instead
 - 2 when the daemon could not be reached, did not answer in time, closed the
   connection without answering or sent a reply that could not be read, and
   when the command line did not parse, as with an unknown command or option,
   or a value of the wrong type or outside its choices, such as `m-profile 4`
+- 130 when Ctrl+C interrupted it; a running `daemon` stops instead and
+  exits 0
+- 141 when the program reading its output closed it before reading all of
+  it, as `head` does
 
 `gearbench-ctl --version` prints the version. `probe`, `report`, `keys`,
-`config`, `gui`, `daemon`, `headset-spatial`, `headset-volume`, `g432-eq`,
-`g432-noise` and `headset-import --library` need no daemon; `headset-library`
+`config`, `gui`, `daemon`, `headset-spatial`, `headset-outputs`,
+`headset-volume`, `headset-noise`, `g432-eq` and `headset-import --library` need no
+daemon; `headset-library`
 needs it only to read or write a slot, and `import-ghub` and `import-pack`
 only to import. `man gearbench-ctl` has every option; from a checkout,
 `man ./man/gearbench-ctl.1`.
@@ -4474,11 +5078,11 @@ Names in the output come from devices, files, running programs and
 PipeWire, and any of them can hold a character a terminal would act on or
 not show. The formatted output prints each such character as its escape,
 `\x1b` for ESC or `\u202e` for a right-to-left override; `--json` escapes
-them itself. The names of running programs, and of the streams and the output
-in Gearbench Spatial's report, show U+FFFD in place of such a character, in the
-window too. A stream's or output's name over 100 characters is cut to its
-first 99 and an ellipsis. G HUB's names are changed as they are read (see
-[Moving from G HUB](#moving-from-g-hub)).
+them itself. The names of running programs, and of the streams and the outputs
+in the reports of Gearbench Spatial and Outputs, show U+FFFD in place of such a
+character, in the window too. A stream's or output's name over 100 characters
+is cut to its first 99 and an ellipsis. G HUB's names are changed as they are
+read (see [Moving from G HUB](#moving-from-g-hub)).
 
 The daemon and its state:
 
@@ -4492,6 +5096,7 @@ gearbench-ctl config                 the configuration on disk
 gearbench-ctl save                   write the daemon's copy over a hand edit (see "Settings files")
 gearbench-ctl reload                 read config.json, the loaded game profile and the macros again
 gearbench-ctl tray off               no tray icon
+gearbench-ctl battery-notices 10/5 --mouse G305   a device's low-battery notices, 30/15, 10/5, off or 30/15-urgent, by --keyboard, --mouse or --headset; alone, lists each device's
 ```
 
 `gearbench-ctl daemon` refuses to start as root: run it as yourself, not
@@ -4504,15 +5109,15 @@ The keyboard (see [The keyboard](#the-keyboard) and [Idle, lock and suspend](#id
 ```
 gearbench-ctl m-profile 2            switch the M profile, as M2 does
 gearbench-ctl color '#ff2200'        the Static color, or the per-key background
-gearbench-ctl preview '#ff2200'      repaint without saving, as a color drag does
+gearbench-ctl preview '#ff2200'      show the color on the keyboard without saving it, as dragging the color picker does
 gearbench-ctl effect wave            static, breathe, cycle, wave, ripple, pulsar-point, remind-me-of, neon, outer-space or disabled, with --speed, --direction and --second-color
-gearbench-ctl brightness 50          rounded down to 0, 12, 25, 50 or 100
+gearbench-ctl brightness 50          rounded down to a level the keyboard keeps: 0, 12, 25, 50 or 100 on the G915
 gearbench-ctl color '#00ff00' --keyboard c358   color, preview, effect and brightness act on the keyboard that leads, or with --keyboard on another
 gearbench-ctl keyboard-follow off --keyboard c358   that keyboard keeps its own lighting while another leads; on to follow again
-gearbench-ctl bind G1 ctrl+f15       bind a G key, a headset's too, such as G933-G1; --mr for the MR layer, macro:NAME for a macro
+gearbench-ctl bind G1 ctrl+f15       bind a G key, a headset's too, such as G933-G1; --g-shift for the G-Shift layer, macro:NAME for a macro, g-shift to hold G-Shift, balance-chat or balance-game to move Outputs' balance
 gearbench-ctl keys volume            find key names; --modifiers lists the modifiers
 gearbench-ctl lock-lights off        keep the lights on while the screen is locked
-gearbench-ctl idle --dim-after 120   the idle dimming: --dim-after, --off-after, --never-dim; alone, shows it
+gearbench-ctl idle --dim-after 120   the idle dimming: --dim-after, --off-after, --never-dim, --never-dim-with-game-profile; alone, shows it
 ```
 
 Macros (see [Macros](#macros)):
@@ -4520,7 +5125,7 @@ Macros (see [Macros](#macros)):
 ```
 gearbench-ctl macros                 list the macros, the running one starred
 gearbench-ctl macro-run Spam         run a saved macro after 3 s (--delay SECONDS)
-gearbench-ctl macro-stop             stop the running macro, however it started
+gearbench-ctl macro-stop             stop the running macro or its countdown, however it started
 ```
 
 Game profiles (see [Game profiles](#game-profiles) and [Moving from G HUB](#moving-from-g-hub)):
@@ -4532,7 +5137,7 @@ gearbench-ctl unload                 back to the M profile
 gearbench-ctl let-load               end every hold-off and check again at once, as Load it now does
 gearbench-ctl keep-loaded on         a profile loaded by hand stays when another profile's program gets focus or starts
 gearbench-ctl save-profile Shooter --process shooter.exe   save what shows as a game profile
-gearbench-ctl save-profile Shooter --mouse-color '#ff7000'   with the color a mouse that follows the keyboard shows while it is loaded
+gearbench-ctl save-profile Shooter --mouse-color '#ff7000'   with the color a mouse and a headset's lights that follow the keyboard show while it is loaded
 gearbench-ctl profile-programs Shooter shooter.exe         the programs that load a profile
 gearbench-ctl profile-mouse-color Shooter '#ff7000'        its mouse color alone, or none
 gearbench-ctl rename-profile Shooter "Night shooter"
@@ -4550,20 +5155,20 @@ gearbench-ctl mouse                  the selected mouse: DPI, rate, profile 1, b
 gearbench-ctl mouse-select G305      which mouse the mouse commands act on, kept for the next start
 gearbench-ctl mouse-dpi 1600 --mouse c08b   a command for one mouse, on the mouse named instead
 gearbench-ctl mouse-dpi 1600         set the DPI live
-gearbench-ctl mouse-bind G6 dpi-shift   bind the selected mouse's button: back, forward, dpi-shift, dpi-up, dpi-down, dpi-cycle, a key, a macro
+gearbench-ctl mouse-bind G6 dpi-shift   bind the selected mouse's button: back, forward, dpi-shift, dpi-up, dpi-down, dpi-cycle, g-shift, balance-chat, balance-game, a key, a macro; --g-shift for its G-Shift layer
 gearbench-ctl mouse-factory-bindings   put the selected mouse's buttons back to their factory bindings
 gearbench-ctl mouse-color '#ff00aa'  the mouse's own color
 gearbench-ctl mouse-effect breathe   an effect gearbench-ctl mouse lists, with --color
-gearbench-ctl mouse-sync on          the mouse takes the keyboard's color
-gearbench-ctl headset-sync on        a headset's lights take the keyboard's color
-gearbench-ctl sync-keyboard G915     the keyboard model that leads, which the others with keyboard-follow on and the mouse follow, or first
+gearbench-ctl mouse-sync on          the mouse takes the color of the keyboard that leads
+gearbench-ctl headset-sync on        a headset's lights take the color of the keyboard that leads
+gearbench-ctl sync-keyboard G915     the keyboard model that leads, or first; the other keyboards with keyboard-follow on follow it, and so do the mice and headset lights under mouse-sync and headset-sync
 gearbench-ctl mouse-host off         each mouse with host mode runs its onboard profile, not host mode
 gearbench-ctl dpi-notices off        no desktop notice when a DPI button steps the DPI
 ```
 
 These write the mouse's onboard profile 1, after backing up every profile
 sector. On a mouse whose onboard profile Gearbench does not write yet, they
-are refused with nothing sent; in host mode, `mouse-rate` sets the rate
+are refused with nothing written; in host mode, `mouse-rate` sets the rate
 live instead and keeps it for the model. With a game profile loaded and
 `mouse-host on`, on a mouse with host mode, `mouse-rate` and
 `mouse-dpi-stages` save the game profile's own rate and stages instead, and
@@ -4581,32 +5186,34 @@ gearbench-ctl mouse-restore            write this model's newest backup of profi
 
 The headsets (see [The headset](#the-headset), [The Logitech G432](#the-logitech-g432), [Other Logitech G
 headsets](#other-logitech-g-headsets), [The Astro A50 X and A50 Gen 5](#the-astro-a50-x-and-a50-gen-5), [The PRO X 2, G522 and G325
-LIGHTSPEED](#the-pro-x-2-g522-and-g325-lightspeed) and [Spatial sound](#spatial-sound)):
+LIGHTSPEED](#the-pro-x-2-g522-and-g325-lightspeed), [Spatial sound](#spatial-sound) and [Outputs](#outputs)):
 
 ```
 gearbench-ctl headset                the A50: on or off, battery, settings, equalizer presets, what is not saved; --read reads them again
 gearbench-ctl headset-set sidetone 40   mic-level, sidetone, noise-gate, mic-eq, stream-game, preset and the rest
 gearbench-ctl headset-eq --gains 0,2,0,-1,3   an equalizer preset's --name, --gains or --band 3:2750:1.5
 gearbench-ctl headset-import night.astroeq   an .astroeq preset file into an equalizer preset; --library into the library
-gearbench-ctl headset-library        the A50's preset library: list it; with a number, --from-slot, --gains, --band, --name, --write SLOT, --delete
+gearbench-ctl headset-library        the A50's preset library: list it; --save-as NAME; with a number, --from-slot, --gains, --band, --name, --write SLOT, --delete
 gearbench-ctl headset-save           write the settings and presets to the base station's flash
 gearbench-ctl headset-revert         put back what the base station's flash holds
 gearbench-ctl headset-spatial        the spatial output: on or off, headset, head, room, the launch option
-gearbench-ctl headset-spatial on --headset g432   on or off, --headset a50, g432, another G432 relative's key, a50x, a50gen5, pro_x_2, g522, g325 or first, --head ku100 or kemar, --room competitive or immersive
+gearbench-ctl headset-spatial on --headset g432   on or off, --headset a50, g432, the key of another of the G432's family, a50x, a50gen5, pro_x_2, g522, g325 or first, --head ku100 or kemar, --room competitive or immersive
+gearbench-ctl headset-outputs        Game, Chat and Media: on or off, where each plays, the balance, each program's output and its key
+gearbench-ctl headset-outputs app KEY media   on, off, balance game, chat or 0 to 255, app KEY game, chat, media or default
 gearbench-ctl headset-volume         the volume of each plugged-in headset's microphone and of the A50's and the A50 X's Game and Chat outputs, as GNOME's Sound settings show it
 gearbench-ctl headset-volume g432 mic 80   set one: the headset's key, as headset-spatial takes it but not first, before the volume or with --headset; mic, or game or chat on a50 and a50x; 0 to 100
-gearbench-ctl g432-sidetone 20       the G432's sidetone, 0 to 100; put-back puts back the level first read; alone, shows it, the battery too on its wireless relatives
-gearbench-ctl g432-auto-off 30       a wireless relative's auto shut-off: never, 5, 15, 30 or 60 minutes; alone, shows it
+gearbench-ctl headset-noise on       a headset's noise suppression, G432 Microphone (Noise Filter) on the G432: on, off or test; alone, its state; --headset KEY another headset's (g432-noise in 1.2.0)
+gearbench-ctl g432-sidetone 20       the sidetone of the G432 or another of its family, 0 to 100; put-back puts back the level first read, else 0; alone, shows it, the battery too on one that has one
+gearbench-ctl g432-auto-off 30       the auto shut-off of a wireless headset of the G432's family: never, 5, 15, 30 or 60 minutes; alone, shows it
 gearbench-ctl g432-headset-eq        the equalizer in a G933, G935 or G633: --gains G1,G2,... a gain a band, --flat every band at 0 dB
 gearbench-ctl g432-headset-presets   its preset library on this computer: --save-as NAME, or with a number --name, --pick or --delete
 gearbench-ctl g432-lights static     the lights of a G733, G933, G935, G633 or G635: an effect and its --color, --release, --store, or --startup on or off
-gearbench-ctl g432-eq on             Logitech G432 Equalizer: on or off, --pick N, --preset N, --name, --reset, --save-as NAME, --delete, --band FREQ:GAIN, --bass, --treble, --flat; --headset KEY a relative's
-gearbench-ctl g432-noise on          the G432's noise suppression, Logitech G432 Microphone: on or off; alone, its state; --headset KEY a relative's
+gearbench-ctl g432-eq on             Logitech G432 Equalizer: on or off, --pick N, --preset N, --name, --reset, --save-as NAME, --delete, --gain FREQ:GAIN, --bass, --treble, --flat; --headset KEY picks another of its family
 gearbench-ctl audio --read           the A50 X, A50 Gen 5, PRO X 2, G522 or G325: battery, settings and equalizers; --read reads them again
 gearbench-ctl audio-set volume 12    sidetone, volume, balance, noise-gate, auto-sleep, deep-sleep, brightness, tones, noise-suppression or eco-mode, or put-back; refused but on the A50 X
-gearbench-ctl audio-eq headphones    the headphones' or, on the A50 X and A50 Gen 5, the microphone's ten bands; ten gains or --pick set them on the A50 X
+gearbench-ctl audio-eq headphones    the headphones' bands or, on the A50 X and A50 Gen 5, the microphone's; --gains or --pick set them on the A50 X
 gearbench-ctl audio-mix game 24      the stream mix: stream, game, voice, mic or bluetooth, 0 to 32, or --mute or --unmute; refused but on the A50 X
-gearbench-ctl audio-presets          the preset library on this computer: --save-as NAME, --from microphone, or with a number --name, --pick or --delete
+gearbench-ctl audio-presets          the preset library on this computer: --save-as NAME, with --from microphone for the microphone's bands, or with a number --name, --pick or --delete
 ```
 
 ## Settings files
@@ -4615,8 +5222,9 @@ These live under `~/.config/gearbench/`
 (`$XDG_CONFIG_HOME/gearbench/` when that is an absolute path):
 
 - `config.json`: the three M profiles, each with its lighting for each
-  keyboard model, its G-key and MR layer bindings and its bindings for each
-  mouse model; which M profile is in use, and the game profile loaded by
+  keyboard model, its G-key and G-Shift layer bindings, and its bindings for each
+  mouse model and for that model's G-Shift layer (`mouse_shift`); which M
+  profile is in use, and the game profile loaded by
   hand, which the next start loads again; and each keyboard model's
   brightness and the saved colors. It also keeps the settings the window and
   the commands set: `mouse_sync_color`, `headset_sync_color`,
@@ -4627,40 +5235,51 @@ These live under `~/.config/gearbench/`
   `mouse_selected`, the mouse picked last on the Mouse tab or with
   `mouse-select`, which the next start picks again. `sync_keyboard` is the
   keyboard model that leads (see [More than one keyboard](#more-than-one-keyboard) for
-  what follows it), or null for the keyboard connected first since the
-  daemon started. `follow_leader` holds each keyboard model's follow switch
+  what follows it), or null for the one connected first since the daemon
+  started of those still connected. `follow_leader` holds each keyboard model's follow switch
   by its id, true or false, which the window's follow switch and
   `keyboard-follow` set; a model not in it follows. `keyboard_link_notices`,
   on by default and set only by hand, has the keyboard's receiver say when
-  the keyboard goes off or comes back.
+  the keyboard goes off or comes back. `battery_notices` holds each device's
+  low-battery notices, `30/15`, `10/5`, `off` or `30/15-urgent`, by its
+  model's id, as in `"c33e": "10/5"`, or by a headset's key, the one
+  `spatial.json` uses, as in `"a50": "off"`. [Low battery](#low-battery)
+  says what each does. A device not in it takes
+  `30/15`. A device or a setting this version does not know stays in the
+  file, the setting read as `30/15`. `never_dim_with_game_profile`, false
+  by default, keeps the keyboards from dimming or going dark for idleness
+  while a game profile is loaded (see
+  [Idle, lock and suspend](#idle-lock-and-suspend)).
 - `profiles/`: the game profiles, one JSON file each, named after the
   profile: its name in lowercase, with its letters and digits kept and each
   run of anything else between them made one hyphen, as in `arc-raiders.json`
   for Arc: Raiders. A name with no letter or digit gets `profile-` and a short
   hash instead, and one that comes out longer than 200 bytes is cut short and
   given a hash at its end. Each file holds the profile's name, the programs
-  that load it, its lighting for each keyboard model, its G-key and MR layer
-  bindings, per mouse model its bindings and its own DPI stages and
-  report rate, and the color a mouse that follows the keyboard shows while
-  it is loaded.
-  Gearbench 1.1.0 reads a game profile with a mouse color, shows the
-  keyboard's color on a mouse that follows the keyboard, and leaves the
-  mouse color out when
-  it next saves that profile.
+  that load it, its lighting for each keyboard model, its G-key and G-Shift layer
+  bindings, per mouse model its bindings, those of its G-Shift layer and its
+  own DPI stages and report rate, and the color a mouse and a headset's
+  lights that follow the keyboard show while it is loaded.
 - `macros/`: the macros, one JSON file each.
 - `backup/`: a mouse's onboard sectors, saved before each write, and
-  copies of `config.json`, each game profile's file and `g432-eq.json` as
-  an earlier Gearbench wrote them, made once just before each file's first
-  save in this version's format. They are `config.v1.json`, `profiles.v1/`
-  and `g432-eq.v1.json`, or `config.v2.json` and `profiles.v2/` for a file
-  of version 2. If a copy cannot be made, nothing is saved and the message
-  gives the copy's path and why.
+  copies of `config.json` and each game profile's file as an earlier
+  Gearbench wrote them, made once just before each file's first save in
+  this version's format. They are `config.v3.json` and `profiles.v3/` for a
+  file Gearbench 1.1.0, 1.2.0 or 1.2.1 saved, and `config.v1.json` and
+  `profiles.v1/` for one of version 1.
+  If a copy cannot be made, nothing is saved and the message gives the
+  copy's path and why.
   `mouse-restore` takes the newest backup only if it is a regular file, or a
-  link to one, of exactly the mouse's sector size, 255 bytes, whose CRC
-  checks.
-- `spatial.json`: Gearbench Spatial's head, room and headset picked, written by the window
-  and `gearbench-ctl headset-spatial`, never by the daemon (see [Spatial
-  sound](#spatial-sound)).
+  link to one, of exactly the sector size the mouse gives (255 bytes on a
+  G305 or a G502 X PLUS), whose CRC checks.
+- `spatial.json`: Gearbench Spatial's head and room, and the headset picked,
+  which it and Outputs play to while more than one is plugged in, written by
+  the window and `gearbench-ctl headset-spatial`, never by the daemon (see
+  [Spatial sound](#spatial-sound)).
+- `outputs.json`: the balance Outputs keeps and the default output you had when
+  you switched it on, written by the window, `gearbench-ctl headset-outputs on`
+  and the Outputs service while it runs, never by the daemon (see
+  [Outputs](#outputs)).
 - `g432-eq.json`: Logitech G432 Equalizer's presets, the shipped three and
   those saved as new, and the one that plays, written by the window and
   `gearbench-ctl g432-eq`, never by the daemon (see
@@ -4679,20 +5298,24 @@ These live under `~/.config/gearbench/`
   and `gearbench-ctl g432-headset-presets`, never by the daemon (see [Other
   Logitech G headsets](#other-logitech-g-headsets)). A missing one reads
   as the model's three starting presets; one that cannot be read, or holds a
-  preset that does not read, is kept as the A50's below is.
+  preset that does not read, is kept as the A50 Gen 4's below is.
 - `g933-eq-picked.json`, `g935-eq-picked.json` and `g633-eq-picked.json`: the
   preset picked on that model, its name and gains, written by the daemon
   when you pick one, which it sends again each time the headset connects;
-  Flat and `gearbench-ctl g432-headset-eq --flat` remove it.
+  Flat and `gearbench-ctl g432-headset-eq --flat` remove it. While it, or
+  a folder above it, is a link to something not there, such as a dotfiles
+  folder not mounted yet, the headset is sent no equalizer as it connects.
+  Flat then removes a link to the file itself, and says the pick could not
+  be removed while a folder's link is the one that is not there.
 - `a50x-eq.json`, `a50gen5-eq.json`, `pro_x_2-eq.json`, `g522-eq.json` and
   `g325-eq.json`: the preset library of the A50 X, the A50 Gen 5, the PRO X
   2, the G522 and the G325, each model's its own, written by the window and
   `gearbench-ctl audio-presets`, never by the daemon (see [The Astro A50 X
   and A50 Gen 5](#the-astro-a50-x-and-a50-gen-5)). A missing one reads as the model's three starting
   presets. One that cannot be
-  read, or holds a preset that does not read, is kept as the A50's below
-  is.
-- `a50-eq.json`: the A50's preset library, written by the window,
+  read, or holds a preset that does not read, is kept as the A50 Gen 4's
+  below is.
+- `a50-eq.json`: the Astro A50 Gen 4's preset library, written by the window,
   `gearbench-ctl headset-eq --save-as`, `headset-library` and
   `headset-import --library`, never by the daemon (see [The preset library](#the-preset-library)). One
   that cannot be read, or is of another version, is never written over: the
@@ -4705,20 +5328,17 @@ These live under `~/.config/gearbench/`
 This version keeps the lighting of `config.json` and of each game profile,
 and the brightness, for each keyboard model, and the mouse bindings for each
 mouse model. Settings a Gearbench from before 1.1.0 saved load as the G915's, and
-their mouse bindings as the G502 X PLUS's. Gearbench 1.1.0 reads the
-`config.json` and game profiles this version saves, leaving out what it does
-not know. The exception is a file that binds a key under a name 1.1.0 does
-not know, such as G515-F1, G915X-G1 or G933-G1. Gearbench 1.1.0 refuses that file and
-writes nothing over it, and no backup is made for it. To go back to 1.1.0, first
-clear those keys in each M profile and game profile, as with
-`gearbench-ctl bind G515-F1 clear` and again with `--mr`. A headset's G key
-cleared that way stays in the file, bound to `none`, which 1.1.0 refuses too:
-delete its line from `config.json` and each game profile's file by hand. A Gearbench
-from before 1.1.0 cannot read the files once this version has saved them:
-it starts on its defaults and
-writes nothing over them. To go back to one, copy `backup/config.v1.json`
-over `config.json`, and each file in `backup/profiles.v1/` over the file of
-that name in `profiles/`.
+their mouse bindings as the G502 X PLUS's. The files are version 4, which no
+earlier Gearbench reads: once this version has saved them, Gearbench 1.2.1
+or an earlier one starts on its defaults, lists each game profile as one it
+cannot read, and writes nothing over them. To go back to 1.2.1, 1.2.0 or 1.1.0,
+copy `backup/config.v3.json` over `config.json`, and each file in
+`backup/profiles.v3/` over the file of that name in `profiles/`; for a
+Gearbench from before 1.1.0, do the same with `config.v1.json` and
+`profiles.v1/`. What changed since the copies were made is lost. Gearbench
+1.1.0 refuses a copy that binds a key under a name it does not know, such
+as G515-F1, G915X-G1 or G933-G1, and writes nothing over it: delete each
+such key's line from it by hand first.
 
 Each JSON file is read only if it is a regular file, or a link to one, of at
 most 1 MiB, that names each field once in each object. Anything else, a
@@ -4753,35 +5373,33 @@ sandbox applies nothing is saved. Set it for the manager too, with
 `ManagerEnvironment=` in `~/.config/systemd/user.conf`, or leave it unset.
 
 The A50's settings are in its base station, and the G432 keeps its sidetone
-itself. Of the headsets' settings, this folder keeps each model's equalizer
-presets, in its own `-eq.json` file such as `a50-eq.json` or `g432-eq.json`;
-the preset picked on a G933, G935 or G633, in its `-eq-picked.json`; a
-headset's G-key bindings, in `config.json` and each game profile's file; and
-whether the headsets' lights follow the keyboard, in `config.json`. The
-daemon's control socket is
+itself. The daemon's control socket is
 `$XDG_RUNTIME_DIR/gearbench.sock`, which refuses a request over 1 MiB, and
 its lock, which keeps a second daemon from starting, is
 `$XDG_RUNTIME_DIR/gearbench.lock`. Gearbench Spatial's PipeWire
 configuration, written each time its service starts the output, is
 `$XDG_RUNTIME_DIR/gearbench-spatial.conf`. The daemon refuses a
 `$XDG_RUNTIME_DIR` that another account owns or that other accounts may
-write in, and so does switching on or off the equalizer that runs on the
-computer for the G432 and its relatives, or switching on their noise
-suppression, since another account could put its own file in place of one
-of Gearbench's there. The daemon and those switches also refuse one below,
+write in, since another account could put its own file in place of one
+of Gearbench's there. So do switching on or off the equalizer that runs on
+the computer for the G432's family, switching on the noise
+suppression that runs on the computer for any headset, and Outputs, whose
+service fails at its start. The daemon, those switches and Outputs also refuse one
+below,
 or reached through, a folder other accounts may write in without the sticky
 bit, or a folder or link that an account other than yours or root owns,
-since another account could swap it for its own. The service checks
-`$XDG_RUNTIME_DIR` before each start, and makes it when it is missing. The
-`/run/user/<uid>` your login gets is none of these.
+since another account could swap it for its own. `gearbench.service`
+checks `$XDG_RUNTIME_DIR` before each start, and makes it when it is
+missing. The `/run/user/<uid>` your login gets is none of these.
 
 The headsets' audio files: `install.sh` writes
 `~/.config/alsa-card-profile/mixer/profile-sets/gearbench-astro-a50.conf`,
 `gearbench-astro-a50x.conf` beside it,
 `~/.config/wireplumber/wireplumber.conf.d/60-gearbench-astro-a50.conf`,
 `60-gearbench-logitech-g432.conf`, `60-gearbench-hidpp-headsets.conf` and
-`60-gearbench-astro-a50x.conf` beside it, and
-`~/.config/systemd/user/gearbench-spatial.service`; the package installs the
+`60-gearbench-astro-a50x.conf` beside it,
+`~/.config/systemd/user/gearbench-spatial.service` and
+`~/.config/systemd/user/gearbench-outputs.service`; the package installs the
 same under `/usr/share/alsa-card-profile/`, `/usr/share/wireplumber/` and
 `/usr/lib/systemd/user/`, with the spatial data in
 `/usr/share/gearbench/spatial`. When `XDG_CONFIG_HOME` is an absolute
@@ -4798,26 +5416,33 @@ Every keyboard change and every mouse binding is saved as it is made, and a
 color being dragged is saved at the release. Lighting and bindings go to the
 loaded game profile's own file, or to the M profile in `config.json` when
 none is loaded. The brightness, the saved colors, and the switches and times
-of "Idle, lock and suspend" go to `config.json` whatever is loaded. The
+of [Idle, lock and suspend](#idle-lock-and-suspend) go to `config.json` whatever is loaded. The
 mouse's stages and rate go to the loaded game profile's file on a mouse with
 host mode and `mouse-host on`, and otherwise to its onboard profile 1. On a
 mouse whose onboard profile Gearbench does not write yet, that write is
 refused, and a rate set in host mode goes to `config.json` in its place. The
 mouse's own color and effect are not stored. A change on the A50 Gen 4's
 page waits for Save (see [Saving](#saving)), except to a library preset, which goes to
-`a50-eq.json` as it is made (see [The preset library](#the-preset-library)), and to Game output,
-Chat output and Mic input, which set GNOME's volumes as the slider moves
+`a50-eq.json` as it is made (see [The preset library](#the-preset-library)), to Noise
+suppression, which acts at once (see [Noise suppression](#noise-suppression)),
+to Battery notices, which goes to `config.json` as it is picked, and to Game
+output, Chat output and Mic input, which set GNOME's volumes as the slider moves
 (see [Status and battery](#status-and-battery) and [Mic input](#mic-input)). The G432's page has no
 Save: a G432 change takes effect at once, its equalizer's presets go to
 `g432-eq.json` as they change, and the adapter keeps its sidetone. On the
-page of one of the G432's relatives, a change takes effect at once too, and
+page of another headset of the G432's family, a change takes effect at once too, and
 the presets go to a file of the model's own, such as `g733-eq.json`; on a
 G933, G935 or G633, a preset picked goes to the model's `-eq-picked.json`,
-such as `g933-eq-picked.json`, as it is picked. The A50 X's page has no Save either:
-a change goes to the headset at once, and a library preset goes to
-`a50x-eq.json` as it is made. In the
-Spatial sound group, on any headset's page, the switch acts at once, and
-Headset it plays to, Head and Room go to `spatial.json` as they are chosen.
+such as `g933-eq-picked.json`, as it is picked. The page of the A50 X, the
+A50 Gen 5, the PRO X 2, the G522 and the G325 has no Save either: a change
+goes to the headset at once on a model whose changes are tested, and a
+library preset goes to a file of the model's own, such as `a50x-eq.json`, as
+it is made. On any headset's page, the Headset for
+computer sound group's Headset goes to `spatial.json` as it is chosen; in
+the Spatial sound group the switch acts at once, and Head and Room go to
+`spatial.json` as they are chosen.
+In the Outputs group, the switch and a program's move act at once, and the
+Outputs service keeps the balance in `outputs.json` as it settles.
 
 You can edit a file by hand, and the daemon does not write over your edit,
 apart from `g933-eq-picked.json`, `g935-eq-picked.json` and
@@ -4828,10 +5453,10 @@ window shows a banner with Reload…. For a macro's
 file, that covers a save, a rename or a delete of it, from the Macros tab,
 the G HUB import or the pack's; a macro's file deleted by hand is written
 again by a save. With the Game profiles dialog open, which covers the
-banner, the refusal also shows over the dialog. While the file the lighting
-on show is saved to, `config.json` or the loaded game profile's, is refused
-this way, a color or paint dragged in the window is refused too and shows
-nothing on the keyboard. The M keys still switch profile meanwhile. Which
+banner, the refusal also shows over the dialog. While saves to the file that
+holds the lighting you see are refused this way, a color or paint dragged in
+the window is refused too and shows nothing on the keyboard. That file is
+`config.json` or the loaded game profile's. The M keys still switch profile meanwhile. Which
 one is active is saved to `config.json`, so it goes unsaved only while
 `config.json` is the refused file.
 
@@ -4860,14 +5485,21 @@ If `config.json` cannot be read at a reload, nothing changes, and the reply,
 `gearbench-ctl status` and the window's banner give the file's error. Fix
 the file and reload, or run `gearbench-ctl save` to keep what the daemon
 holds, unless the daemon has been on its defaults since a start that could
-not read the file: then `save` is refused.
+not read the file: then `save` is refused. If the file could not be opened,
+as with `Permission denied`, `gearbench-ctl save` reads it first and fails
+until it can be read again: fix it, then reload, or save over it.
 
 If the loaded profile's file cannot be read, the profile keeps what it held,
-and the reply, `gearbench-ctl status` and the window's banner give the
-file's error until a reload reads it or `gearbench-ctl save` writes over it.
-Until then a change to that profile is refused: fix the file and reload, or
-run `gearbench-ctl save` to keep what the daemon holds. If its file has
-gone, the profile is unloaded and not loaded again at the next start.
+a change to it is refused, and the reply, `gearbench-ctl status` and the
+window's banner give the file's error. Fix the file and reload, or run
+`gearbench-ctl save` to keep what the daemon holds. If the file could not be
+opened, as with `Permission denied`, `gearbench-ctl save` reads it first
+and fails until it can be read again: fix it, then reload, or save over it.
+If the error says the
+profiles folder could not be listed, only fixing the folder and reloading
+helps: `gearbench-ctl save` writes through that folder and fails. If its file
+has gone,
+the profile is unloaded and not loaded again at the next start.
 
 At a start, a profile loaded by hand whose name was edited in its file loads
 under the new name when that file is the one named for the profile in
@@ -4881,11 +5513,11 @@ A `lights_off_when_locked`, `mouse_sync_color`, `headset_sync_color`,
 `follow_leader`, `dpi_notices`, `mouse_host_mode` or `tray` changed in the
 file takes effect at a reload as `lock-lights`, `mouse-sync`,
 `headset-sync`, `keyboard-follow`, `dpi-notices`, `mouse-host` or `tray`
-would, and `idle_dim_after`, `idle_off_after` or `never_dim` as `idle`
-would. A `sync_keyboard` changed in the file makes the
-keyboard it names lead, or with null the one connected first, as
-`sync-keyboard` or the Leader row in the Keyboard tab's Lighting group
-does. A `mouse_selected` changed in the file
+would, and `idle_dim_after`, `idle_off_after`, `never_dim` or
+`never_dim_with_game_profile` as `idle` would. A `sync_keyboard` changed in
+the file makes the keyboard it names lead, or with null the one connected
+first, as `sync-keyboard` or the Leader row in the Keyboard tab's Lighting
+group does. A `mouse_selected` changed in the file
 picks that mouse, as at a start. Otherwise the mouse's onboard profile is
 left alone. In host mode the loaded game profile's own DPI stages and rate follow
 its file, and on a mouse whose onboard profile Gearbench does not write yet,
@@ -4901,45 +5533,86 @@ saved over only after a reload.
 
 ## Install in detail
 
-Gearbench is made for Ubuntu 26.04 with GNOME 50 on Wayland. It needs Python
-3.14 and a kernel with uinput. Both ways of installing put in udev rules that
-let any program you run open each supported device and `/dev/uinput`. On
-some models a node they open also carries what you type (see [The udev
-rules](#the-udev-rules)).
+Gearbench is made for Ubuntu 26.04 with GNOME 50 on Wayland, and has also
+run on Fedora 44, Arch Linux and CachyOS (see [Systems and
+desktops](#systems-and-desktops)). It needs Python 3.14 and a kernel with
+uinput. Both ways of installing put in udev rules that let any program you
+run open each supported device and `/dev/uinput`. On some models a node they
+open also carries what you type. [The udev rules](#the-udev-rules) names
+those models and says how to limit `/dev/uinput` and those nodes to one
+group's accounts on a machine several people use.
 
-On a GNOME other than 50, the Gearbench focus extension, marked for GNOME 50
-alone, does not run, so game profiles follow only X11 windows. On another
-desktop:
-
-- game profiles follow only X11 windows, or with no X server the running
-  programs
-- the lights go off at a lock only where the desktop sets logind's lock
-  hint, and before the unlock only a G, M or MR key brings them back
-- a mouse that follows the keyboard stays lit while the keyboard dims
-- the tray icon shows only where the desktop has a tray
-
-See [Following the game in front](#following-the-game-in-front), [Idle, lock and suspend](#idle-lock-and-suspend) and [The tray
-icon](#the-tray-icon).
-
-Install it one way, the Debian package or `install.sh` from a git checkout,
+Install it one way, a package or `install.sh` from a git checkout,
 never both. The checkout's service file and launcher would shadow the
-package's, so `install.sh` refuses while the package is installed. A udev
-rule that a checkout install left in `/usr/local/lib/udev/rules.d/` takes
-the place of the package's rule of the same name. The package warns about
-each one and never deletes them. After `apt remove` they keep granting
-access; `./install.sh --uninstall` in that checkout removes them.
+package's, so `install.sh` refuses while a package is installed. The udev
+rules that a checkout install left in `/usr/local/lib/udev/rules.d/` take
+the place of the package's rules of the same names. The package names them in
+a warning and never deletes them, and after the package's removal they keep
+granting access. In that checkout, run `git pull`, then
+`./install.sh --uninstall`, which removes them and leaves the package's
+service and the Gearbench focus extension on. An `install.sh` from 1.2.1 or
+earlier does not see an `.rpm` or an Arch package: it would stop the service
+until your next login, and one from 1.1.0 on would turn the extension off.
 
 Run no other program that drives these devices alongside Gearbench: two
 programs with one device open each read the other's replies. When the daemon
 recognizes one running, `gearbench-ctl status` and a banner in the window
 say so and what to do (see [Banners and messages](#banners-and-messages)).
 
+### Systems and desktops
+
+On Ubuntu 26.04 with GNOME 50 on Wayland, Gearbench has been tested with
+each model that [The models and their ids](#the-models-and-their-ids) lists
+as tested. Its test suite, kept outside the public repository, passes there
+and on Fedora 44. On Arch Linux the suite is not run: there, the install from
+a git checkout and the package's install are checked in a clean container at
+each change.
+
+On 2026-10-28, and again for this release on 2026-11-03, it was tested on
+three more systems, each a virtual machine with a G305 mouse on its receiver
+and a G432 headset passed through to it.
+No keyboard was. On each, the package installed from its file and the
+install from a git checkout both started the daemon, which found the two
+devices. The window showed them, a press of the G305's DPI button stepped
+its DPI, Gearbench Game played on the G432 under Outputs, and Spatial sound
+linked to the G432.
+
+| System | Desktop | Kernel | PipeWire | WirePlumber | Python |
+| --- | --- | --- | --- | --- | --- |
+| Fedora 44 Workstation | GNOME 50.0 on Wayland | 6.19.10 | 1.6.2 | 0.5.13 | 3.14.3 |
+| Arch Linux | GNOME 51.1 on Wayland | 7.2.11 | 1.6.10 | 0.5.18 | 3.14.8 |
+| CachyOS | KDE Plasma 6.8.1 on Wayland | 7.3.0 | 1.6.10 | 0.5.18 | 3.14.8 |
+
+Under GNOME on Fedora and Arch, the Gearbench focus extension ran once
+turned on, and a game profile loaded when its program took focus. Neither
+had a tray (see [The tray icon](#the-tray-icon)). Under KDE Plasma the tray
+icon showed in the panel. Game profiles there follow only X11 windows: a
+native Wayland window counts as no program. And KDE Plasma has no GNOME idle
+monitor, so while the screen is locked only a G, M or MR key brings the
+keyboard's lights back.
+
+On a GNOME other than 50 and 51, the Gearbench focus extension, marked for
+those two alone, does not run, so game profiles follow only X11 windows. On
+another desktop:
+
+- game profiles follow only X11 windows, or with no X server the running
+  programs
+- the lights go off at a lock only where the desktop sets logind's lock
+  hint, and before the unlock only a G, M or MR key brings them back
+- a mouse or a headset's lights that follow the keyboard stay lit while the
+  keyboard dims
+- the tray icon shows only where the desktop has a tray
+
+See [Following the game in front](#following-the-game-in-front), [Idle, lock
+and suspend](#idle-lock-and-suspend) and [The tray icon](#the-tray-icon).
+
 ### The Debian package
 
 Each release on the repository's
 [Releases page](https://github.com/gearbench/gearbench/releases) has the
 Debian package, `gearbench_X.Y.Z_all.deb`. Install it with apt, which pulls
-in what it needs:
+in what it needs, the window's packages and PipeWire's tools (`pipewire-bin`)
+among them:
 
 ```
 sudo apt install ./gearbench_*_all.deb
@@ -4953,14 +5626,14 @@ session already open, and with each graphical login after that.
 Each supported mouse gets an entry in the system's hardware database, in
 `/usr/lib/udev/hwdb.d/`, so its pointer moves at the DPI Gearbench sets.
 Without it the desktop slows some models down, the G502 HERO among them. A
-mouse plugged in during the install moves at the new speed once you plug it
-in again or restart the machine.
+mouse already plugged in when you install moves at the new speed once you
+plug it in again or log in again.
 
 The package also carries the window's desktop entry and icons, the man page,
 the README, this guide, SECURITY.md and the headsets' audio files. The audio files
 list the A50's and the A50 X's Game and Chat as two outputs, give the G432
-one output with its own volume, and give its ten relatives their analog
-output alone (see [Other Logitech G headsets](#other-logitech-g-headsets)). They are two ALSA profile sets in
+one output with its own volume, and give the ten others of its family their
+analog output alone (see [Other Logitech G headsets](#other-logitech-g-headsets)). They are two ALSA profile sets in
 `/usr/share/alsa-card-profile/mixer/profile-sets/` and WirePlumber rules in
 `/usr/share/wireplumber/wireplumber.conf.d/`. WirePlumber reads them when
 your user manager next starts: at your next login once every session of
@@ -4969,9 +5642,11 @@ yours has ended or, with lingering on, when the machine next restarts.
 all sound for a moment (see [Game and Chat](#game-and-chat)).
 
 The spatial sound service, `gearbench-spatial.service`, with its data in
-`/usr/share/gearbench/spatial` (see [Spatial sound](#spatial-sound)), and the Gearbench
+`/usr/share/gearbench/spatial` (see [Spatial sound](#spatial-sound)), the Outputs service,
+`gearbench-outputs.service`, and the Gearbench
 focus extension (see [First-time setup](#first-time-setup), step 7) stay off until you turn them
-on.
+on. Where an earlier removal left spatial sound or Outputs on, the install
+starts it again in each desktop session already open.
 
 To build the package yourself from a checkout, install `build-essential` and
 the build dependencies `debian/control` lists, then run
@@ -4979,11 +5654,71 @@ the build dependencies `debian/control` lists, then run
 checkout. Install it from the checkout with
 `sudo apt install ../gearbench_*_all.deb`.
 
+### The Fedora and Arch packages
+
+Each release also has an `.rpm` for Fedora,
+`gearbench-X.Y.Z-1.fc44.noarch.rpm`, and a package for Arch and CachyOS,
+`gearbench-X.Y.Z-1-any.pkg.tar.zst`. Each holds the Debian package's files
+and does what it does at an install and an upgrade. A removal does the same,
+but disables the service for every account, where `apt remove` keeps it enabled
+until a purge.
+
+dnf installs the window's packages and PipeWire's tools (`pipewire-utils`)
+with the `.rpm`. pacman installs `python-gobject` with the Arch package,
+since the service needs it (see [GTK and python3-gi](#gtk-and-python3-gi)),
+and leaves the rest to you: on Arch and CachyOS, first install `gtk4` and
+`libadwaita` for the window and `pipewire-audio` for the headsets' sound,
+spatial sound and Outputs.
+
+```
+sudo pacman -S --needed gtk4 libadwaita pipewire-audio
+```
+
+Then install the one for your system from the folder you saved it to:
+
+```
+sudo dnf install ./gearbench-*.noarch.rpm
+sudo pacman -U ./gearbench-*-any.pkg.tar.zst
+```
+
+The Arch package runs only on the Python it was built for. Once Arch moves
+to a newer Python, `sudo pacman -Syu` stops with a "breaks dependency"
+error that names gearbench: remove the package with
+`sudo pacman -R gearbench`, upgrade, then install the release built for the
+new Python, or build the package again from a checkout as below.
+
+The license is in `/usr/share/licenses/gearbench/`, where the installed README
+links it.
+
+To build either from a checkout, make an archive of it named for the version
+in `gearbench/__init__.py`, X.Y.Z below. On Fedora, in the checkout:
+
+```
+sudo dnf install rpm-build
+sudo dnf builddep packaging/fedora/gearbench.spec
+mkdir -p ~/rpmbuild/SOURCES
+git archive --prefix=gearbench-X.Y.Z/ -o ~/rpmbuild/SOURCES/gearbench-X.Y.Z.tar.gz HEAD
+rpmbuild -bb packaging/fedora/gearbench.spec
+```
+
+The `.rpm` lands in `~/rpmbuild/RPMS/noarch/`. On Arch, install
+`base-devel`, then:
+
+```
+git archive --prefix=gearbench-X.Y.Z/ -o packaging/arch/gearbench-X.Y.Z.tar.gz HEAD
+cd packaging/arch
+makepkg -si
+```
+
+`makepkg -si` installs what the build needs, builds the package beside the
+`PKGBUILD` and installs it.
+
 ### From a git checkout
 
 `./install.sh` installs from the checkout. `./install.sh --uninstall` removes
-all but your settings and the `gearbench` group, and the keyboard goes back
-to its onboard profile.
+all but your settings and the `gearbench` group. Then the keyboards and
+mice go back to their onboard profiles, unless the gearbench package is
+installed too: its daemon drives them.
 
 ```
 ./install.sh
@@ -4993,9 +5728,9 @@ Run it as yourself from a terminal in your desktop session, not with `sudo`;
 it refuses to run as root. It creates the `gearbench` group, adds you to it
 and installs the udev rules and the mice's hardware database entry, in
 `/etc/udev/hwdb.d/`, through sudo, asking for your password there. A mouse
-plugged in during the install moves at the DPI Gearbench sets once you plug
-it in again or log in again, and the install says so when that entry is new
-or changed. The rest goes in as you:
+already plugged in moves at the DPI Gearbench sets once you plug it in
+again or log out and back in, and the install says so when that entry is
+new or changed. The rest goes in as you:
 
 - a user service that runs the checkout
 - a `gearbench-ctl` launcher in `~/.local/bin`
@@ -5004,7 +5739,13 @@ or changed. The rest goes in as you:
 - the headsets' audio files, under `~/.config/alsa-card-profile/` and
   `~/.config/wireplumber/`
 - the spatial sound service, off until you switch it on
+- the Outputs service, off until you switch it on
 - the Gearbench focus extension, turned on for your next login
+
+The service and the launcher run `/usr/bin/python3`, or
+`/usr/bin/python3.14` where `python3` is missing, does not run or is older
+than 3.14. With neither,
+`install.sh` stops before it changes anything and says what it found.
 
 `install.sh` starts the service. It restarts a running WirePlumber only when
 one of the audio files is new or changed, which stops all sound for a moment.
@@ -5013,23 +5754,29 @@ next starts. Run it again after moving the checkout.
 
 Keep the checkout in a folder only you can write, such as your home folder:
 the daemon runs the checkout's code as you. `install.sh` refuses a checkout
-under `/tmp`, or anywhere else another account owns or can write, a write
-through your own group aside. It also refuses one that holds a link to
+under `/tmp`, or anywhere else another account owns or can write. A write
+through your account's primary group passes where that group is named after
+your account, no other account is in it or has it as its primary group, and no
+other group has its id; one through a shared group, such as
+`users`, does not. It also refuses one that holds a link to
 nothing or out of the checkout, such as a Python virtual environment's link
-to its interpreter. It refuses one holding a folder you may enter but not
-list, or a `udev` folder you lack read or search on, since what is in such a
-folder cannot be checked.
-`./install.sh --uninstall` refuses a checkout another account owns or can
-write too, since it removes, through sudo, the udev rules the checkout names.
+to its interpreter. These refusals, and the ones `./install.sh --uninstall`
+makes before it removes anything, name the path and what to change.
+The checks need GNU find (findutils): where the `find` first on `PATH` is
+another, such as BusyBox's, both stop and say so.
 
 ### GTK and python3-gi
 
 The window needs GTK 4 and libadwaita for Python (`python3-gi`,
-`gir1.2-gtk-4.0`, `gir1.2-adw-1`) from the distribution, never from pip. The
-daemon uses `python3-gi` too, for:
+`gir1.2-gtk-4.0`, `gir1.2-adw-1`) from the distribution, never from pip.
+Fedora's packages are `python3-gobject`, `gtk4`, `libadwaita` and
+`gobject-introspection`, and Arch's
+`python-gobject`, `gtk4` and `libadwaita`; `install.sh` and
+`gearbench-ctl gui` name them when they are missing. The daemon uses
+`python3-gi` too, for:
 
 - exiting at the login screen, where the package's service also starts
-- the screen lock, suspend and notices
+- the screen lock, GNOME's screen blank, suspend and notices
 - the tray icon
 - the idle dimming of a mouse or a headset's lights that follow the keyboard
 - the Gearbench focus extension's reports
@@ -5055,12 +5802,12 @@ any program you run can read your typing on them; Gearbench drops those
 reports unread. They are the node through its receiver of the G515
 LIGHTSPEED TKL, the PRO X TKL LIGHTSPEED, the G915 X LIGHTSPEED and the G915
 X LIGHTSPEED TKL, and the control interface on its cable of the G815, the
-G813 and the G213 Prodigy. On Linux 7.3 or later, going by the kernel's
-source, the G915 TKL's and the G913 TKL's own node behind its receiver is
-one too. Pair
-no other keyboard to the receiver of one of these keyboards. Going by the
-kernel's source, a keyboard paired there after it could have its keystrokes
-arrive on the node of the one paired first.
+G813 and the G213 Prodigy, whose interface is taken to be one as the G815's
+is. On Linux 7.3 or later, going by the kernel's source, the G915 TKL's and
+the G913 TKL's own node behind its receiver is one too. Pair
+nothing else to the receiver of one of these keyboards. Going by the
+kernel's source, a keyboard or mouse paired there after it could have the
+keystrokes it sends arrive on the node of the one paired first.
 
 The control interface of the G502 HERO, the G502 X, the G203 LIGHTSYNC and
 the G102 LIGHTSYNC carries the keystrokes the mouse sends for a button its onboard profile binds
@@ -5069,13 +5816,22 @@ behind its receiver. A program you run can read those the same way.
 
 The control interface of the G515 TKL, of the G515 LIGHTSPEED TKL on its
 cable and of the G915 X, G316 X and G512 X models carries each press and
-release of Ctrl, Shift, Alt, Super and FN once a program asks the keyboard
-for them. Gearbench asks each time it
-sets one of these keyboards up, to light its FN keys, and reads only FN. The
-keyboard keeps sending them until it loses power, even after Gearbench
-stops: switched off, or unplugged where it has no battery. A G915 X
-LIGHTSPEED kept sending them with its cable unplugged and plugged back in.
-Any program you run can ask for them itself.
+release of Ctrl, Shift, Alt and Super, and of FN while its custom
+assignments are on, once a program asks the keyboard for them. Gearbench
+asks each time it sets one of these keyboards up, to light its FN keys, and
+reads only FN. Even after Gearbench stops, the keyboard is taken to keep
+sending them until it loses power: switched off, or unplugged where it has
+no battery. A wired G515 TKL did, and a G915 X LIGHTSPEED kept sending them
+with its cable unplugged and plugged back in; the others are taken to. Any
+program you run can ask for them itself. It can also set one of these
+keyboards' keys to come there in place of typing, read them and type them
+back, so the control interface can carry what you type. F1 to F4 came there
+on a wired G515 TKL; other keys are taken to do the same.
+
+While Gearbench runs, the control interface of the G915 TKL, the G913 TKL
+and the PRO X TKL LIGHTSPEED is taken to carry each press of an F key, since
+Gearbench types those keys itself. Any program you run can make the keyboard
+send them there.
 
 `70-gearbench-uinput.rules` lets any program you run create a virtual
 keyboard.
@@ -5096,10 +5852,15 @@ the seat. So put only your own account in the group. To set it up:
    what you type or press, into `/etc/udev/rules.d/`. A copy there overrides
    the installed rule by name, and a reinstall or upgrade leaves it alone.
 2. In each copy, put `GROUP="<group>", MODE="0660"` in place of
-   `TAG+="uaccess"`, and put only your own account in that group.
-3. Run `sudo udevadm control --reload`, then plug the devices in again. The
-   access the installed rules gave lasts until each device is plugged in
-   again, and to `/dev/uinput` until the machine restarts.
+   `TAG+="uaccess"`.
+3. Put only your own account in that group.
+4. Run `sudo udevadm control --reload`, then restart the machine. The access
+   the installed rules gave lasts until each device is plugged in again, and
+   to `/dev/uinput` until the machine restarts. The daemon gets a group your
+   account has just joined when your user manager next starts: at your next
+   login once every session of yours has ended or, with lingering on, when
+   the machine next restarts. Plugged in again before that, the keyboards and
+   mice the copies cover are not driven.
 
 With the steam-devices package installed, its own rule grants
 `/dev/uinput` too; the uinput rule's comment says what to do about it.
@@ -5113,13 +5874,15 @@ Each rule and what it grants:
   buttons too and, going by the kernel's source, the keystrokes of a button
   its onboard profile binds to a key. The G502 X PLUS's event node, where the
   daemon reads G4 to G9 with host mode off, carries the same through the
-  receiver. It is readable by the `gearbench` group and writable by root
-  alone. A program that could write it could move the pointer and click,
+  receiver, and its pointer's node on its cable, interface 00, is granted the
+  same way. Each is readable by the `gearbench` group and writable by root
+  alone. A program that could write one could move the pointer and click,
   and, through the receiver, type. A program of any account in the group
   that has it open can still take the mouse from your session until it lets
-  go, or change what its buttons send until the mouse is plugged in again.
-  No other node of the devices is granted. With
-  host mode on, the default, G4 to G9 come in the mouse's button reports.
+  go, or change what its buttons send until the mouse is plugged in again,
+  going by the kernel's source. No other node of the devices is granted.
+  With host mode on, the default, G4 to G9 come in the mouse's button
+  reports.
   The group is still needed for G4 to G9 whenever host mode does not take,
   and for the warning about a keyboard paired to the mouse's receiver (see
   [The mouse](#the-mouse)).
@@ -5140,17 +5903,17 @@ Each rule and what it grants:
   Alt, Super and FN keys you press, as said above. Through its receiver, the
   rule grants the G515 LIGHTSPEED TKL's own node, which also carries what you
   type on the keyboard, so a program you run can read it.
-- `70-g915-tkl.rules` lets you open the G915 TKL's control interface on its
-  cable and through its receiver. Which interfaces those are has not been
+- `70-g915-tkl.rules` lets you open the control interface of the G915 TKL
+  and of the G913 TKL, on its cable and through its receiver. Which interfaces those are has not been
   checked on the hardware. The rule's comment says how to check them and, if
   one is not 02, how to take back the rule's grant of interface 02 there
   with a copy in `/etc/udev/rules.d/`. On a kernel that gives the keyboard a
   node of its own behind its receiver, Linux 7.3 or later going by the
   kernel's source, the rule grants that node. That node also carries what
   you type on the keyboard, so a program you run can read it.
-- `70-g815.rules` lets you open the G815's control interface on its cable.
-  That interface also carries what you type on the G815, so a program you
-  run can read it. Which of its interfaces is the control one has not been
+- `70-g815.rules` lets you open the G815's control interface on its cable,
+  and the G813's, which has the same id. That interface also carries what
+  you type on the keyboard, so a program you run can read it. Which of its interfaces is the control one has not been
   checked on the hardware.
 - `70-pro-x-tkl.rules` lets you open the PRO X TKL LIGHTSPEED's control
   interface on its cable, taken to be 02 as on the G515 TKL. Which interface
@@ -5164,8 +5927,9 @@ Each rule and what it grants:
   interface 02, as on the wired G515 TKL. Which interface that is has been
   checked on the G915 X LIGHTSPEED alone. Each rule's comment says how to
   check it and, if it is not 02, how to take back the rule's grant with a
-  copy in `/etc/udev/rules.d/`. The control interface also carries the Ctrl,
-  Shift, Alt, Super and FN keys you press, as said above. Through its
+  copy in `/etc/udev/rules.d/`. On the G915 X LIGHTSPEED the control
+  interface also carries the Ctrl, Shift, Alt, Super and FN keys you press,
+  as said above, and on the others it is taken to. Through its
   receiver, `70-g915-x.rules` grants the G915 X LIGHTSPEED's and the G915 X
   LIGHTSPEED TKL's own node, which also carries what you type on the
   keyboard, so a program you run can read it.
@@ -5190,11 +5954,12 @@ Each rule and what it grants:
   `70-g502x-lightspeed.rules` does for its mouse. Which of its cable's
   interfaces is the control one has not been checked on the hardware.
 - `70-g502-lightspeed.rules` lets you open the G502 LIGHTSPEED's own node
-  through its receiver, and its control interface on its cable. Which of its
-  cable's interfaces is the control one has not been checked on the hardware.
-  Its receiver pairs one device, so no keyboard can share its node. Going by
-  the kernel's source, the node still carries the keystrokes of a button
-  bound to a key.
+  through its receiver, and its control interface on its cable. Which of
+  its cable's interfaces is the control one has not been checked on the
+  hardware. Its c539 receiver pairs one device, so no keyboard can share
+  its node; on a POWERPLAY mat's c53a the other slot is the mat's own chip,
+  which the rule does not grant. Going by the kernel's source, the node
+  still carries the keystrokes of a button bound to a key.
 - `70-pro-wireless.rules` does the same for the PRO WIRELESS, on the
   interface its firmware gives the control protocol.
 - `70-g903-hero.rules` does the same for the G903 LIGHTSPEED HERO, on the
@@ -5216,32 +5981,30 @@ Each rule and what it grants:
   which carries its sidetone, its volume wheel and its mute, and no
   keystrokes. Its audio needs no udev rule; it has a WirePlumber rule (see
   [The Logitech G432](#the-logitech-g432)).
-- `70-hidpp-headsets.rules` does the same for the G432's relatives (see
+- `70-hidpp-headsets.rules` does the same for the rest of the G432's family (see
   [Other Logitech G headsets](#other-logitech-g-headsets)): the one control interface of the G431's and
   G433's adapters, the G633's and G635's cables and the G533's, G535's,
   G733's, G933's, G935's and PRO X Wireless's receivers. On the G432 that
-  interface carries no keystrokes; the others' are assumed alike, for their
-  first test to check.
+  interface carries no keystrokes; the others' are assumed alike.
 - `70-astro-a50x.rules` and `70-astro-a50-gen5.rules` let you open the
   control interface, 08, of the A50 X's and the A50 Gen 5's base station,
-  which carries its settings and no keystrokes. The A50 X's audio has a
-  WirePlumber rule (see [The Astro A50 X and A50 Gen 5](#the-astro-a50-x-and-a50-gen-5)).
+  which carries its settings and no keystrokes. The A50 X's audio has an
+  ALSA profile set and a WirePlumber rule (see [The Astro A50 X and A50 Gen 5](#the-astro-a50-x-and-a50-gen-5)).
 - `70-lightspeed-headsets.rules` lets you open the control interface,
   03, of the PRO X 2 LIGHTSPEED's, G522 LIGHTSPEED's and G325 LIGHTSPEED's
-  receivers and of the G522 on its cable, which carries the headset's
-  volume and mute keys beside it and no keystrokes, as one owner's listing
-  of a G325's receiver shows; each model's first test checks it.
+  receivers and of the G522 on its cable. On a G325's receiver, as one
+  owner listed it, that interface also carries the headset's volume and mute
+  keys, and no keystrokes; each model's first test checks its own.
 - `70-gearbench-uinput.rules` lets you open `/dev/uinput`, where the daemon
   makes the virtual keyboard and mouse that bindings and macros type
   through. It is the line the steam-devices package ships. The rule's
   comment has the trade-off and, for a machine several people use, a group
-  grant to use instead. The rule is in `/usr/lib/udev/rules.d/` with the
-  package or `/usr/local/lib/udev/rules.d/` from a checkout. Without the
-  rule, a bound key types nothing. A G915 TKL or PRO X TKL keeps its own
-  profile, so Gearbench drives none of its lighting or keys; the other
-  devices' lighting works. `gearbench-ctl status` lists `no virtual keyboard`
-  and the window shows a banner. The daemon tries again every 30 seconds, so
-  a rule added later needs no restart of the service.
+  grant to use instead. Without the rule, a bound key types nothing. A G915
+  TKL or PRO X TKL keeps its own profile, so Gearbench drives none of its
+  lighting or keys; the other devices' lighting works.
+  `gearbench-ctl status` lists `no virtual keyboard` and the window shows a
+  banner. The daemon tries again every 30 seconds, so a rule added later
+  needs no restart of the service.
 
 Removing the rules does not take away the access they gave (see [Upgrading
 and removing](#upgrading-and-removing)). Report privately, as [SECURITY.md](../SECURITY.md) says, any
@@ -5250,16 +6013,27 @@ way around what these rules grant.
 ## Upgrading and removing
 
 A new `.deb` installs over the old one with `sudo apt install`, which
-restarts a running service on the new code. From a checkout, `git pull` and
+restarts a running service on the new code, and so does a new `.rpm` with
+`sudo dnf install` and a new Arch package with `sudo pacman -U`. From a checkout, `git pull` and
 run `./install.sh` again. It restarts the service on the new code, or starts
-it if it was stopped.
+it if it was stopped. Neither the package nor `./install.sh` restarts
+Outputs, which would pause the players on its outputs. The package does not
+restart spatial sound either, and `./install.sh` restarts it when its
+service file changed. What is not restarted takes the new version at its
+next start (see [Outputs](#outputs) and [Spatial sound](#spatial-sound)).
+
+To move from a checkout to a package, run `./install.sh --uninstall` in the
+checkout, then install the package. Your settings stay. The uninstall
+switches spatial sound and Outputs off, and the Headset tab switches them on
+again. It also switches the Gearbench focus extension off: under GNOME, log
+out and back in, then turn it on with the window's Turn on. Where the package went in first,
+see [Install in detail](#install-in-detail).
 
 From 1.1.0 the app id is `io.github.gearbench.Gearbench` and the Gearbench
-focus extension's id `gearbench-focus@gearbench.github.io`, named after the
-gearbench organization on GitHub, which holds the repository. After the
+focus extension's id `gearbench-focus@gearbench.github.io`. After the
 upgrade from 1.0, if you had changed Gearbench's switch in Settings >
 Notifications, set it again. Either way, log out and back in once, which
-starts the Gearbench focus extension under its new id. `./install.sh`
+loads the Gearbench focus extension under its new id. `./install.sh`
 removes the files left under the old names, moves the dock's pin to the new
 app id and turns the extension on under its new id, whether it was on or off
 before. With the package, the old files go with the old package. Pin
@@ -5268,9 +6042,11 @@ the window's Turn on. Until the extension runs, game profiles follow only
 X11 windows.
 
 If you had spatial sound on before 1.1.0, switch it off and on once after
-the package's update, so it starts at each login again. `./install.sh`
-removes the login service for spatial sound that an install from before
-1.1.0 wrote, and keeps spatial sound on where it was on.
+the package's update, so it starts each time PipeWire does. If you switched
+it on with 1.1.0 to 1.2.1, the daemon does it itself when it starts after
+the update. `./install.sh` does it in both cases: it keeps spatial
+sound on where it was on, and removes the login service for spatial sound
+that an install from before 1.1.0 wrote.
 
 A game whose launch option still names `gearbench-a50-spatial`, the output's
 name before Gearbench 1.1.0, plays on the default output in stereo. Change
@@ -5278,24 +6054,25 @@ its launch option to `PULSE_SINK=gearbench-spatial %command%`. While such a
 game plays, the Gearbench Spatial switch's subtitle names it (see [Spatial
 sound](#spatial-sound)).
 
-To go back to an earlier version, see [Settings files](#settings-files) first. Gearbench
-1.1.0 refuses a file that binds a key under a name it does not know, such as
-G515-F1. A Gearbench from before 1.1.0 cannot read the files once this
-version has saved them.
+To go back to an earlier version, see [Settings files](#settings-files) first:
+no earlier Gearbench reads `config.json` or the game profiles once this
+version has saved them, and the copies in `backup/` put them back as they were.
 
 To remove the package:
 
-1. If you switched spatial sound on, run
-   `systemctl --user disable gearbench-spatial.service` first, so no link to
-   the unit stays in your settings.
+1. If you switched spatial sound or Outputs on, run
+   `systemctl --user disable gearbench-spatial.service gearbench-outputs.service`
+   first, so no link to either unit stays in your settings.
 2. Run `sudo apt purge gearbench` (or `remove`, which keeps the service's
-   enablement). The removal first stops the service and spatial sound of
-   every account with a running user manager, one kept by lingering
-   included, which hands the keyboard back.
+   enablement), `sudo dnf remove gearbench` or `sudo pacman -R gearbench`.
+   The removal first stops the service, spatial sound and
+   Outputs of every account with a running user manager, one kept by
+   lingering included, which hands the keyboards and mice back.
 3. Run `systemctl --user restart wireplumber`.
 
 From a checkout, `./install.sh --uninstall` removes the files `install.sh`
-installed, switches spatial sound off and restarts WirePlumber itself.
+installed, switches spatial sound and Outputs off and restarts
+WirePlumber itself.
 Neither touches your settings in `~/.config/gearbench/` (see [Settings
 files](#settings-files)).
 
@@ -5303,8 +6080,9 @@ Removing the rules, either way, does not take away the access they gave: you
 keep it to the devices plugged in until they are replugged, and to
 `/dev/uinput` until the machine restarts. The G502 X PLUS's event nodes go
 back to `root:input` at once. Each mouse's pointer goes back to the desktop's
-own speed for its model once the mouse is next plugged in. The `gearbench`
-group stays, with you in it; `sudo groupdel gearbench` removes it.
+own speed for its model once the mouse is next plugged in or you log in
+again. The `gearbench` group stays, with every account that was added to
+it; `sudo groupdel gearbench` removes it.
 
 ## The models and their ids
 
@@ -5312,7 +6090,7 @@ Gearbench attaches to the models below by their product ids, and to no
 other. Several mice and several keyboards can be attached at once (see [More
 than one keyboard](#more-than-one-keyboard)). Gearbench drives no device over Bluetooth,
 and the A50 Gen 4's base station only with its switch on PC. The G305
-has no lights and no buttons to bind.
+has no lighting you can set and no buttons to bind.
 
 | Device | Ids | How it was built |
 | --- | --- | --- |
@@ -5330,14 +6108,14 @@ has no lights and no buttons to bind.
 | G213 Prodigy | 046d:c336 on its cable | from a published listing of its features, G HUB's description of it and the key layout and lighting areas G HUB draws for it |
 | G502 X PLUS | 046d:4099 on receiver 046d:c547, 046d:c095 on its cable | on a G502 X PLUS |
 | G305 | 046d:4074 on receiver 046d:c53f | on a G305 |
-| G502 HERO | 046d:c08b on its cable | from published logs of the mouse, then tested on a G502 SE HERO on 2026-10-17 and, its lighting included, on 2026-10-18 |
+| G502 HERO | 046d:c08b on its cable | from published logs of the mouse, its firmware and G HUB's description of it, then tested on a G502 SE HERO on 2026-10-17 and, its lighting included, on 2026-10-18 |
 | G502 X LIGHTSPEED | 046d:409f on receiver 046d:c547, 046d:c098 on its cable | from G HUB's description of the model and a published listing of its features |
 | PRO X SUPERLIGHT | 046d:4093 on receiver 046d:c547, 046d:c094 on its cable | from its firmware, a published listing of its features and G HUB's description of it |
 | G502 X | 046d:c099 on its cable | from a published log of one unit and published listings of its features |
 | G502 X PLUS MILLENNIUM FALCON | 046d:40b2 on receiver 046d:c547 (assumed), 046d:c09e on its cable | from G HUB's description of it, which matches the G502 X PLUS's; no published source lists its features, so all of them are assumed |
-| G502 LIGHTSPEED | 046d:407f on receiver 046d:c539, 046d:c08d on its cable | from G HUB's description of it and published logs of the mouse |
+| G502 LIGHTSPEED | 046d:407f on receiver 046d:c539 or a POWERPLAY mat's 046d:c53a, 046d:c08d on its cable | from G HUB's description of it and published logs of the mouse |
 | PRO WIRELESS | 046d:4079 on receiver 046d:c539, 046d:c088 on its cable | from its firmware, a published log of the mouse and G HUB's description of it |
-| G903 LIGHTSPEED HERO | 046d:4087 on receiver 046d:c539, 046d:c091 on its cable | from its firmware, a published log of the mouse and G HUB's description of it; it is not the older G903, which Gearbench does not match |
+| G903 LIGHTSPEED HERO | 046d:4087 on receiver 046d:c539 or a POWERPLAY mat's 046d:c53a, 046d:c091 on its cable | from its firmware, a published log of the mouse and G HUB's description of it; it is not the older G903, which Gearbench does not match |
 | PRO X SUPERLIGHT 2, PRO X SUPERLIGHT 2 SE | 046d:40a9 on receiver 046d:c54d, 046d:c09b on its cable | from published listings and logs of its features and G HUB's description of it |
 | PRO X SUPERLIGHT 2 DEX | 046d:40b8 on receiver 046d:c54d, 046d:c0a0 on its cable | from a published listing and log of its features and G HUB's description of it |
 | PRO X SUPERLIGHT 2c | 046d:40b7 on receiver 046d:c54d (assumed), 046d:c09f on its cable | from G HUB's description of it, which matches the PRO X SUPERLIGHT 2's; no published source lists its features, so all of them are assumed |
@@ -5345,7 +6123,7 @@ has no lights and no buttons to bind.
 | G203 LIGHTSYNC, G102 LIGHTSYNC | 046d:c092 and 046d:c09d on its cable | from a published listing of its features, published logs of two units and G HUB's description of it |
 | Astro A50 Gen 4 | 9886:002c, its base station | on an A50 |
 | G432 | 046d:0a9c, its USB adapter | from what others report of the headset, then tested on one on 2026-10-17 and 2026-10-18 |
-| G431, G433 | 046d:0a9b and 046d:0a6d, each its USB adapter | from the G432's code, which another program drives the three with alike, and G HUB's description of each |
+| G431, G433 | 046d:0a9b and 046d:0a6d, each its USB adapter | from G HUB's description of each and the G432's code, since another program drives the three alike |
 | G633, G635 | 046d:0a5c and 046d:0a89 (the G633s's too), each on its cable | from G HUB's description of each and another program's driver for them |
 | G533, G535 | 046d:0a66 and 046d:0ac4, each its receiver | from G HUB's description and battery curves of each, a published listing of the G535's features and another program's drivers |
 | G733 | 046d:0ab5, 046d:0afe and 046d:0b1f, each its receiver | from G HUB's description and battery curves of each id and published listings of its features |
@@ -5364,9 +6142,10 @@ LIGHTSPEED, on its cable and through its receiver. Five others have been
 tested in part:
 
 - The G502 HERO: its DPI, its lighting, the report rate and onboard
-  profile 1 as the mouse holds them, and the stage write to profile 1.
-  Built and not yet tested: G4 to G9 in host mode and its other writes to
-  profile 1.
+  profile 1 as the mouse holds them, and the stage write to profile 1 with
+  host mode off. Built and not yet tested: G4 to G9 in host mode, and the
+  stage write in host mode and its other writes to profile 1, which
+  Gearbench makes all the same (see [The G502 HERO](#the-g502-hero)).
 - The Astro A50 Gen 4: the battery, the microphone, the three equalizer
   presets, the base station's settings, Game and Chat as two outputs, and
   Gearbench Spatial, its 7.1 output for games. The library of your own
@@ -5389,12 +6168,13 @@ tested in part:
   lights, G1 to G3, and the three settings it keeps, its auto shut-off,
   startup effect and own lighting. Built and not yet tested: its lights
   following the keyboard.
-- The Astro A50 X: the battery, every setting, both equalizers and their
-  presets, the stream mix and the microphone's boom, read and changed, and
-  each change still there after the base station was unplugged. Game and
-  Chat were tested as two outputs, on a copy of its audio profile. Built and
-  not yet tested: Gearbench Spatial on A50 X Game, the preset library on this
-  computer and a slider that follows a drag live.
+- The Astro A50 X: the battery and the microphone's boom, read; every
+  setting, both equalizers and their presets and the stream mix, read and
+  changed, each change still there after the base station was unplugged.
+  Game and Chat were tested as two outputs, on a copy of its audio profile.
+  Gearbench Spatial on A50 X Game was tested on a checkout (2026-10-22);
+  the release's install is not yet tested. Built and not yet tested: the
+  preset library on this computer and a slider that follows a drag live.
 
 The others have not been tested on one yet. Until one has, its tab and the
 journal ask for a device report from it (see [Reporting a device](#reporting-a-device)). So do
@@ -5404,10 +6184,11 @@ journal ask for a device report from it (see [Reporting a device](#reporting-a-d
 
 - Each mouse among them: nothing to the mouse's onboard memory until that
   write has been tested on the hardware (see [Host mode](#host-mode)).
-- The G502 HERO: Gearbench does write its onboard profile 1, though only its
-  stage write has been tested (see [The G502 HERO](#the-g502-hero)).
-- The G915 TKL, the G815 and the PRO X TKL LIGHTSPEED: nothing to their
-  onboard memory.
+- The G915 TKL and the G815: nothing to their onboard memory.
+- The PRO X TKL LIGHTSPEED: Gearbench sets its brightness each time it
+  lights the board, as on the G915. Its lighting is the G515's, and a G515
+  stores each level it is sent, so it may too (see [Brightness](#brightness)).
+  Nothing else is written to its onboard memory.
 - The G515 LIGHTSPEED TKL and the G515's newer relatives (the G915 X, G316 X
   and G512 X keyboards), except the G915 X LIGHTSPEED: Gearbench still sets
   their brightness, on the strength of the wired G515 TKL's test, though a
@@ -5418,9 +6199,12 @@ journal ask for a device report from it (see [Reporting a device](#reporting-a-d
   LIGHTSPEED: Gearbench changes nothing on them until each write is tested
   (see [The Astro A50 X and A50 Gen 5](#the-astro-a50-x-and-a50-gen-5) and [The PRO X 2, G522 and G325
   LIGHTSPEED](#the-pro-x-2-g522-and-g325-lightspeed)).
-- The G432's relatives among them: Auto shut-off, Startup effect and Save as
+- The rest of the G432's family among them: Auto shut-off, Startup effect and Save as
   its own lighting… wait for a test on the model, since the headset keeps
-  what they set (see [Other Logitech G headsets](#other-logitech-g-headsets)).
+  what they set. The equalizer of a headset that reports the first version
+  of its equalizer, as the G935 in one published listing does, waits too,
+  since that version may keep the gains it is sent (see [Other Logitech G
+  headsets](#other-logitech-g-headsets)).
 
 Each model's own section says what it does and lacks:
 
@@ -5444,11 +6228,11 @@ Find what you see, then the section that fixes it:
 
 | What you see | Where to look |
 | --- | --- |
-| `gearbench-ctl status` lists `no virtual keyboard` under `problems`, or a bound key types nothing | see [No virtual keyboard](#no-virtual-keyboard) and [The udev rules](#the-udev-rules) |
+| `gearbench-ctl status` lists `no virtual keyboard` or `no virtual mouse` under `problems`, or a bound key types nothing | see [No virtual keyboard](#no-virtual-keyboard) and [The udev rules](#the-udev-rules) |
 | A tab says Keyboard not available, Mouse not available or Headset not available | see [The device tabs](#the-device-tabs) |
 | A banner says the daemon is not running or did not answer, or names another program that drives these devices | see [Banners and messages](#banners-and-messages) |
 | A banner says the Gearbench focus extension is not running, or a game profile does not load while its game has focus | see [Following the game in front](#following-the-game-in-front) and [Hold-offs and Keep loaded](#hold-offs-and-keep-loaded) |
-| Super and the Menu key do nothing, the Activities overview included | see [How the keys behave](#how-the-keys-behave) (the Game Mode button) |
+| Super does nothing, the Activities overview included | see [How the keys behave](#how-the-keys-behave) (the Game Mode button) |
 | The keyboard's lights dimmed or went off | see [Idle, lock and suspend](#idle-lock-and-suspend) |
 | G4 to G9 do nothing | see [Host mode](#host-mode) and [The buttons, G4 to G9](#the-buttons-g4-to-g9) |
 | The G502 X PLUS's wheel scrolls about an eighth as far per notch | see [Asleep or switched off](#asleep-or-switched-off) |
@@ -5457,7 +6241,7 @@ Find what you see, then the section that fixes it:
 | The Gearbench Spatial switch shows an amber or red sign, or a game plays on it in stereo | see [Spatial sound](#spatial-sound) |
 | No sidetone heard on a G432 | see [The Logitech G432](#the-logitech-g432) |
 | Input level says why it cannot read | see [Input level](#input-level) |
-| No icon in the top bar | see [The tray icon](#the-tray-icon) |
+| No tray icon | see [The tray icon](#the-tray-icon) |
 | A mouse write or a restore failed | RECOVERY in `man gearbench-ctl` |
 
 About Gearbench, in the window's main menu, has a Troubleshooting page. Its
@@ -5467,16 +6251,16 @@ Debugging Information page gathers these, ready to copy or save:
 - the daemon's problems and status
 - whether you may open each device's node and `/dev/uinput`
 - the state of spatial sound
-- the daemon's last 30 journal lines
+- the last 30 journal lines of the daemon and of systemd about it
 
 It writes your home folder as `~`, so a path under it does not give your
 user name.
 
 From a terminal, start with `gearbench-ctl status` and
-`journalctl --user -u gearbench`. `-u` also shows any line another program
-of yours logs under the service's name. The Debugging Information page
-leaves those out: its journal section shows only the daemon's lines and
-systemd's about it. Both commands can print your home folder's full path:
+`journalctl --user -u gearbench --no-hostname`. `-u` also shows any line
+another program of yours logs under the service's name. The Debugging
+Information page leaves those out: its journal section shows only the
+daemon's lines and systemd's about it. Both commands can print your home folder's full path:
 write it as `~` before you post their output. RECOVERY in
 `man gearbench-ctl` covers a mouse write or restore that failed, and a
 keyboard or headset left in a bad state.
@@ -5489,9 +6273,9 @@ privately instead, as [SECURITY.md](../SECURITY.md) says.
 
 ### No virtual keyboard
 
-If `problems` lists `no virtual keyboard` with the rules installed, the
-daemon could not open `/dev/uinput`. Run `getfacl /dev/uinput`. When it lists
-no `user:` line with your name, the rule has not reached the node; that
+If `problems` lists `no virtual keyboard` or `no virtual mouse` with the
+rules installed, the daemon could not open `/dev/uinput`. Run
+`getfacl /dev/uinput`. When it lists no `user:` line with your name, the rule has not reached the node; that
 happens where uinput is a module not loaded yet. The rule applies at the
 next boot, or at once after these two commands load the module and apply
 the rule to the node:
@@ -5505,18 +6289,44 @@ Where the rule is not installed, see [The udev rules](#the-udev-rules).
 
 ## Reporting a device
 
-A Logitech device the [Supported devices](../README.md#supported-devices)
-table in the README leaves out can still be supported from what it says about
-itself, and a listed one that misbehaves can be fixed the same way.
-`gearbench-ctl report` writes nothing to any device. It reads what each
-Logitech device plugged in over USB says about itself: it asks each device
-only the questions on one fixed list, each a read, and stops before anything
-else would be sent. A device that table lists as not yet tested on the
-hardware has a note saying so, which asks for this report and gives the
-form's address. The note is in the journal, in `gearbench-ctl status`
-for a keyboard or mouse, and in `gearbench-ctl mouse`, `audio` or
-`g432-sidetone`. Its tab has a Not yet tested on this model row whose Device
-report button opens the form in your browser.
+A Logitech device the README's [Supported devices](../README.md#supported-devices)
+table leaves out can still be supported from what it says about itself. A
+listed one that misbehaves can be fixed the same way.
+`gearbench-ctl report` writes nothing to any device. It asks each Logitech
+device plugged in over USB only the questions on one fixed list, each a
+read, and stops before it would send anything else. Neither of the forms
+below names you, your computer or the unit. They hold no serial number, no
+computer or user name and no folder, and nothing from the user profiles in a
+mouse's onboard memory, which can hold the text of a macro.
+
+To send a report:
+
+1. If the device is a model Gearbench drives, or shares a receiver with one,
+   stop the daemon for the full read: `systemctl --user stop gearbench`.
+   The report says so when it left a device alone.
+2. Run `gearbench-ctl report` in a terminal.
+3. If it says a device may be asleep, move it or press one of its keys, or
+   switch it on, then run the report again.
+4. If it prints a `sudo setfacl` command, your account has no permission to
+   open that device. The command lets you open that one device until you
+   unplug it, and installs nothing. Some devices send what is typed over the
+   connection it opens, keyboards among them and mice that send the
+   keystrokes of a button bound to a key. For those, the report warns that until you
+   unplug the device, any program you run could read what is typed on it.
+   Run the command, then run the report again.
+5. Paste the block whole into the [device report
+   form](https://github.com/gearbench/gearbench/issues/new?template=device-report.yml),
+   with the model in the title.
+6. Unplug each device you ran the `setfacl` command for, which ends that
+   access, and start the daemon again: `systemctl --user start gearbench`.
+
+A device the Supported devices table marks No under Tested on the hardware
+has a note saying it is not yet tested, which asks for this report and
+gives the form's address. The note is in the journal, in
+`gearbench-ctl status` for the keyboard that leads and for a mouse, and in
+`gearbench-ctl probe`, `mouse`, `audio` or `g432-sidetone`. Its tab has a
+Not yet tested on this model row whose Device report button opens the form
+in your browser.
 
 ```
 gearbench-ctl report                 the report, as a block to paste into an issue
@@ -5524,24 +6334,33 @@ gearbench-ctl report --json          the whole report, with each question and it
 ```
 
 The block goes on standard output, opened by a line of three backticks and
-the word text, and closed by a line of three backticks. Paste it whole into a
-device report, the issue form at
-https://github.com/gearbench/gearbench/issues/new?template=device-report.yml,
-with the model in the title. What to do next goes on standard error, below
-it. For each device, the block lists:
+the word text, and closed by a line of three backticks. What to do next goes
+on standard error, below it. For each device, the block lists:
 
 - the product id and the connection
 - the name the device gives itself
 - its firmware versions
 - the features it lists
-- what Gearbench can read of the ones it knows: the lighting zones and
-  effects, the brightness levels, the lights a keyboard can color one by
-  one, the number each key of a G515 or one of its newer relatives goes by
-  in its custom assignments, the onboard memory's layout, the battery, the
-  DPI, a mouse's or a keyboard's report rate and a headset's sidetone and
-  equalizer
-- last, five times over, whether the device keeps apart its answers to two
+- what Gearbench can read of the ones it knows:
+  - the lighting zones and effects, the brightness levels and the lights a
+    keyboard can color one by one
+  - the number each key of a G515 or one of its newer relatives goes by in
+    its custom assignments
+  - the onboard memory's layout
+  - the battery, the DPI, and a mouse's or a keyboard's report rate
+  - a mouse's analog button settings
+  - a headset's sidetone and equalizer
+- five times over, whether the device keeps apart its answers to two
   questions asked at once
+- last, for a model Gearbench drives, which of Gearbench's assumptions about
+  that model its answers confirm and which they do not: the features
+  Gearbench counts on it having, a light under each key the keyboard's
+  drawing lights (on the G213 Prodigy, lit in five areas, a zone for each
+  area), and the battery. A battery that gives a voltage needs the curve
+  Gearbench has for that model's battery to give a charge. A voltage that
+  gives one should lie on the curve for the battery's state: the charging
+  curve while charging, else the discharge curve. Nothing more is asked of
+  the device for it.
 
 It also gives what PipeWire, the sound server, says of each Logitech or
 Astro sound card: its profiles, the one in use and its output's volume, read
@@ -5549,31 +6368,22 @@ with `pw-dump` where that is installed. `--json` adds the factory profiles in
 the onboard memory, the read-only copies every unit of a model carries, and
 each question and answer in hexadecimal.
 
-Nothing in either form names you, your computer or the unit: no serial
-number, no computer or user name, no folder, and nothing from the user
-profiles in a mouse's onboard memory, which can hold the text of a macro.
-
 The report leaves alone a device Gearbench is driving, and anything on the
 same receiver. It gives what Gearbench itself knows of it, and says to stop
-the service for the full read, with `systemctl --user stop gearbench`, and
-to start it again after with `systemctl --user start gearbench`. While the
-service runs, or may be running, the report leaves alone every device of a
-model Gearbench drives, whether the service is driving it or not. The
-service opens those as it looks for them, and two programs asking one device
+the daemon for the full read. While the daemon runs, or may be running, the report leaves alone every device of a
+model Gearbench drives, whether the daemon is driving it or not. The
+daemon opens those as it looks for them, and two programs asking one device
 at once can take each other's answers.
 
-A device you have no permission to open is shown from what the system says
-of it without opening it. The report prints the command that lets you open
-that one device until you unplug it:
-`sudo setfacl -m u:$USER:rw /dev/hidrawN`, with the device's own node in
-place of `hidrawN`. Some devices send what is typed over that same node,
-keyboards among them and mice that send the keystrokes of a button bound to
-a key. For those, the report warns that until you unplug the device, any
-program you run could read what is typed on it. Nothing is installed. Run
-the report again after the command, and unplug the device once the report
-is done, which ends that access.
+A wireless device asleep or switched off behind its receiver answers
+nothing, and the report says it may be asleep.
 
-The exit code is 0 when the report was printed, whatever it could not read.
+A device you have no permission to open is shown from what the system says
+of it without opening it. The command the report prints for it is
+`sudo setfacl -m u:$USER:rw /dev/hidrawN`, with the device's own node in
+place of `hidrawN`.
+
+The exit status is 0 when the report was printed, whatever it could not read.
 It is 1 when no Logitech device is on USB and no Logitech or Astro sound card
 was read from PipeWire (the error gives the cause when `pw-dump` is missing
 or fails). It is also 1 when the report stopped before a question that is

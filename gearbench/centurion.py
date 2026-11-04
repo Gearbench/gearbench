@@ -16,7 +16,7 @@ failures are hidpp's.
 A message too long for one frame goes in fragments: the flags give each its number and say
 whether more follow, the first carries the index and the function byte, and the rest carry
 the message's bytes on (Solaar's write_centurion_cpl; the A50 X's 0x0103 reply came in two
-frames flagged 01 and 02, the second its bytes alone, in G HUB's captures of 2026-10-21).
+frames flagged 01 and 02, the second its bytes alone, in G HUB's traffic of 2026-10-21).
 
 A receiver reaches its headset through its CentPPBridge (Bridged): a request to the headset
 is a message inside a request to the bridge, which the receiver acknowledges at once and
@@ -228,9 +228,8 @@ class Centurion(HidrawNode):
         self.framing = framing
         self._events: deque[Message] = deque(maxlen=EVENTS_MAX)
         self._software_ids = cycle(SOFTWARE_IDS)
-        #: The fragments of a message so far, and the number the next one has.
-        self._fragments: bytearray | None = None
-        self._next_fragment = 0
+        #: The fragments of a message so far; the next one's number is their count.
+        self._fragments: list[bytes] | None = None
 
     # -- wire ------------------------------------------------------------
 
@@ -258,19 +257,18 @@ class Centurion(HidrawNode):
             self._fragments = None
             return message_of(body)
         if number == 0:
-            self._fragments, self._next_fragment = bytearray(body), 1
+            self._fragments = [body]
             return None
-        if self._fragments is None or number != self._next_fragment:
+        if self._fragments is None or number != len(self._fragments):
             log.debug("centurion: dropped fragment %d, %s", number,
                       "with none before it" if self._fragments is None
-                      else f"where {self._next_fragment} was next")
+                      else f"where {len(self._fragments)} was next")
             self._fragments = None
             return None
-        self._fragments += body
-        self._next_fragment += 1
+        self._fragments.append(body)
         if flags & MORE:
             return None
-        whole, self._fragments = bytes(self._fragments), None
+        whole, self._fragments = b"".join(self._fragments), None
         return message_of(whole)
 
     def _file(self, report: bytes) -> Message | None:
@@ -397,42 +395,30 @@ class Bridged:
         self.index = index
         self._software_ids = cycle(SOFTWARE_IDS)
 
-    @property
-    def framing(self) -> Framing:
-        return self.receiver.framing
-
-    @property
-    def fileno(self) -> int:
-        return self.receiver.fileno
-
-    def close(self) -> None:
-        self.receiver.close()
-
-    def pump(self) -> None:
-        self.receiver.pump()
-
-    @property
-    def pending(self) -> bool:
-        return self.receiver.pending
-
     def next_event(self) -> Message | Link | None:
         """The next event of the headset's, or of the bridge's connection, the receiver's
-        own events and late answers dropped."""
+        own events, late replies and a connection event too short to read dropped."""
         while (raw := self.receiver.next_event()) is not None:
             if (said := self._said(raw)) is not None:
                 return said
         return None
 
     def _said(self, raw: Message) -> Message | Link | None:
-        if raw.index == self.index and raw.function == FN_LINK:
+        if (raw.index == self.index and raw.function == FN_LINK
+                and (count := _header_count(raw.params)) is not None):
             # The connected headsets' descriptors, as many bytes as the header counts: none
             # for none (Solaar's listener; HeadsetControl reads `00 00` as off, `00 01` on).
-            return Link(connected=bool(_header_count(raw.params)))
+            # One too short for the header says neither, and is dropped, as Solaar's
+            # listener drops it.
+            return Link(connected=bool(count))
         said = inner(raw) if (raw.index, raw.function) == (self.index, FN_SEND) else None
-        if said is not None and _is_event(said):
+        if said is None:
+            log.debug("centurion: dropped the receiver's event from index 0x%02x fn %d",
+                      raw.index, raw.function)
+        elif _is_event(said):
             return said
-        log.debug("centurion: dropped the receiver's event from index 0x%02x fn %d",
-                  raw.index, raw.function)
+        else:
+            log.debug("centurion: dropped the headset's late reply from %s", _reply_source(said))
         return None
 
     def request(self, index: int, function: int, params: bytes = b"", *,

@@ -14,6 +14,7 @@ import contextlib
 import logging
 import selectors
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -22,8 +23,8 @@ from typing import TYPE_CHECKING, cast
 from ..astro import (
     A50,
     BANDS,
+    KEY as A50_KEY,
     NAME,
-    NO_SETTING,
     NOT_ANSWERING,
     PRESET_SETTLE,
     PRESETS,
@@ -35,6 +36,7 @@ from ..astro import (
     SAVE_TIMEOUT,
     SAVING,
     SETTING_NAMES,
+    SETTING_SUBJECTS,
     SETTING_WORDS,
     SETTINGS,
     AstroError,
@@ -52,8 +54,8 @@ from ..astro import (
 )
 from ..battery import BASE_CHARGE, astro as astro_battery
 from ..hidpp import NO_RULE
-from ..tray import Battery
-from ..wording import reason, route, whole, word_list, written
+from ..tray import HEADSET_NOT_ANSWERING_CODE, Battery
+from ..wording import NO_SETTING, reason, route, whole, word_list, written
 from .shared import (
     DEVICE_NOT_SET_UP,
     KEYBOARD_BATTERY_INTERVAL,
@@ -87,14 +89,18 @@ HEADSET_STATUS_INTERVAL = 5.0
 #: No base station found, with what to do, in the keyboard's and the mouse's shape: only PC
 #: mode has the control interface.
 NO_BASE = f"no {NAME} base station found; plug it in on USB, its switch on PC"
-#: NODE_DENIED's words for the base station, its model named as the A50 X's is.
+#: The base station, its model named as the A50 X's is.
 BASE_WORDS = f"{NAME}'s base station"
-#: A sentence of a revert's note, as NOT_REVERTED is: the window toasts a short note as it is.
+#: A sentence of a revert's note, as NOT_REVERTED is: the window toasts a short note whole,
+#: its final period dropped.
 NO_SAVED_VALUE = "Auto shut-off has no saved value to go back to."
 #: A revert's note of each refused value the read after it did not find back at its flash
 #: value, with why: Revert to saved's word, since Put back is the first-read values' (the
 #: Centurion's and the G432's).
 NOT_REVERTED = "Not reverted: {}."
+#: Why a part is not reverted when its flash value is one the setter would send otherwise: a
+#: band width off the tenths the read rounds to, a shelf's nonzero width, a name not in UTF-8.
+NOT_SENT_AS_STORED = "Gearbench cannot write its saved value back exactly"
 #: The base answered with an error, named by the error's name.
 REFUSED = f"the {BASE_WORDS} refused that ({{}})"
 
@@ -133,18 +139,40 @@ def differs(entry: dict | None) -> bool:
     return entry is not None and entry["active"] != entry["saved"]
 
 
-def preset_differs(eq: dict) -> bool:
-    return differs(eq["name"]) or differs(eq["gains"]) or any(map(differs, eq["bands"]))
+def preset_differs(eq: dict, stored: dict) -> bool:
+    """Whether a preset's name, gains or a band differs from flash, the name and the bands
+    by `stored`, the bytes they were read from (Headset._stored)."""
+    return differs(stored["name"]) or differs(eq["gains"]) or any(map(differs, stored["bands"]))
+
+
+def utf8(stored: bytes) -> bool:
+    try:
+        stored.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def sent_as_stored(band: int, saved: dict, word: int) -> bool:
+    """Whether 6F, given a band's flash value as A50.band reads it, sends `word`, the width
+    word the flash holds: not for a word off A50.band's tenths, nor a nonzero one on a shelf.
+    A value 6F's checks refuse counts, since the write then names its own refusal."""
+    try:
+        return band_width(band, saved["freq"], saved["width"]) == word
+    except ValueError:
+        return True
 
 
 def setting_value(setting: str, value: object) -> int | str:
-    """A request's value as A50.set and set_preset take it; A50 checks the ranges."""
+    """A request's value as A50.set and set_preset take it; A50 checks the ranges. The
+    refusal names the setting as A50.set's does."""
+    what = SETTING_SUBJECTS.get(setting, setting)
     if setting in SETTING_WORDS:
         if not isinstance(value, str):
-            raise ValueError(f"{setting} is {word_list(SETTING_WORDS[setting])}, "
+            raise ValueError(f"{what} is {word_list(SETTING_WORDS[setting])}, "
                              f"not {written(value)}")
         return value.strip().lower()
-    return whole_number(value, setting)
+    return whole_number(value, what)
 
 
 def eq_change(request: dict, active: int | None
@@ -177,8 +205,8 @@ def eq_change(request: dict, active: int | None
             raise ValueError(f"a band is 1 to {len(BANDS)}, each once, not {written(number)}")
         band_width(number, freq, width)
         # The frequency is a whole number: astro.band_width refuses any other. The width to a
-        # tenth, which is all the read shows (A50.band): a finer one would differ from the
-        # flash unseen.
+        # tenth, which is all the reply shows (A50.band): a finer one would differ from the
+        # flash where no reply shows it.
         changes.append((number, cast("int", freq),
                         None if width is None else round(float(width), 1)))
     return preset, name, gains, changes
@@ -258,11 +286,18 @@ class Headset(BatteryNotices):
         self.preset: int | None = None
         #: By preset, as `headset` answers it.
         self.presets: dict[int, dict] = {}
+        #: By preset, as `presets` holds: the name's bytes and each band's (frequency, width
+        #: word), each {"active", "saved"}, as the base stores them, since `presets` holds
+        #: the name decoded and the width rounded. Kept apart, out of the reply.
+        self._stored: dict[int, dict] = {}
         #: Auto shut-off, outside READS_SAVED, once written since the last
         #: save or the connect: nothing else says it is unsaved.
         self._written: set[str] = set()
         self.saving: Save | None = None
         self.save_error: str | None = None
+        #: The last save headset_save started on this base, None since the attach: a client
+        #: following its save tells a replugged base or a restarted daemon by it.
+        self.save_id: str | None = None
         self.read_wall: int | None = None
         #: A full read owed, since the cache may be stale (each place that sets it says
         #: why): done at the next status answer while linked.
@@ -302,7 +337,7 @@ class Headset(BatteryNotices):
         if self.a50 is None:
             return None
         return {**attached_entry(self.name, str(self.path), route("base station"), self.battery,
-                                 self.battery_wall, answering=self.answers()),
+                                 self.battery_wall, self, answering=self.answers()),
                 "linked": self.linked}
 
     def tray_battery(self) -> Battery | None:
@@ -313,8 +348,9 @@ class Headset(BatteryNotices):
         too), so the reading kept from before counts as plugged in and is not a low battery."""
         if self.a50 is None or self.battery is None:
             return None
-        shown = Battery.of("headset", self.name, self.battery,
-                           answering=self.linked and not self.silent, read_at=self.battery_wall)
+        shown = self.tray_line("headset", self.name, self.battery,
+                               answering=self.linked and not self.silent,
+                               read_at=self.battery_wall)
         return replace(shown, plugged=True) if self.docked and not self.linked else shown
 
     def deadlines(self) -> list[float]:
@@ -332,8 +368,6 @@ class Headset(BatteryNotices):
     def maybe_connect(self) -> None:
         """Look for a base once the retry is due, or at once when a base that did not answer has
         lost its node; the next look is timed from the attempt's end."""
-        # Unplugged, as NOT_ANSWERING asks: looked for now, so it stops being said, and its
-        # replug is not left to the doubled wait.
         if self.a50 is not None or not self._lookout.due():
             return
         try:
@@ -364,7 +398,7 @@ class Headset(BatteryNotices):
                                 f"{reason(exc)}; {NO_RULE}")
             return
         except OSError as exc:
-            log.debug("headset: base station not reachable on %s: %s", path, exc)
+            log.debug("headset: base station not reachable on %s: %s", path, reason(exc))
             return
         self._notes.opened(path)
         try:
@@ -392,7 +426,7 @@ class Headset(BatteryNotices):
             log.info("headset: setting up the base station on %s stopped: %s", path, reason(exc))
         if self.a50 is not a50:
             return                  # it went away during the setup
-        self.d.selector.register(a50.base.fileno, selectors.EVENT_READ, "headset")
+        self.d.selector.register(a50.fileno, selectors.EVENT_READ, "headset")
         log.info("headset: connected on %s (%s, base %s)", path, self.name, version)
         self.d.forget_slow("headset")
         self.d.note_slow(started, f"{self.name} connect on {path}")
@@ -400,7 +434,7 @@ class Headset(BatteryNotices):
     @staticmethod
     def _close(a50: A50) -> None:
         with contextlib.suppress(OSError):
-            a50.base.close()
+            a50.close()
 
     def teardown(self) -> str | None:
         """Let go of the base: nothing is sent to it, since its settings stay
@@ -411,7 +445,7 @@ class Headset(BatteryNotices):
             return None
         name = self.name
         with contextlib.suppress(KeyError, ValueError):
-            self.d.selector.unregister(a50.base.fileno)
+            self.d.selector.unregister(a50.fileno)
         self._close(a50)
         self._clear()
         self.path = self.product = self.version = None
@@ -434,7 +468,7 @@ class Headset(BatteryNotices):
         if (denied := self._notes.denied_problem()) is not None:
             found.append(("headset_no_permission", denied))
         if self._lookout.unanswered is not None or self.silent:
-            found.append(("headset_not_answering", NOT_ANSWERING))
+            found.append((HEADSET_NOT_ANSWERING_CODE, NOT_ANSWERING))
         if self._notes.not_set_up is not None:
             found.append(("headset_not_set_up", self._notes.not_set_up))
         return found
@@ -474,16 +508,16 @@ class Headset(BatteryNotices):
             self.silent = False
         return result
 
-    def _unless_refused[**P, T](self, what: Callable[P, T], *args: P.args,
+    def _unless_refused[**P, T](self, subject: str, what: Callable[P, T], *args: P.args,
                                 **kwargs: P.kwargs) -> T | None:
-        """headset_call, with a refusal logged and answered None; any other failure still
-        raises, which stops the caller."""
+        """headset_call reading `subject`, with a refusal logged under that name and answered
+        None; any other failure still raises, which stops the caller."""
         try:
             return self.headset_call(what, *args, **kwargs)
         except HeadsetError as exc:
             if not refused(exc):
                 raise
-            log.debug("headset: %s", exc)
+            log.debug("headset: reading %s: %s", subject, exc)
             return None
 
     def mark_silent(self) -> None:
@@ -522,17 +556,21 @@ class Headset(BatteryNotices):
         try:
             self._tend(time.monotonic())
         except HeadsetError as exc:
-            # headset_call logs a base gone or not answering. A refusal of any request but 54
-            # never gets here (_unless_refused); any other failure is said here, at info once
-            # until a poll goes through (_poll_status).
-            said = f"headset: {exc}"
-            if isinstance(exc.__cause__, (BaseGone, AstroTimeout)) or said == self._said:
-                log.debug("%s", said)
-            else:
-                log.info("%s", said)
-                self._said = said
+            # A refusal of any request but 54 never gets here (_unless_refused).
+            self._say(exc)
         except FAILURES as exc:
             log.info("headset: a pass over the base station stopped: %s", reason(exc))
+
+    def _say(self, exc: HeadsetError) -> None:
+        """Log a failure the gate raised out of a pass or a pump: at debug where headset_call
+        said it (a base gone or not answering) or it is the line said last, else at info,
+        once until a poll goes through (_poll_status)."""
+        said = f"headset: {exc}"
+        if isinstance(exc.__cause__, (BaseGone, AstroTimeout)) or said == self._said:
+            log.debug("%s", said)
+        else:
+            log.info("%s", said)
+            self._said = said
 
     def _tend(self, now: float) -> None:
         if self.saving is not None:
@@ -563,9 +601,10 @@ class Headset(BatteryNotices):
             if self.saving is not None and self.saving.retry_at is None:
                 self._take_save_answer()
             else:
-                self.a50.base.pump()
+                self.a50.pump()
         except HeadsetError as exc:
-            log.debug("headset: %s", exc)
+            # The read after a save's answer (_take_save_answer).
+            self._say(exc)
         except BaseGone as exc:
             log.info("headset: the base station went away: %s", failure_reason(exc))
             self.teardown()
@@ -582,10 +621,10 @@ class Headset(BatteryNotices):
         docked, linked = self.headset_call(self._a50.status)
         fresh = self._take_status(docked, linked)
         if self.linked:
-            self.balance = self._unless_refused(self._a50.balance)
+            self.balance = self._unless_refused("the balance", self._a50.balance)
             if not fresh:
                 self._read_active_preset()
-        self._said = None           # a failure after this one is said again (tend)
+        self._said = None           # a failure after this one is said again (_say)
         return fresh
 
     def _take_status(self, docked: bool, linked: bool) -> bool:
@@ -609,7 +648,8 @@ class Headset(BatteryNotices):
             self.balance = None
         if linked and self.headset_version is None and (self._read_owed or self._version_owed):
             self._version_owed = True
-            self.headset_version = self._unless_refused(self._a50.headset_version)
+            self.headset_version = self._unless_refused("the headset's version",
+                                                        self._a50.headset_version)
             self._version_owed = False
         if not (linked and self._read_owed):
             return False
@@ -621,7 +661,7 @@ class Headset(BatteryNotices):
 
     def _read_battery(self) -> None:
         self._battery_due = time.monotonic() + KEYBOARD_BATTERY_INTERVAL
-        answer = self._unless_refused(self._a50.battery)
+        answer = self._unless_refused("the battery", self._a50.battery)
         if answer is None:
             return
         self.battery = astro_battery(*answer, docked=self.docked)
@@ -629,33 +669,43 @@ class Headset(BatteryNotices):
         self.warn_battery(self.battery)
 
     def _read_setting(self, name: str) -> None:
-        value = self._unless_refused(read_setting, self._a50, name)
+        value = self._unless_refused(name, read_setting, self._a50, name)
         if value is None:
             self.settings.pop(name, None)
+            # After a write, unsaved and the revert need the part's RAM and flash values: read
+            # again. Inside a full read this changes nothing, since _read_settings clears it.
+            self._read_owed = True
         else:
             self.settings[name] = value
 
     @staticmethod
-    def _preset_eq(a50: A50, preset: int) -> dict:
-        name = {"active": a50.name(preset), "saved": a50.name(preset, saved=True)}
+    def _preset_eq(a50: A50, preset: int) -> tuple[dict, dict]:
+        """A preset as `presets` and `_stored` hold it."""
+        (name_now, stored_now), (name_flash, stored_flash) = (
+            a50.name(preset), a50.name(preset, saved=True))
         active, saved = a50.gains(preset)
-        bands = []
+        bands, stored_bands = [], []
         for band in BANDS:
-            now, flash = a50.band(preset, band)
+            (now, word_now), (flash, word_flash) = a50.band(preset, band)
             bands.append({"band": band, "active": asdict(now), "saved": asdict(flash)})
-        return {"preset": preset, "name": name,
-                "gains": {"active": active, "saved": saved}, "bands": bands}
+            stored_bands.append({"active": (now.freq, word_now),
+                                 "saved": (flash.freq, word_flash)})
+        return ({"preset": preset, "name": {"active": name_now, "saved": name_flash},
+                 "gains": {"active": active, "saved": saved}, "bands": bands},
+                {"name": {"active": stored_now, "saved": stored_flash}, "bands": stored_bands})
 
     def _read_preset_eq(self, preset: int) -> None:
-        eq = self._unless_refused(self._preset_eq, self._a50, preset)
-        if eq is None:
+        read = self._unless_refused(f"preset {preset}", self._preset_eq, self._a50, preset)
+        if read is None:
             self.presets.pop(preset, None)
+            self._stored.pop(preset, None)
+            self._read_owed = True      # as _read_setting's
         else:
-            self.presets[preset] = eq
+            self.presets[preset], self._stored[preset] = read
 
     def _read_active_preset(self) -> None:
         if time.monotonic() >= self._settle_until:
-            self.preset = self._unless_refused(self._a50.preset)
+            self.preset = self._unless_refused("the active preset", self._a50.preset)
 
     def _read_settings(self) -> None:
         """Read every setting, every preset and, unless a 67 is within PRESET_SETTLE, the active
@@ -676,7 +726,8 @@ class Headset(BatteryNotices):
         does, and a setting without a flash value written since the last
         save or the connect."""
         found = [name for name in READS_SAVED if differs(self.settings.get(name))]
-        found += [f"preset_{p}" for p, eq in self.presets.items() if preset_differs(eq)]
+        found += [f"preset_{p}" for p, eq in self.presets.items()
+                  if preset_differs(eq, self._stored[p])]
         return sorted([*found, *self._written])
 
     def reply(self) -> dict:
@@ -695,6 +746,7 @@ class Headset(BatteryNotices):
             "versions": versions,
             "battery": self.battery,
             "battery_at": self.battery_wall,
+            **self.notices_reply(),
             "balance": self.balance,
             "settings": {name: self.settings[name] for name in SETTINGS if name in self.settings},
             "preset": self.preset,
@@ -702,6 +754,7 @@ class Headset(BatteryNotices):
             "unsaved": self.unsaved(),
             "saving": self.saving is not None,
             "save_error": self.save_error,
+            "save_id": self.save_id,
             "read_at": self.read_wall,
         }
 
@@ -709,6 +762,12 @@ class Headset(BatteryNotices):
 
     def battery_names(self) -> tuple[str, str]:
         return self.name, "the headset"
+
+    def battery_ids(self) -> tuple[str, ...]:
+        return (A50_KEY,)
+
+    def battery_node(self) -> Path | None:
+        return self.path
 
     # -- saving ----------------------------------------------------------------
 
@@ -795,7 +854,7 @@ class Headset(BatteryNotices):
         setting = setting.strip().lower().replace("-", "_")
         if setting != "preset" and setting not in SETTINGS:
             return {"ok": False, "error": NO_SETTING.format(
-                written(setting), word_list([*SETTINGS, "preset"], "and"))}
+                NAME, written(setting), word_list([*SETTINGS, "preset"], "and"))}
         try:
             value = setting_value(setting, request["value"])
         except ValueError as exc:
@@ -879,31 +938,36 @@ class Headset(BatteryNotices):
         seq = self.headset_call(a50.start_save)
         self.saving = Save(seq=seq, deadline=time.monotonic() + SAVE_TIMEOUT)
         self.save_error = None
+        self.save_id = uuid.uuid4().hex
         log.info("headset: saving to the base station's flash")
         return self.reply()
 
-    def _parts(self, a50: A50) -> Iterator[tuple[str, dict, Callable[..., object],
+    def _parts(self, a50: A50) -> Iterator[tuple[str, dict, bool, Callable[..., object],
                                                 tuple[object, ...]]]:
         """Each setting and preset part the cache holds with its flash value: its name in
-        headset_revert's note, a preset's by its slot, its entry, and the setter and
-        arguments that write the flash value back."""
+        headset_revert's note, a preset's by its slot; its entry, a name's and a band's as
+        stored; whether the setter writes the flash value back as stored; and the setter
+        and arguments that write it."""
         for name in SETTINGS:
             entry = self.settings.get(name)
             if entry is not None and "saved" in entry:
-                yield SETTING_NAMES[name], entry, a50.set, (name, entry["saved"])
+                yield SETTING_NAMES[name], entry, True, a50.set, (name, entry["saved"])
         for preset, eq in sorted(self.presets.items()):
-            yield (f"slot {preset}'s name", eq["name"], a50.set_name,
-                   (preset, eq["name"]["saved"]))
-            yield (f"slot {preset}'s gains", eq["gains"], a50.set_gains,
+            stored = self._stored[preset]
+            yield (f"slot {preset}'s name", stored["name"], utf8(stored["name"]["saved"]),
+                   a50.set_name, (preset, eq["name"]["saved"]))
+            yield (f"slot {preset}'s gains", eq["gains"], True, a50.set_gains,
                    (preset, eq["gains"]["saved"]))
-            for band in eq["bands"]:
-                saved = band["saved"]
-                yield (f"slot {preset}'s band {band['band']}", band, a50.set_band,
-                       (preset, band["band"], saved["freq"], saved["width"]))
+            for band, words in zip(eq["bands"], stored["bands"], strict=True):
+                number, saved = band["band"], band["saved"]
+                yield (f"slot {preset}'s band {number}", words,
+                       sent_as_stored(number, saved, words["saved"][1]), a50.set_band,
+                       (preset, number, saved["freq"], saved["width"]))
 
     def _cmd_headset_revert(self, request: dict) -> dict:
         """Every setting and preset that differs from the flash written back
-        from it, then all read again. One the setter or the base refuses is
+        from it, then all read again. One the setter or the base refuses, or
+        one the setter would not write back as stored, which is not sent, is
         named in the note and in the reply's `not_reverted`, unless the read
         after it finds it back at its flash value, and the rest go back. Auto
         shut-off has no flash value to read, so the note says so when it was
@@ -915,8 +979,11 @@ class Headset(BatteryNotices):
         refusals: dict[str, str] = {}
 
         def put_back() -> None:
-            for what, entry, write, args in self._parts(a50):
+            for what, entry, as_stored, write, args in self._parts(a50):
                 if not differs(entry):
+                    continue
+                if not as_stored:
+                    refusals[what] = NOT_SENT_AS_STORED
                     continue
                 try:
                     self.headset_call(write, *args)
@@ -931,7 +998,7 @@ class Headset(BatteryNotices):
         self._write_then_read(put_back, self._read_settings)
         # An answer Gearbench cannot read counts as a refusal, though the base may have taken
         # the value: the read says whether it did.
-        back = {what for what, entry, _write, _args in self._parts(a50) if not differs(entry)}
+        back = {what for what, entry, *_ in self._parts(a50) if not differs(entry)}
         missed = {what: why for what, why in refusals.items() if what not in back}
         # The refusal first: the window's toast shows only a long note's first sentence
         # (style.short_note).

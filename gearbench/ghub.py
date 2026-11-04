@@ -1,9 +1,8 @@
 """Read profiles, bindings, lighting and macros from Logitech G HUB's settings.
 
-G HUB keeps them in one JSON document in one row of `%LOCALAPPDATA%\\LGHUB\\settings.db`,
-a SQLite database in WAL mode whose newest changes can sit in `settings.db-wal`. This reads
-the database, or that document pulled out into a JSON file, into a `Found`; what cannot be
-carried over is listed by name. Nothing here writes a profile, macro or setting:
+This maps G HUB's settings document, which ghub_file.py reads from settings.db or a JSON
+file, into a `Found`; what cannot be carried over is listed by name. Nothing here reads a
+file or writes a profile, macro or setting:
 `ghub_plan.make_plan` works out what would be written, as an `import_plan.Plan`, and
 `import_plan.requests` turns it into control socket commands, so the daemon writes every
 file and its hand-edit protection covers an import.
@@ -12,19 +11,18 @@ file and its hand-edit protection covers an import.
 from __future__ import annotations
 
 import contextlib
-import sqlite3
 import string
-import tempfile
-import time
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path, PureWindowsPath
+from pathlib import PureWindowsPath
 from typing import cast
 
-from .apps import MAX_PROGRAM_BYTES, wanted_forms
-from .config import G_KEYS, parse_color
-from .json_text import TOO_DEEP, JsonRefused, json_value
+from .apps import MAX_PROGRAM_BYTES, program_bytes, wanted_forms
+from .config import G_KEYS, G_SHIFT, NOTHING as NO_BINDING, parse_color
+from .ghub_file import MAX_DOCUMENT_BYTES, MAX_NAME_CHARS, GhubError, records
+from .ghub_slots import MICE, SHIFTED, Slot, fixed_slots, mice_in, mouse_slots, mouse_where
+from .json_text import TOO_DEEP
 from .keyboard import G815, G915, G915_TKL, PRO_X_TKL
 from .keycodes import USAGE_NAMES
 from .library_files import Taken, by_name
@@ -43,34 +41,18 @@ from .macros import (
     WHILE_HELD,
     validate_steps,
 )
-from .mouse import MODEL_OF, ButtonTable, MouseModel, key_of
+from .mouse import key_of
 from .profiles import MAX_PROCESSES
-from .settings_files import ConfigError, read_capped
+from .settings_files import ConfigError
 from .uinput import UinputError, parse_binding
-from .wording import counted, kind_of, reason, whole, without_controls, written
+from .wording import counted, kind_of, whole, without_controls, written
 
 # -- G HUB's vocabulary -----------------------------------------------------
 
-SQLITE_MAGIC = b"SQLite format 3\x00"
-#: The largest settings.db or -wal read. G HUB's own are a few megabytes.
-MAX_FILE_BYTES = 64 << 20
-#: The largest settings document, JSON file or database row: it bounds what json.loads
-#: builds from a crafted file. The owner's decision of 2026-09-28.
-MAX_DOCUMENT_BYTES = 16 << 20
-#: The most profiles, and the most cards, a file may hold: a one-line record costs a
-#: profile object and a row in the window's list. The owner's decision of 2026-09-28.
-MAX_RECORDS = 10_000
-#: The longest application, profile or card name taken, in characters: a file can use one
-#: name thousands of times, and each use costs its length. The owner's decision of 2026-09-28.
-MAX_NAME_CHARS = 256
-#: The most other devices the window and `--list` name before saying how many more: the
-#: window shows them in one label, and a file can name hundreds of thousands.
+#: The most other devices the window and `--list` name, and desktop defaults the window
+#: names past the one it offers, before saying how many more: the window shows each list
+#: in one label, and a file can name hundreds of thousands of devices.
 SHOWN_DEVICES = 20
-READ_SECONDS = 10.0
-#: SQLite's memory cap while it reads, room for a MAX_DOCUMENT_BYTES value: the first query
-#: parses the whole schema, unselected views included. The limit is process-wide and can only
-#: be lowered; nothing else here uses SQLite.
-HEAP_BYTES = 256 << 20
 #: G HUB's placeholder names, which its own UI translates.
 DESKTOP_APP = "APPLICATION_NAME_DESKTOP"
 DEFAULT_PROFILE = "PROFILE_NAME_DEFAULT"
@@ -80,9 +62,10 @@ UNKNOWN_APP = "Unknown application"
 
 #: The card G HUB calls Disabled.
 DISABLED = "ffffffff-ffff-ffff-ffff-ffffffffffff"
-#: Every built-in assignment is `0f82f693-5b78-4cf5-867e-TTVV00000000`: TT an
-#: action category, VV the value in it, decoded from G HUB's settings.db
-#: against the action enums in its protobuf schemas.
+#: A built-in assignment the import reads is `0f82f693-5b78-4cf5-867e-TTVV00000000`: TT an
+#: action category, VV the value in it, decoded from G HUB's settings.db against the action
+#: enums in its protobuf schemas. G HUB's G600 also has 011e01000000 and on, a byte past VV,
+#: on its G-Shift layer.
 BUILTIN_PREFIX = "0f82f693-5b78-4cf5-867e-"
 BUILTIN_SUFFIX = "00000000"
 
@@ -90,17 +73,6 @@ BUILTIN_SUFFIX = "00000000"
 #: them under (KeyboardModel.g_key_names), by its slotPrefix in G HUB's device database,
 #: "g815" the G813's too; no settings file with a keyboard but the G915 has been read.
 KEYBOARDS = {"g915": G915, "g915tkl": G915_TKL, "g815": G815, "proxtkl": PRO_X_TKL}
-#: Each mouse model with buttons to bind, by its slotPrefix in G HUB's device database (read
-#: 2026-10-18), from one of its product ids. Only the G502 X PLUS's slots have been read from
-#: a settings file.
-MICE = {device: MODEL_OF[product] for device, product in (
-    ("g502x-plus", 0x4099), ("g502hero", 0xC08B), ("g502x-lightspeed", 0x409F),
-    ("proxwirelessmouse", 0x4093), ("g502x", 0xC099), ("g502x-wl", 0x40B2),
-    ("g502wireless", 0x407F), ("prowirelessmouse", 0x4079), ("g903hero", 0x4087),
-    ("prox2wirelessmouse", 0x40A9), ("proxrwirelessmouse", 0x40B8),
-    ("prox2compactwirelessmouse", 0x40B7),
-    ("prox2superstrikewirelessmouse", 0x40BD),
-    ("g102g203", 0xC092))}
 #: The keyboard whose G keys every profile has, as the preview lists them: another's are
 #: read where a profile has a slot of it.
 KEYBOARD = "g915"
@@ -116,9 +88,16 @@ MOUSE_ACTIONS = {0x01: "dpi-up", 0x02: "dpi-down", 0x03: "dpi-shift", 0x04: "dpi
 MOUSE_BUTTON_NAMES = {0x01: "left click", 0x02: "right click", 0x03: "middle click",
                       0x04: "back", 0x05: "forward"}
 MOUSE_BUTTON_ACTIONS = {0x04: "back", 0x05: "forward"}
-#: Built-in device actions (category 09).
+#: Built-in media controls (category 03), by the Usage enum of G HUB's media.proto, and the
+#: key the kernel's hid-input.c maps each one's consumer usage to.
+MEDIA_CONTROL_KEYS = {0x01: "playpause", 0x02: "stopcd", 0x03: "volumeup",
+                      0x04: "volumedown", 0x05: "nextsong", 0x06: "previoussong",
+                      0x07: "mute"}
+#: Built-in device actions (category 09), and the one Gearbench has, G-Shift, which holds the
+#: second layer while held: config.G_SHIFT.
 DEVICE_ACTION_NAMES = {0x01: "onboard profile cycle", 0x02: "next profile",
                        0x03: "previous profile", 0x05: "G-Shift", 0x06: "battery level"}
+GSHIFT_ACTION = 0x05
 #: 0907: "this G-Shift slot is at its default", which G HUB puts on every
 #: shifted slot nobody set.
 SHIFT_DEFAULT = "0907"
@@ -171,182 +150,6 @@ LIGHT_GROUPS: dict[str, dict[int, str]] = {
 }
 PER_KEY_DEVICE = "KEYBOARD_RGB_PER_KEY"
 
-#: The refusal of a -wal owned by a different account from the entry it sits beside.
-OTHER_OWNER = "{wal}: owned by a different account from {db}; copy both into a folder of your own"
-
-
-class GhubError(ValueError):
-    """The file could not be read as G HUB's settings, or an import cannot be done as asked.
-
-    Control characters are stripped: the text can quote the file and goes to terminals."""
-
-    def __init__(self, text: str) -> None:
-        super().__init__(without_controls(text))
-
-
-# -- reading the file ------------------------------------------------------
-
-def read_settings(path: Path) -> dict:
-    """The settings document, from settings.db or a JSON file, told apart by the first
-    bytes: a database renamed on the way from Windows still reads as one."""
-    try:
-        raw = read_capped(path, MAX_FILE_BYTES)
-        if raw.startswith(SQLITE_MAGIC):
-            raw = _read_database(path, raw)
-        elif len(raw) > MAX_DOCUMENT_BYTES:
-            raise GhubError(f"{path}: larger than {MAX_DOCUMENT_BYTES} bytes")
-    except ConfigError as exc:
-        raise GhubError(str(exc)) from None
-    except OSError as exc:
-        # The file that failed, which can be a -wal (_read_database).
-        raise GhubError(f"{exc.filename or path} could not be read ({reason(exc)})") from None
-    try:
-        data = json_value(raw, one_name=False)
-    except JsonRefused as exc:
-        # Where the stack runs out depends on the machine: here, or in parse's walk, which
-        # words it the same.
-        raise GhubError(f"{path.name}: {exc}") from None
-    if not isinstance(data, dict) or not _records(data, "profiles"):
-        raise GhubError(f"{path.name} holds no G HUB profiles")
-    for kind in ("profiles", "cards"):
-        if (count := len(_records(data, kind))) > MAX_RECORDS:
-            raise GhubError(f"{path.name} holds {count:,} G HUB {kind}; an import reads "
-                            f"{MAX_RECORDS:,} at most")
-    return data
-
-
-def _read_database(path: Path, raw: bytes) -> bytes:
-    """The newest settings row, read from a private copy of the database (`raw`) and its -wal,
-    which must belong to the account that owns the entry it sits beside, the path given or
-    the file a link names (OTHER_OWNER): SQLite applies any -wal, and in a folder others may
-    write in, such as /tmp, another account could put its own there first and decide what is
-    read.
-
-    Opening the user's own file is not read-only in effect: SQLite creates a -shm beside it
-    even read-only, cannot open it in a directory it may not write to, and a read-write
-    connection checkpoints the -wal and deletes it on close. SQLite rebuilds the -shm from
-    the -wal.
-    """
-    # Beside the path given, else beside the file a link names, where SQLite looks. A link's
-    # own owner, not its file's, holds the -wal beside it: a user's link to a file another
-    # account owns, on a Windows partition mounted as root, takes the user's own -wal.
-    wal = None
-    for beside, owner in ((path, path.lstat().st_uid), (path.resolve(), path.stat().st_uid)):
-        candidate = beside.with_name(beside.name + "-wal")
-        try:
-            # The entry's own owner, a link's not its target's: in a folder with the sticky
-            # bit only the folder's owner and the entry's can replace the entry checked.
-            if candidate.stat(follow_symlinks=False).st_uid != owner:
-                raise GhubError(OTHER_OWNER.format(wal=candidate, db=path.name))
-            wal = read_capped(candidate, MAX_FILE_BYTES)
-            break
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            # os.fstat's and os.read's errors name no file, and read_settings would name `path`.
-            exc.filename = exc.filename or str(candidate)
-            raise
-    try:
-        made = tempfile.TemporaryDirectory(prefix="gearbench-ghub-")
-    except OSError as exc:
-        # Not the user's file: mkdtemp's error names the folder it could not make, and
-        # gettempdir's, which found no folder it can write to, lists each one it tried.
-        if exc.filename is None:
-            raise GhubError(f"could not copy {path.name}: no temporary folder can be "
-                            f"written to") from None
-        raise GhubError(f"could not copy {path.name} into {Path(exc.filename).parent}: "
-                        f"{reason(exc)}") from None
-    with made as tmp:
-        copy = Path(tmp) / "settings.db"
-        try:
-            copy.write_bytes(raw)
-            if wal is not None:
-                (Path(tmp) / "settings.db-wal").write_bytes(wal)
-        except OSError as exc:
-            # A full temp folder, not the user's file: its write carries no file name.
-            raise GhubError(f"could not copy {path.name} into {Path(tmp).parent}: "
-                            f"{reason(exc)}") from None
-        try:
-            with contextlib.closing(sqlite3.connect(f"{copy.as_uri()}?mode=ro",
-                                                    uri=True)) as connection:
-                row = _newest_row(connection, path.name)
-        except (sqlite3.Error, UnicodeDecodeError) as exc:
-            # Only SQLite's own errors carry a code; the module's (a text value that is not
-            # UTF-8) do not.
-            if getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_TOOBIG:
-                raise GhubError(f"{path}: its settings are larger than {MAX_DOCUMENT_BYTES} "
-                                f"bytes") from None
-            # The sqlite3 module raises UnicodeDecodeError for SQLite's error text when it
-            # quotes bytes of the file that are not UTF-8, as from a damaged schema.
-            text = (exc.object.decode("utf-8", "replace")
-                    if isinstance(exc, UnicodeDecodeError) else str(exc))
-            # Cut: SQLite's text can quote a schema name from the file, up to 16 MiB long,
-            # and the refusal goes to the window's dialog.
-            raise GhubError(f"{path.name} is not G HUB's settings database "
-                            f"({text[:MAX_NAME_CHARS]})") from None
-        except MemoryError:
-            # What the sqlite3 module raises when SQLite reaches HEAP_BYTES.
-            raise GhubError(f"{path.name} needs more than {HEAP_BYTES >> 20} MiB to read; "
-                            f"G HUB's settings are a few megabytes") from None
-    if row is None or row[0] is None:
-        raise GhubError(f"{path.name} holds no settings")
-    return row[0] if isinstance(row[0], bytes) else str(row[0]).encode()
-
-
-def _newest_row(connection: sqlite3.Connection, name: str) -> tuple | None:
-    """The settings table's newest row, from a database anyone may have written: its
-    schema's SQL runs under the limits set here, and `_check_schema` refuses a table
-    that is not plain."""
-    # Before the first query, which parses the schema; this pragma does not.
-    connection.execute(f"PRAGMA hard_heap_limit={HEAP_BYTES}")
-    connection.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)
-    connection.setconfig(sqlite3.SQLITE_DBCONFIG_TRUSTED_SCHEMA, False)
-    connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_DOCUMENT_BYTES)
-    deadline = time.monotonic() + READ_SECONDS
-    connection.set_progress_handler(lambda: time.monotonic() > deadline, 1000)
-    try:
-        _check_schema(connection, name)
-        return connection.execute("SELECT file FROM data ORDER BY _id DESC LIMIT 1").fetchone()
-    except sqlite3.OperationalError:
-        if time.monotonic() > deadline:
-            raise GhubError(f"{name} took longer than {READ_SECONDS:g} s to "
-                            f"read") from None
-        raise
-
-
-def _check_schema(connection: sqlite3.Connection, name: str) -> None:
-    """Raise GhubError unless `data` is a plain table with no generated or
-    hidden column, and for a schema entry over MAX_DOCUMENT_BYTES. A view, a
-    virtual table or a generated column is code the file's author wrote,
-    which the SELECT would run."""
-    try:
-        found = connection.execute(
-            "SELECT type, sql FROM sqlite_schema WHERE name = 'data'").fetchall()
-    except sqlite3.DataError as exc:
-        # This first query parses every schema entry under SQLITE_LIMIT_LENGTH,
-        # so a TOOBIG here is the schema's, not the settings row's.
-        if getattr(exc, "sqlite_errorcode", None) != sqlite3.SQLITE_TOOBIG:
-            raise
-        raise GhubError(f"{name} is not G HUB's settings database: a schema entry is "
-                        f"larger than {MAX_DOCUMENT_BYTES} bytes") from None
-    if (len(found) != 1 or found[0][0] != "table"
-            or not str(found[0][1]).startswith("CREATE TABLE")):
-        raise GhubError(f"{name} is not G HUB's settings database: it has no plain data table")
-    if any(column[6] for column in connection.execute("PRAGMA table_xinfo(data)")):
-        raise GhubError(f"{name} is not G HUB's settings database: its data table has a "
-                        f"generated or hidden column")
-
-
-def _records(data: Mapping, name: str) -> list[dict]:
-    """A list of objects out of the document: `{"name": {"name": [...]}}`,
-    which is how G HUB nests them, or a bare list."""
-    found = data.get(name)
-    if isinstance(found, dict):
-        found = found.get(name)
-    if not isinstance(found, list):
-        return []
-    return [item for item in found if isinstance(item, dict)]
-
 
 def _name(raw: object) -> tuple[str, bool]:
     """A name from the file less its control characters and outer spaces,
@@ -357,8 +160,7 @@ def _name(raw: object) -> tuple[str, bool]:
 
 def _said_cut(what: str, cut: bool) -> list[str]:
     """The preview's Not imported line for a name `_name` cut, if it was."""
-    return ([f"{what} after {MAX_NAME_CHARS} characters: an imported name is cut there"]
-            if cut else [])
+    return [f"{what} after {MAX_NAME_CHARS} characters"] if cut else []
 
 
 # -- cards -----------------------------------------------------------------
@@ -374,6 +176,8 @@ class MacroRef:
 #: What an assignment is, for a G key or a mouse button to take or refuse.
 KEYS, ACTION, MACRO, NOTHING, DEFAULT, CLICK_BUTTON, OTHER = (
     "key", "action", "macro", "nothing", "default", "click", "other")
+#: An OTHER's reason where G HUB's card does what no Gearbench binding does.
+NO_EQUIVALENT = "which Gearbench has no equivalent for"
 
 
 @dataclass(frozen=True)
@@ -409,8 +213,8 @@ def keystroke_spec(code: object, modifiers: object) -> str:
     names = dict.fromkeys(HID_MODIFIERS[mod] for mod in mods)
     key = HID_KEYS.get(code) if isinstance(code, int) else None
     if key is None:
-        usage = (f"0x{code:02x}" if whole(code) else written(code))[:MAX_NAME_CHARS]
-        raise GhubError(f"a key with HID usage {usage}, which this importer does not read")
+        usage = (f"0x{code:02x}" if whole(code) and code >= 0 else written(code))[:MAX_NAME_CHARS]
+        raise GhubError(f"a key with HID usage {usage}, which Gearbench does not read")
     spec = "+".join([*names, key])
     try:
         parse_binding(spec)
@@ -442,24 +246,26 @@ def builtin_action(card_id: str) -> Action | None:
         if value not in MOUSE_BUTTON_NAMES:
             # Not a CLICK_BUTTON: that reason offers a macro's click step, which sends
             # none but HID_BUTTONS' five.
-            return Action(OTHER, "which Gearbench has no equivalent for",
-                          f"mouse button {value}")
+            return Action(OTHER, NO_EQUIVALENT, f"mouse button {value}")
         label = MOUSE_BUTTON_NAMES[value]
         if value in MOUSE_BUTTON_ACTIONS:
             return Action(ACTION, MOUSE_BUTTON_ACTIONS[value], label)
         return Action(CLICK_BUTTON, label, label)
+    if category == 0x03 and value in MEDIA_CONTROL_KEYS:
+        return Action(KEYS, MEDIA_CONTROL_KEYS[value], MEDIA_CONTROL_KEYS[value])
     if category == 0x04:
         label = MOUSE_ACTION_NAMES.get(value, f"mouse action {value}")
         if value in MOUSE_ACTIONS:
             return Action(ACTION, MOUSE_ACTIONS[value], label)
-        return Action(OTHER, "Gearbench has no such action", label)
+        return Action(OTHER, NO_EQUIVALENT, label)
     if card_id[24:28] == SHIFT_DEFAULT:
         return Action(DEFAULT, "", "G-Shift default")
+    if category == 0x09 and value == GSHIFT_ACTION:
+        return Action(ACTION, G_SHIFT, DEVICE_ACTION_NAMES[value])
     if category == 0x09:
         label = DEVICE_ACTION_NAMES.get(value, f"device action {value}")
-        return Action(OTHER, "Gearbench has no such action", label)
-    return Action(OTHER, "which Gearbench has no equivalent for",
-                  f"G HUB built-in {card_id[24:28]}")
+        return Action(OTHER, NO_EQUIVALENT, label)
+    return Action(OTHER, NO_EQUIVALENT, f"G HUB built-in {card_id[24:28]}")
 
 
 def card_action(card_id: object, cards: Mapping[str, dict]) -> Action:
@@ -490,7 +296,7 @@ def card_action(card_id: object, cards: Mapping[str, dict]) -> Action:
     # Cut too: the reason is copied into the preview at every key the card is on.
     what = (without_controls(kind)[:MAX_NAME_CHARS].replace("_", " ").lower()
             if isinstance(kind, str) else "") or "unknown"
-    return Action(OTHER, f"a G HUB {what} card, which Gearbench has no equivalent for",
+    return Action(OTHER, f"a G HUB {what} card, {NO_EQUIVALENT}",
                   f'"{name}"')
 
 
@@ -553,8 +359,8 @@ def convert_macro(card: Mapping) -> GhubMacro:
     try:
         steps = _joined([_step(component) for component in chosen])
         if len(steps) > MAX_STEPS:
-            raise GhubError(f"has {len(steps)} steps, more than the {MAX_STEPS} a Gearbench "
-                            f"macro holds")
+            raise GhubError(f"has {counted(len(steps), 'step')}, more than the {MAX_STEPS} a "
+                            f"Gearbench macro holds")
         out.steps = validate_steps(steps, name)
     except GhubError as exc:
         out.reason = str(exc)
@@ -568,7 +374,7 @@ def _step(component: object) -> dict:
     quoting at most MAX_NAME_CHARS of the file: the reason is copied to
     every key the macro is on."""
     if not isinstance(component, dict) or len(component) != 1:
-        raise GhubError("has a step this importer does not read")
+        raise GhubError("has a step Gearbench does not read")
     (kind, body), = component.items()
     body = _dig(body)
     if kind == "delay":
@@ -578,7 +384,7 @@ def _step(component: object) -> dict:
                             f"of milliseconds")
         if not 0 <= ms <= MAX_DELAY_MS:
             raise GhubError(f"has a delay of {repr(ms)[:MAX_NAME_CHARS]} ms, outside 0 to "
-                            f"{MAX_DELAY_MS}")
+                            f"{MAX_DELAY_MS:,}")
         return {"type": DELAY, "ms": ms}
     if kind == "keyboard":
         key = HID_KEYS.get(_usage(body.get("hidUsage")))
@@ -589,7 +395,7 @@ def _step(component: object) -> dict:
             if shown is None:
                 raise GhubError("has a key step that names no key")
             raise GhubError(f"presses {written(shown)[:MAX_NAME_CHARS]}, "
-                            f"which this importer does not read")
+                            f"which Gearbench does not read")
         return {"type": KEY_DOWN if body.get("isDown") else KEY_UP, "value": key}
     if kind == "mouse" and isinstance(body.get("button"), dict):
         button = HID_BUTTONS.get(_usage(body["button"].get("hidUsage")))
@@ -597,14 +403,14 @@ def _step(component: object) -> dict:
             raise GhubError("clicks a mouse button Gearbench macros cannot send")
         return {"type": CLICK_DOWN if body["button"].get("isDown") else CLICK_UP,
                 "button": button}
-    raise GhubError(f"has a {without_controls(kind)[:MAX_NAME_CHARS]} step, which this "
-                    f"importer does not read")
+    raise GhubError(f"has a {without_controls(kind)[:MAX_NAME_CHARS]} step, which "
+                    f"Gearbench does not read")
 
 
 def _usage(raw: object) -> int:
-    """A HID usage from the file, a whole number or its ASCII decimal digits as G HUB
-    writes it, else -1: int() alone takes "1_0" as 10, and a sign, outer spaces and
-    non-ASCII digits."""
+    """A HID usage or an M bank from the file, as a whole number or its ASCII decimal
+    digits as G HUB writes it, else -1: int() alone takes "1_0" as 10, and a sign, outer
+    spaces and non-ASCII digits."""
     if whole(raw):
         return raw
     if isinstance(raw, str) and raw.isascii() and raw.isdigit():
@@ -660,7 +466,7 @@ def convert_lighting(settings: dict, card: object, read: dict[str, GhubLighting 
         lighting = read[key]
         if lighting is not None:
             return lighting, ""
-    return None, "a G HUB effect this importer does not read"
+    return None, "a G HUB effect Gearbench does not read"
 
 
 def _per_key(record: dict) -> GhubLighting | None:
@@ -703,8 +509,6 @@ def _color(text: object) -> int | None:
 # -- profiles --------------------------------------------------------------
 
 Binding = str | MacroRef | None
-#: A profile's slot as `_slot` reads its id: (device, control, bank, shifted).
-Slot = tuple[str, str, int, bool]
 
 
 @dataclass
@@ -729,14 +533,18 @@ class GhubProfile:
     #: by the names Gearbench binds them under, to what each is bound to. A button missing
     #: keeps its model's default.
     mouse: dict[str, dict[str, Binding]] = field(default_factory=dict)
+    #: The same on the mouse's G-Shift layer: only a button G HUB gives a card of its own
+    #: there, so one missing sends its binding in `mouse`.
+    mouse_shift: dict[str, dict[str, Binding]] = field(default_factory=dict)
     lighting: GhubLighting | None = None
     #: Why `lighting` is None, for the preview's Lighting section; "" when it is not.
     lighting_note: str = ""
     #: The macro cards it uses, in the order it uses them.
     macros: list[str] = field(default_factory=list)
-    #: What G HUB calls a key binding, by where it is bound (`key_where` for a G key,
-    #: `mouse_where` for a button), when it is a card with a name of its own: "Use Med
-    #: Kit" for its key.
+    #: What G HUB calls a key binding where that differs from the keys bound, by where it is
+    #: bound (`key_where` for a G key, `mouse_where` for a button, each on its layer): a
+    #: keystroke card's name (card_name), "Use Med Kit" for its key, or "G HUB card" and the
+    #: start of its id for one with no name.
     labels: dict[str, str] = field(default_factory=dict)
     #: What is not imported, one sentence each.
     skipped: list[str] = field(default_factory=list)
@@ -747,9 +555,9 @@ class GhubProfile:
 
     def key_where(self, key: str, shifted: bool, bank: int) -> str:
         """How the preview names the G key `key` on `bank`, and what `labels` holds its label
-        under: "G1", "G1 with MR", "G1 on M2". A game profile has one bank, so its keys name
+        under: "G1", "G1 with G-Shift", "G1 on M2". A game profile has one bank, so its keys name
         none."""
-        return key + (" with MR" if shifted else "") + (f" on M{bank}" if self.desktop else "")
+        return key + (SHIFTED if shifted else "") + (f" on M{bank}" if self.desktop else "")
 
 
 @dataclass
@@ -786,14 +594,10 @@ def _slot(slot_id: str) -> Slot | None:
     shifted = rest.endswith("_shifted")
     rest = rest.removesuffix("_shifted")
     control, _, bank = rest.rpartition("_")
-    if not (device and bank.startswith("m") and bank[1:].isascii() and bank[1:].isdigit()):
+    number = _usage(bank[1:]) if bank.startswith("m") else -1
+    if not (device and number >= 0):
         return None
     if not (control.startswith(("g", "scroll")) and control.lstrip("gscrol").isdigit()):
-        return None
-    try:
-        number = int(bank[1:])
-    except ValueError:
-        # More than 4300 digits, which int() refuses.
         return None
     return device, control, number, shifted
 
@@ -816,10 +620,10 @@ class _Reader:
 
     def __init__(self, settings: dict) -> None:
         self.settings = settings
-        self.cards = {c["id"]: c for c in _records(settings, "cards")
+        self.cards = {c["id"]: c for c in records(settings, "cards")
                       if isinstance(c.get("id"), str)}
-        self.apps = {_app_id(a): a for a in _records(settings, "applications") if _app_id(a)}
-        self.records = _records(settings, "profiles")
+        self.apps = {_app_id(a): a for a in records(settings, "applications") if _app_id(a)}
+        self.records = records(settings, "profiles")
         self.per_app = Counter(_app_id(p) for p in self.records)
         # Once per application and per card: a file can give one application thousands of
         # profiles and one card thousands of keys.
@@ -857,8 +661,7 @@ class _Reader:
             self.actions[card_id] = card_action(card_id, self.cards), cut
         act, cut = self.actions[card_id]
         if cut:
-            skipped.append(f"{where}: its card's name after {MAX_NAME_CHARS} characters, a "
-                           f"name is cut there")
+            skipped.append(f"{where}: its card's name after {MAX_NAME_CHARS} characters")
         return act
 
     def lighting(self, card_id: object) -> tuple[GhubLighting | None, str]:
@@ -955,10 +758,11 @@ class _Reader:
                                                 where)
                     act = self.slot_action(profile, slots, (device, f"g{n}", bank, shifted),
                                            where)
-                    # The base layer is filled first, so the MR layer's key has its
+                    # The base layer is filled first, so the G-Shift layer's key has its
                     # binding to fall through to.
                     layer[key] = self.g_binding(profile, act, where,
-                                                layers[0][key] if shifted else None)
+                                                layers[0][key] if shifted else None, shifted,
+                                                bool(KEYBOARDS[device].g_key_defaults))
             profile.banks[bank] = layers
 
         def users(device: str, n: int, bank: int, shifted: bool) -> bool:
@@ -996,15 +800,24 @@ class _Reader:
         return (own or [*cards, *on, *holders])[0]
 
     def g_binding(self, profile: GhubProfile, act: Action | None, where: str,
-                  under: Binding) -> Binding:
+                  under: Binding, shifted: bool, typed: bool) -> Binding:
         """What the G key at `where` is bound to; what it cannot take is said in
         the profile's `skipped`. `under` is the key's base binding when `where` is
-        on the MR layer, which an unbound key there falls through to."""
-        if act is not None and act.kind == NOTHING and under is not None:
-            profile.skipped.append(f"{where}: {act.label}, Gearbench cannot disable a key on the "
-                                   f"MR layer, so it sends its binding without MR")
+        on the G-Shift layer (`shifted`), which an unbound key there falls through to, and
+        `typed` whether the key types its own key while unbound, as an F row's G keys do
+        (KeyboardModel.g_key_defaults). G-Shift binds on the base layer alone, and a key it
+        holds takes nothing on the G-Shift layer (shift_refused)."""
+        if act is None or (shifted and self.shift_refused(profile, act, where, under)):
             return None
-        if act is None or act.kind in (NOTHING, DEFAULT):
+        if act.kind == NOTHING and shifted and (under is not None or typed):
+            # Bound to nothing, or it would send its base binding or its own key.
+            return NO_BINDING
+        if act.kind == NOTHING and typed:
+            # The base layer takes no binding to nothing (config.key_binding).
+            profile.skipped.append(f"{where}: {act.label}, an F key with no binding types "
+                                   "its own key")
+            return None
+        if act.kind in (NOTHING, DEFAULT):
             return None
         if act.kind == KEYS:
             if act.label != act.value:
@@ -1012,19 +825,51 @@ class _Reader:
             return act.value
         if act.kind == MACRO:
             return self.use_macro(profile, act, where)
-        why = act.value if act.kind == OTHER else "a G key takes only a key or a macro"
+        if act.kind == ACTION and act.value == G_SHIFT:
+            return G_SHIFT
+        if act.kind == OTHER:
+            why = act.value
+        elif act.kind == CLICK_BUTTON or act.value in MOUSE_BUTTON_ACTIONS.values():
+            why = "a G key takes no mouse button; a macro's click step can send one"
+        else:
+            why = "a G key takes no mouse action"
         profile.skipped.append(f"{where}: {act.label}, {why}")
         return None
 
+    @staticmethod
+    def shift_refused(profile: GhubProfile, act: Action, where: str, under: Binding) -> bool:
+        """Whether the card `act` at `where`, on the G-Shift layer of a G key or a mouse button
+        whose base binding is `under`, is left out: G-Shift there, which binds on the base
+        layer alone, or any card on a key or button that holds G-Shift, whose own release must
+        let go of it. Said in `skipped`, but for the G-Shift default and for G-Shift on one
+        that holds it, which lose nothing."""
+        holds = act.kind == ACTION and act.value == G_SHIFT
+        if not holds and under != G_SHIFT:
+            return False
+        if act.kind != DEFAULT and not (holds and under == G_SHIFT):
+            why = ("Gearbench holds G-Shift from the base layer alone" if holds else
+                   "a key or button that holds G-Shift takes no G-Shift binding")
+            profile.skipped.append(f"{where}: {act.label}, {why}")
+        return True
+
     def mouse_buttons(self, profile: GhubProfile, slots: Mapping[Slot, object]) -> None:
-        """The profile's `mouse`: for each mouse it reads (mice_in), each of the model's
-        buttons G HUB binds; what one cannot take is said in `skipped`."""
+        """The profile's `mouse` and `mouse_shift`: for each mouse it reads (mice_in), each of
+        the model's buttons G HUB binds, on the base layer, then on the G-Shift layer, a card
+        of its own there alone (shift_refused); what one cannot take is said in `skipped`."""
         for device, model in mice_in(slots):
             mouse = profile.mouse[key_of(model)] = {}
+            shifted: dict[str, Binding] = {}
             for control, button in mouse_slots(model).items():
                 where = mouse_where(model, button)
                 act = self.slot_action(profile, slots, (device, control, 1, False), where)
                 self.mouse_button(profile, mouse, button, act, where)
+                where = mouse_where(model, button, shifted=True)
+                act = self.slot_action(profile, slots, (device, control, 1, True), where)
+                if act is None or self.shift_refused(profile, act, where, mouse.get(button)):
+                    continue
+                self.mouse_button(profile, shifted, button, act, where)
+            if shifted:
+                profile.mouse_shift[key_of(model)] = shifted
 
     def mouse_button(self, profile: GhubProfile, mouse: dict[str, Binding], button: str,
                      act: Action | None, where: str) -> None:
@@ -1033,7 +878,7 @@ class _Reader:
         if act is None or act.kind == DEFAULT:
             return
         if act.kind == NOTHING:
-            mouse[button] = "none"
+            mouse[button] = NO_BINDING
         elif act.kind in (KEYS, ACTION):
             mouse[button] = act.value
             if act.kind == KEYS and act.label != act.value:
@@ -1050,29 +895,30 @@ class _Reader:
 
     def mouse_not_rebound(self, profile: GhubProfile, slots: Mapping[Slot, object]) -> None:
         """Said in the profile's `skipped`, for each mouse it reads (mice_in): a fixed control
-        G HUB moved off its default card, and any card but the default on the mouse's G-Shift
-        layer."""
+        G HUB moved off its default card, and any card but the default on a fixed control's
+        G-Shift layer, which mouse_buttons does not read."""
         # Sorted once, and each model's labels made once: a file can hold hundreds of
         # thousands of slots, and a profile can read every mouse of MICE.
         ordered = sorted(slots.items(), key=str)
         for mouse, model in mice_in(slots):
-            labels = mouse_labels(model)
-            for control, (_label, default) in fixed_slots(model).items():
+            fixed = fixed_slots(model)
+            labels = {control: f"{model.name} {label}"
+                      for control, (label, _default) in fixed.items()}
+            for control, (_label, default) in fixed.items():
                 card = slots.get((mouse, control, 1, False))
                 if card is not None and card != builtin_id(default):
                     named = labels[control]
                     act = self.card_action_at(card, named, profile.skipped)
                     profile.skipped.append(f"{named}: {act.label}, Gearbench does not rebind it")
             for (device, control, bank, shifted), card in ordered:
-                # The mouse's own controls on bank 1, as the rest reads the mouse: a slot id can
-                # name any control and bank, and each would be a line.
-                where = labels.get(control)
-                if (device, bank) != (mouse, 1) or not shifted or where is None:
+                # The mouse's own fixed controls on bank 1, as the rest reads the mouse: a slot
+                # id can name any control and bank, and each would be a line.
+                if (device, bank) != (mouse, 1) or not shifted or control not in fixed:
                     continue
-                act = self.card_action_at(card, f"{where} with G-Shift", profile.skipped)
+                where = labels[control] + SHIFTED
+                act = self.card_action_at(card, where, profile.skipped)
                 if act.kind != DEFAULT:
-                    profile.skipped.append(f"{where} with G-Shift: {act.label}, Gearbench has no "
-                                           f"G-Shift layer on the mouse")
+                    profile.skipped.append(f"{where}: {act.label}, Gearbench does not rebind it")
 
 
 def _app_id(record: Mapping) -> str | None:
@@ -1107,7 +953,7 @@ def _processes(app: Mapping) -> tuple[list[str], list[str]]:
             # none at all, and the game profile refuses an empty name.
             if not name[:-len(".exe")]:
                 continue
-            if len(name.encode()) > MAX_PROGRAM_BYTES:
+            if program_bytes(name) > MAX_PROGRAM_BYTES:
                 said = [(f"Program names over {MAX_PROGRAM_BYTES} bytes: no file name is "
                          f"that long")]
                 continue
@@ -1125,63 +971,6 @@ def factory_card(n: int, shifted: bool) -> str:
     """The card G HUB puts on a keyboard's G key `n` out of the box: the F key of its number, or
     on the G-Shift layer, the G-Shift default."""
     return builtin_id(SHIFT_DEFAULT if shifted else f"01{0x39 + n:02x}")
-
-
-def mice_in(slots: Mapping[Slot, object]) -> list[tuple[str, MouseModel]]:
-    """The mice of MICE whose buttons a profile's import reads, by G HUB's slot prefix: each
-    the profile has a slot of, so a mouse G HUB has nothing for keeps an M profile's own."""
-    return [(device, model) for device, model in MICE.items()
-            if any(slot[0] == device for slot in slots)]
-
-
-def mouse_slots(model: MouseModel) -> dict[str, str]:
-    """G HUB's slots of a mouse model's buttons, to the names Gearbench binds them under. G
-    HUB's slot gN is the button entry N - 1 of the onboard profile (ButtonSlot.index): so the
-    G502 X PLUS's settings file has it, its paddle at index 4 being G HUB's g5 and Gearbench's
-    G6, and so the G502 HERO's device package draws it. Taken for every model's table."""
-    return {f"g{slot.index + 1}": slot.name
-            for slot in cast(ButtonTable, model.button_table).buttons}
-
-
-def fixed_slots(model: MouseModel) -> dict[str, tuple[str, str]]:
-    """A mouse model's other controls by G HUB's slot, which Gearbench does not rebind, with
-    what each is and the card it holds out of the box: the three main buttons, the wheel
-    tilts and a profile button at any entry past them no button or tilt holds, each at its
-    entry's slot (mouse_slots' rule), and the wheel. Holding that card loses nothing;
-    anything else is listed as not imported."""
-    table = cast(ButtonTable, model.button_table)
-    tilts = {f"g{index + 1}": ("wheel tilt left", "040b") if way < 0
-             else ("wheel tilt right", "040c")
-             for index, way in table.tilts}
-    held = {slot.index for slot in table.buttons} | {index for index, _way in table.tilts}
-    # Such an entry is the G903 LIGHTSPEED HERO's profile cycle at 11. Its card out of the box
-    # is taken as the one the G502 X PLUS's G9 holds for that job: no settings file with a
-    # G903 has been read.
-    rest = {f"g{index + 1}": ("profile button", "0901")
-            for index in range(3, table.count) if index not in held}
-    return {"g1": ("left button", "0201"), "g2": ("right button", "0202"),
-            "g3": ("middle button", "0203"), **tilts, **rest, "scroll1": ("wheel up", "0409"),
-            "scroll2": ("wheel down", "040a")}
-
-
-def button_label(model: MouseModel, button: str) -> str:
-    """What the mouse model calls its button `button`: "G4 (side, rear)"."""
-    return next(slot.label for slot in cast(ButtonTable, model.button_table).buttons
-                if slot.name == button)
-
-
-def mouse_where(model: MouseModel, button: str) -> str:
-    """How the preview names a mouse button: "G502 X PLUS G4 (side, rear)"."""
-    return f"{model.name} {button_label(model, button)}"
-
-
-def mouse_labels(model: MouseModel) -> dict[str, str]:
-    """Each G HUB slot of `model` by what Gearbench or the mouse calls it: a button's
-    (mouse_slots) over another control's (fixed_slots)."""
-    return ({control: f"{model.name} {label}"
-             for control, (label, _card) in fixed_slots(model).items()}
-            | {control: mouse_where(model, button)
-               for control, button in mouse_slots(model).items()})
 
 
 def _slots(record: Mapping, others: set[str]) -> dict[Slot, object]:

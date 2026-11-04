@@ -13,7 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-from .. import astro, eq_presets
+from .. import eq_presets
 from ..wording import RESTART_DAEMON, escaped as _escaped
 from .output import failed, print_block, print_json, print_reply, send
 
@@ -21,28 +21,28 @@ from .output import failed, print_block, print_json, print_reply, send
 #: one into it.
 LIBRARY_LABEL = "library"
 LIBRARY_EMPTY = "no presets yet; {}"
-#: Why --delete is refused with another change.
-ALONE = "--delete takes no other change of the preset"
+#: Why --delete is refused with another change, pick, write or save.
+ALONE = "--delete takes no other option that changes, picks, writes or saves a preset"
 
 
 def typed_name(name: str) -> str:
-    # argv holds a byte that is not UTF-8 as a lone surrogate, which encode() raises on.
+    # argv holds a byte that is not UTF-8 as a lone surrogate: named here as a byte, where
+    # preset_name says only that the name holds a character that is not valid text.
     if any(unicodedata.category(c) == "Cs" for c in name):
         raise ValueError("a preset name cannot hold a byte that is not UTF-8")
-    # astro.preset_name: the daemon's rule and the preset files', so a name is refused
-    # before anything is sent or saved.
-    astro.preset_name(name)
-    return name
+    # The daemon's rule and the preset files', so a name is refused before anything is sent
+    # or saved.
+    return eq_presets.preset_name(name)
 
 
 #: The refusals of a change with no preset's number, the command's name put in, and of a save
 #: given a number or another change.
 NO_NUMBER = "give the number of a preset in the library, as {} lists them"
-SAVE_NEW = "--save-as saves a new preset alone: no number, --name, --delete or --pick"
+SAVE_NEW = "--save-as takes no number, --name, --delete or --pick: it saves a new preset alone"
 #: The refusal of a model the daemon names and this install does not know, so has no library
 #: for: the daemon runs another version.
-NO_LIBRARY = ("the daemon names the {}, a model this gearbench-ctl does not know, so it keeps "
-              f"no library for it: {RESTART_DAEMON}")
+NO_LIBRARY = ("this gearbench-ctl does not know the {}, the model the daemon names, and so keeps "
+              f"no library for it; {RESTART_DAEMON}")
 
 
 def library_reply[M](args: argparse.Namespace, model_of: Callable[[dict], M | None], *,
@@ -96,16 +96,18 @@ def library_number(parser: argparse.ArgumentParser) -> None:
     """NUMBER, the preset a library's command shows or changes."""
     parser.add_argument("number", nargs="?", type=int,
                         help="the library preset to show or change, as the list numbers them; "
-                             "every preset is listed when left out")
+                             "every preset is listed when left out, the new one alone after "
+                             "--save-as")
 
 
 def library_arguments(parser: argparse.ArgumentParser, *, picks: str) -> None:
     """NUMBER (library_number), --name, --delete and --pick, which run_library reads, after
     the command's own --save-as; `picks` is what --pick does."""
     library_number(parser)
-    parser.add_argument("--name", help="rename it")
+    parser.add_argument("--name", help="the preset's new name")
     parser.add_argument("--delete", action="store_true",
-                        help="delete it, alone; those after it move up a number")
+                        help="delete the preset, with no other change given; the presets "
+                             "after it go a number lower")
     parser.add_argument("--pick", action="store_true", help=f"after --name, {picks}")
 
 

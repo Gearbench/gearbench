@@ -31,14 +31,15 @@ Found = tuple[Path, int, int]
 class Waited:
     """A keyboard node nothing answered on, kept open for the keyboard's own report
     (Waiting.wait_for): the node open, the node as attached_keyboards gives it, when it is
-    asked again and the wait before the next, and until when a report it sends does not
-    bring that forward again."""
+    asked again and the wait before the next, until when a report it sends does not bring
+    that forward again, and whether one brought this look forward."""
 
     dev: Hidpp
     found: Found
     retry_at: float
     wait: float = KEYBOARD_RETRY
     nudged_at: float = 0.0
+    heard: bool = False
 
 
 class Waiting:
@@ -57,12 +58,17 @@ class Waiting:
         and ask it again KEYBOARD_RETRY later, twice the last wait after each further
         unanswered probe, up to KEYBOARD_RETRY_MAX: a keyboard switched off waits for its own
         report, as a mouse does (Mice.keep_waiting; the owner's decision of 2026-10-21).
+        A probe unanswered after the keyboard said something (pump_waiting) is said at info.
         Not a cable's node, which a keyboard switched off leaves, nor one that cannot be
         opened: the loop asks those again every RECONNECT_DELAY."""
         path = str(found[0])
         now = time.monotonic()
         waited = self.nodes.get(path)
         if waited is not None:
+            if waited.heard:
+                # Keyboard.set_up says an unanswered probe at debug once it said it on the node.
+                log.info("the keyboard on %s did not answer; still waiting for it", path)
+                waited.heard = False
             waited.wait = min(waited.wait * 2, KEYBOARD_RETRY_MAX)
             waited.retry_at = now + waited.wait
             return
@@ -126,3 +132,4 @@ class Waiting:
             log.info("the keyboard on %s said something; setting it up", path)
             waited.nudged_at = now + KEYBOARD_RETRY
             waited.retry_at = now
+            waited.heard = True

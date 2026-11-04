@@ -11,12 +11,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from ...keyboard import (
-    MODEL_OF as KEYBOARDS,
     find_attached_keyboard,
     name as keyboard_name,
     typed_words,
 )
 from ...onboard import F_ONBOARD, MODE_HOST, read_mode
+from ..shared import said_once
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,7 +34,7 @@ log = logging.getLogger("gearbench")
 #: (Untyped). It is the Keyboard tab's Status row too, so it is short and leaves unsaid that
 #: Gearbench's lighting and key features are off, which its onboard profile implies (the
 #: owner's decision of 2026-10-25; "onboard", the profile's word in probe, the man page and
-#: the Mouse tab, the user's decision of 2026-10-27).
+#: the Mouse tab, the owner's decision of 2026-10-27).
 KEPT_ONBOARD = "the {model} keeps its onboard profile, its {keys} typing, until {until}: {why}"
 #: KEPT_ONBOARD's place for a keyboard held while the session is not active whose hand-back
 #: did not reach its own profile (OnboardHold.left_in_host), as short: in host mode its keys
@@ -88,6 +88,10 @@ class OnboardHold:
         #: Whether the keyboard held (kept_onboard) was left in host mode by a hand-back cut
         #: short (hold_for_session), so its own keys type nothing (LEFT_IN_HOST).
         self.left_in_host = False
+        #: The line said of the keyboard found in HOST mode and handed back (keep_onboard), by
+        #: its node's path: a hand-back that does not take is tried at each connect, and said
+        #: again at debug (said_once). Cleared at its setup.
+        self._in_host_said: dict[str, str] = {}
 
     def held_words(self, product: int, untyped: Untyped) -> str:
         """The problem of the keyboard of id `product` held for `untyped`: KEPT_ONBOARD, or
@@ -132,23 +136,25 @@ class OnboardHold:
         Found in ONBOARD mode, it is written nothing and held there (held_onboard). Found in
         HOST mode, where a stop that did not run leaves it, it is handed back as a stop hands
         it back, and its next connect reads its mode again, so a hand-back cut short is tried
-        again. Its handle is closed either way. A read nothing answers raises into connect's
-        guard."""
+        again, said at info, then at debug while its line repeats, until its setup (said_once).
+        Its handle is closed either way. A read nothing answers raises into connect's guard."""
         product = found[1]
-        untyped = self.untyped() if KEYBOARDS[product].g_key_defaults else None
+        untyped = self.untyped() if "typed_keys" in self.keyboard.keyboard_able else None
         if untyped is None:
             # Set up, so no longer held: a later connect while Gearbench cannot type reads its
             # mode again rather than take an old hold's node for it.
             self.kept_onboard, self.left_in_host = None, False
+            self._in_host_said.clear()
             return False
         dev = cast("Hidpp", self.keyboard.dev)
         onboard = dev.feature(F_ONBOARD)
         in_host = onboard is not None and read_mode(dev, onboard) == MODE_HOST
         said = self.keyboard.teardown_device(hand_back=in_host, connected=False)
         if in_host:
-            log.info("%s was in host mode, where nothing types its %s until %s: whatever "
-                     "drove it last did not hand it back; %s", keyboard_name(product),
-                     typed_words(product), untyped.until, said)
+            said_once(self._in_host_said, str(found[0]),
+                      f"{keyboard_name(product)} was in host mode, where nothing types its "
+                      f"{typed_words(product)} until {untyped.until}: whatever drove it last "
+                      f"did not hand it back; {said}", logging.INFO)
         else:
             self.kept_onboard, self.left_in_host = found, False
             log.log(untyped.level, "%s", kept_onboard_words(product, untyped))

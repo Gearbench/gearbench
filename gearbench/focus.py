@@ -42,7 +42,8 @@ class Focus:
     """The focused program, from the Shell extension while it is in force, else Xwayland.
 
     `x_factory(changed)` builds the xfocus.XFocus. `changed()` is called when focus comes
-    into force, goes out of it, moves to another source, or settles on another process.
+    into force, goes out of it, moves to another source, or settles on another process;
+    close() does not call it.
     """
 
     def __init__(self, changed: Callable[[], None],
@@ -84,8 +85,8 @@ class Focus:
 
     # ------------------------------------------------------------ the loop
 
-    def start(self, selector: selectors.BaseSelector, tag: object) -> bool:
-        return self.x.start(selector, tag)
+    def start(self, selector: selectors.BaseSelector, tag: object) -> None:
+        self.x.start(selector, tag)
 
     def dispatch(self, mask: int) -> None:
         self.x.dispatch(mask)
@@ -115,6 +116,7 @@ class Focus:
             self._stop_shell()
             log.info("Gearbench's GNOME Shell extension stopped; %s",
                      "following window focus on Xwayland" if self.x.ready
+                     else "waiting for Xwayland" if self.x.pending
                      else BY_RUNNING_PROGRAMS)
             self._changed()
             return

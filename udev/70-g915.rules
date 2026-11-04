@@ -13,7 +13,7 @@
 # builtin, which 60-persistent-hidraw.rules imports, well before this file is
 # read.
 #
-# install.sh puts this in /usr/local/lib/udev/rules.d/; the .deb puts it in
+# install.sh puts this in /usr/local/lib/udev/rules.d/; the package puts it in
 # /usr/lib/udev/rules.d/. Either way, reload with:
 #   sudo udevadm control --reload
 #   sudo udevadm trigger --subsystem-match=hidraw --action=add
@@ -32,5 +32,7 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_
 #
 # A receiver's vendor interface carries the HID++ traffic of everything
 # paired to it. Keystrokes are not on it: those are interface 01, which gets
-# nothing.
-KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c541", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"
+# nothing. Should a kernel's hid-logitech-dj bind the c541, as one binds the
+# G915 TKL's c545 (70-g915-tkl.rules), DEVPATH!= leaves out the node it gives
+# each device paired to it, which has the receiver's properties too.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", DEVPATH!="*/0003:046D:C541.*/0003:*", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c541", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"

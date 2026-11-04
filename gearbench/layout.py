@@ -134,7 +134,7 @@ class Key:
 
 #: Where the blocks start, in key units, from G HUB's rectangles: the function row's three
 #: groups, the navigation block (Print Screen down to Left), the keypad and the G column.
-_F1, _F5, _F9 = 1.67, 6.34, 11.0
+_F_ROW = (1.67, 6.34, 11.0)
 _NAV = 15.35
 _PAD = 18.7
 _G = -1.35
@@ -150,6 +150,11 @@ def _function_row(starts: tuple[float, float, float], y: float) -> tuple[Key, ..
                  for i, n in enumerate(range(first, first + 4)))
 
 
+def _by_row(keys: tuple[Key, ...]) -> tuple[Key, ...]:
+    """`keys` row by row, each row left to right."""
+    return tuple(sorted(keys, key=lambda key: (int(key.y), key.x)))
+
+
 #: Full-size ANSI plus the G915's own extras: the logo and the buttons above the function row,
 #: the media keys at its right, and G1-G5 at the left.
 KEYS: tuple[Key, ...] = (
@@ -163,7 +168,7 @@ KEYS: tuple[Key, ...] = (
 
     # Function row.
     Key("Esc", 0, 1.24, zone=ZONES["ESC"]),
-    *_function_row((_F1, _F5, _F9), 1.24),
+    *_function_row(_F_ROW, 1.24),
     Key("PrtSc", _NAV, 1.24, zone=ZONES["PRINT"]),
     Key("ScrLk", _NAV + 1, 1.24, zone=ZONES["SCROLL LOCK"]),
     Key("Pause", _NAV + 2, 1.24, zone=ZONES["PAUSE"]),
@@ -228,7 +233,7 @@ KEYS: tuple[Key, ...] = (
 
 #: The G515 TKL's blocks: where the function row's three groups and the navigation block start,
 #: and the function row's top, measured off the guide's drawing.
-_G515_F1, _G515_F5, _G515_F9 = 2.0, 6.5, 11.0
+_G515_F_ROW = (2.0, 6.5, 11.0)
 _G515_NAV = 15.2
 _G515_TOP = 1.32
 
@@ -245,44 +250,28 @@ _ANSI_BOTTOM: tuple[Key, ...] = tuple(Key(label, x, 6.5, w=w, zone=ZONES[name])
 #: buttons' size around the guide's 0.44 square. Shared by the wired-only model and the G515
 #: LIGHTSPEED TKL, whose guide was not read. Its F1 to F12 are bindable, as G515-F1 to
 #: G515-F12 (keyboard.G515_TKL).
-G515_KEYS: tuple[Key, ...] = (
+G515_KEYS: tuple[Key, ...] = _by_row((
     Key("Game", 0.5, 0.14, w=_ROUND, h=_ROUND),
-
     Key("Esc", 0, _G515_TOP, zone=ZONES["ESC"]),
     *(replace(key, bindable=True, name=name) for key, name in
-      zip(_function_row((_G515_F1, _G515_F5, _G515_F9), _G515_TOP), G515_F_KEYS, strict=True)),
-    *(Key(label, _G515_NAV + i, _G515_TOP, zone=ZONES[name]) for i, (label, name) in
-      enumerate((("PrtSc", "PRINT"), ("ScrLk", "SCROLL LOCK"), ("Pause", "PAUSE")))),
-
+      zip(_function_row(_G515_F_ROW, _G515_TOP), G515_F_KEYS, strict=True)),
     # Number row to shift row: the G915's main block, which the guide's drawing agrees with.
-    *(key for key in KEYS if key.y == 2.5 and 0 <= key.x < _NAV),
-    *(Key(label, _G515_NAV + i, 2.5, zone=ZONES[name]) for i, (label, name) in
-      enumerate((("Ins", "INSERT"), ("Home", "HOME"), ("PgUp", "PAGE UP")))),
-
-    *(key for key in KEYS if key.y == 3.5 and 0 <= key.x < _NAV),
-    *(Key(label, _G515_NAV + i, 3.5, zone=ZONES[name]) for i, (label, name) in
-      enumerate((("Del", "DELETE"), ("End", "END"), ("PgDn", "PAGE DOWN")))),
-
-    *(key for key in KEYS if key.y == 4.5 and 0 <= key.x < _NAV),
-
-    *(key for key in KEYS if key.y == 5.5 and 0 <= key.x < _NAV),
+    *(key for key in KEYS if 2.5 <= key.y < 6 and 0 <= key.x < _NAV),
     Key("Up", _G515_NAV + 1, 5.5, zone=ZONES["UP"]),
-
     *_ANSI_BOTTOM,
-    *(Key(label, _G515_NAV + i, 6.5, zone=ZONES[name]) for i, (label, name) in
-      enumerate((("Left", "LEFT"), ("Down", "DOWN"), ("Right", "RIGHT")))),
-)
+    *(Key(label, _G515_NAV + i, y, zone=ZONES[name]) for y, row in (
+        (_G515_TOP, (("PrtSc", "PRINT"), ("ScrLk", "SCROLL LOCK"), ("Pause", "PAUSE"))),
+        (2.5, (("Ins", "INSERT"), ("Home", "HOME"), ("PgUp", "PAGE UP"))),
+        (3.5, (("Del", "DELETE"), ("End", "END"), ("PgDn", "PAGE DOWN"))),
+        (6.5, (("Left", "LEFT"), ("Down", "DOWN"), ("Right", "RIGHT"))))
+      for i, (label, name) in enumerate(row)),
+))
 
 #: The G915 TKL's own blocks, from G HUB's rectangles: where its function row's three groups
 #: start, and the top of its round buttons and media keys.
-_TKL_F1, _TKL_F5, _TKL_F9 = 1.65, 6.33, 11.0
+_TKL_F_ROW = (1.65, 6.33, 11.0)
 _TKL_ROUND_TOP = 0.09
 _F_ROW_ZONES = frozenset(ZONES[f"F{n}"] for n in range(1, 13))
-
-
-def _by_row(keys: tuple[Key, ...]) -> tuple[Key, ...]:
-    """`keys` row by row, each row left to right."""
-    return tuple(sorted(keys, key=lambda key: (int(key.y), key.x)))
 
 
 def _own_names(keys: Iterable[Key], names: tuple[str, ...]) -> tuple[Key, ...]:
@@ -303,7 +292,7 @@ G915_TKL_KEYS: tuple[Key, ...] = _by_row((
     *(Key(label, x, _TKL_ROUND_TOP, w=_ROUND, h=_ROUND, zone=ZONES[name]) for label, name, x in (
         ("Prev", "PREVIOUS", 11.12), ("Play", "PLAY/PAUSE", 12.06),
         ("Next", "NEXT", 13.0), ("Mute", "MUTE", 13.92))),
-    *(replace(key, bindable=True) for key in _function_row((_TKL_F1, _TKL_F5, _TKL_F9), 1.24)),
+    *(replace(key, bindable=True) for key in _function_row(_TKL_F_ROW, 1.24)),
     *(replace(key, label="FN") if key.zone == ZONES["RIGHT WINDOWS"] else key
       for key in KEYS if key.y >= 1 and 0 <= key.x < _PAD and key.zone not in _F_ROW_ZONES),
 ))
@@ -378,15 +367,14 @@ G213_AREAS = tuple(frozenset(ZONES[name] for name in names) for names in (
 
 def _g915x_keys(top: tuple[Key, ...]) -> tuple[Key, ...]:
     """A G915 X's keys under `top`, its logo and round buttons: the G915's from the function row
-    down, G1 to G5 under the G915 X's names, and ANSI's bottom row in the G915's."""
-    return _by_row((*top, *_own_names(
-        (key for key in KEYS if key.y >= 1 and not (key.y == 6.5 and 0 <= key.x < _NAV)),
+    down, its G keys under the G915 X's names, and ANSI's bottom row in the G915's."""
+    return _by_row((*_own_names(
+        (*top, *(key for key in KEYS if key.y >= 1 and not (key.y == 6.5 and 0 <= key.x < _NAV))),
         G915X_G_KEYS), *_ANSI_BOTTOM))
 
 
 #: The G915 X's G6 to G9, round buttons in the places of the G915's M1 to M3 and MR, bindable.
-_G915X_G6_G9 = tuple(replace(_G915_TOP[m_key], label=f"G{n}", zone=ZONES[f"G{n}"],
-                             bindable=True, name=G915X_G_KEYS[n - 1])
+_G915X_G6_G9 = tuple(replace(_G915_TOP[m_key], label=f"G{n}", zone=ZONES[f"G{n}"], bindable=True)
                      for n, m_key in zip(range(6, 10), ("M1", "M2", "M3", "MR"), strict=True))
 #: The G915 X, wired, US ANSI: the logo, G6 to G9, then Game Mode and Brightness in the places
 #: of the G915's LIGHTSPEED and Bluetooth, as on the G815; under them _g915x_keys.
@@ -496,13 +484,10 @@ class Board:
         is painted. A painted key outweighs the unpainted ones, since a profile chose its
         color, and a tie goes to the color met first in its keys' order, row by row on the
         G213's."""
-        shown = []
-        for area in self.areas:
-            # most_common(1) gives the first met of colors with the same count.
-            counted = Counter(painted[zone] for zone in self.lit
-                              if zone in area and zone in painted)
-            shown.append(counted.most_common(1)[0][0] if counted else fill)
-        return tuple(shown)
+        counts = (Counter(painted[zone] for zone in self.lit if zone in area and zone in painted)
+                  for area in self.areas)
+        # most_common(1) gives the first met of colors with the same count.
+        return tuple(counted.most_common(1)[0][0] if counted else fill for counted in counts)
 
     def shown_colors(self, painted: Mapping[int, int], fill: int) -> dict[int, int]:
         """The color each of its lit keys shows, by zone: its own of `painted`, else `fill`,

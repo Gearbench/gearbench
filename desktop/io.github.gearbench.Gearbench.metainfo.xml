@@ -10,7 +10,7 @@
 
   <description>
     <p>
-      Gearbench is a control panel for Logitech G keyboards (the G915,
+      Gearbench is an app for Logitech G keyboards (the G915,
       G915 TKL, G815, G515 TKL, G515 LIGHTSPEED TKL, PRO X TKL LIGHTSPEED,
       G213 Prodigy, G915 X, G915 X LIGHTSPEED, G915 X LIGHTSPEED TKL, G316 X,
       G316 X 98, G512 X 75 and G512 X 98), mice (the
@@ -33,8 +33,8 @@
       PLUS MILLENNIUM FALCON, G502 LIGHTSPEED, PRO X SUPERLIGHT, PRO
       WIRELESS, PRO X SUPERLIGHT 2, PRO X SUPERLIGHT 2 DEX, PRO X SUPERLIGHT 2c,
       PRO X2 SUPERSTRIKE, G203 LIGHTSYNC and G903 LIGHTSPEED HERO mice, the
-      G432's relatives but the G933, the G431, G433, G533, G535, G633, G635,
-      G733, G935 and PRO X Wireless headsets, the Astro A50 Gen 5 headset, and the
+      G431, G433, G533, G535, G633, G635, G733, G935 and PRO X Wireless
+      headsets (the rest of the G432's family but the G933), the Astro A50 Gen 5 headset, and the
       PRO X 2 LIGHTSPEED, G522 LIGHTSPEED and G325 LIGHTSPEED headsets. On a mouse
       other than the G502 X PLUS, G305 and G502 HERO, Gearbench writes nothing
       to the onboard profile until that is tested on the hardware. It talks to the
@@ -47,29 +47,30 @@
     <p>The keyboards:</p>
     <ul>
       <li>Per-key and zone lighting, with the effects each keyboard's firmware has</li>
-      <li>G1 to G5 on the G915 and G815, and F1 to F12 on the G915 TKL and PRO X TKL LIGHTSPEED, bound to key combinations or macros, on the base layer and, from gearbench-ctl, the MR shift layer; G1 to G9 on the G915 X LIGHTSPEED, bound the same way on the base layer alone</li>
+      <li>G1 to G5 on the G915 and G815, F1 to F12 on the G915 TKL and PRO X TKL LIGHTSPEED, and G1 to G9 on the G915 X LIGHTSPEED, bound to key combinations or macros, on the base layer and on the G-Shift layer, used while MR, or a G key or mouse button bound to G-Shift, is held</li>
       <li>Three M profiles, switched from the window, by the M1 to M3 keys, or, on a keyboard without them, from the tray's menu</li>
-      <li>Backlight brightness, snapped to a level the firmware keeps</li>
+      <li>Backlight brightness, rounded down to a level the keyboard keeps</li>
     </ul>
     <p>The mice, several at once:</p>
     <ul>
       <li>DPI set live and remembered per model; the onboard DPI stage list and report rate rewritten on the G502 X PLUS, G305 and G502 HERO, and on the other mice the report rate set live in host mode</li>
-      <li>On each mouse but the G305, those of G4 to G9 it has, bound to key combinations, macros, DPI shift, DPI up, down or cycle, or the browser buttons, each model's on its own</li>
+      <li>On each mouse but the G305, whichever of G4 to G9 it has, bound to key combinations, macros, DPI shift, DPI up, down or cycle, the browser buttons or G-Shift, which shifts every keyboard and mouse while held; each mouse model keeps its own bindings</li>
       <li>Lighting where the mouse has it, either its own or following the keyboard</li>
     </ul>
     <p>The headsets:</p>
     <ul>
-      <li>On the A50 Gen 4, microphone level, sidetone, noise gate and mic EQ</li>
-      <li>The A50 Gen 4's three EQ presets, edited band by band or imported from Astro Command Center's files</li>
+      <li>On the A50 Gen 4, microphone level, sidetone, noise gate and Mic EQ</li>
+      <li>The A50 Gen 4's three equalizer presets, edited band by band or imported from Astro Command Center's files</li>
       <li>The A50 Gen 4's stream port mix, its base station's own settings and its battery</li>
       <li>On the A50 Gen 4, changes apply at once; Save writes them to the base station's flash, and until then Revert to saved undoes all of them but Auto shut-off and which preset is active</li>
       <li>The A50 Gen 4's and the A50 X's Game and Chat as two outputs, and Gearbench Spatial, a 7.1 output for games on the A50 Gen 4 and every other headset listed below, rendered for headphones from measured heads</li>
       <li>On the G432, sidetone, noise suppression for its microphone, and Logitech G432 Equalizer, an output whose presets are edited band by band or copied from the A50 Gen 4's</li>
-      <li>On the G432's relatives, sidetone, noise suppression for the microphone and an equalizer, in the headset on the G633, G933 and G935 and on the computer on the others; the lights of the G633, G635, G733, G933 and G935; and on the wireless ones the battery and, on some, the time they power off after</li>
+      <li>On the rest of the G432's family, sidetone, noise suppression for the microphone and an equalizer, in the headset on the G633, G933 and G935 and on the computer on the others; the lights of the G633, G635, G733, G933 and G935; and on the wireless ones the battery and, on some, the time they power off after</li>
+      <li>The same noise suppression for the microphone of the A50 Gen 4, A50 X, A50 Gen 5 and G522 LIGHTSPEED</li>
       <li>On the A50 X, the sidetone, volume, Game and Voice balance, noise gate, auto sleep, tones, the base station's brightness and deep sleep, the stream mix and the headset's equalizers, and its battery</li>
-      <li>On the A50 Gen 5, the same less the deep sleep, read; nothing is changed until each change is tested</li>
-      <li>On the PRO X 2 LIGHTSPEED, through its receiver, the battery, sidetone, auto sleep, the microphone's noise reduction and the headset's equalizer, read; nothing is changed until each change is tested</li>
-      <li>On the G522 LIGHTSPEED, through its receiver or on its cable, and the G325 LIGHTSPEED, through its receiver, the battery, sidetone, auto sleep, eco mode and the headset's equalizer, and the G325's microphone noise reduction, read; nothing is changed until each change is tested</li>
+      <li>On the A50 Gen 5, the same without the deep sleep, read only: nothing is changed until each change is tested</li>
+      <li>On the PRO X 2 LIGHTSPEED, through its receiver, the battery, sidetone, auto sleep, noise suppression for the microphone and the headset's equalizer, read only: nothing is changed until each change is tested</li>
+      <li>On the G522 LIGHTSPEED, through its receiver or on its cable, and the G325 LIGHTSPEED, through its receiver, the battery, sidetone, auto sleep, eco mode and the headset's equalizer, and the G325's noise suppression for the microphone, read only: nothing is changed until each change is tested</li>
     </ul>
     <p>
       Game profiles hold a lighting and binding set that loads itself while a
@@ -77,22 +78,24 @@
       Macros tab and replayed through a uinput virtual keyboard and mouse.
     </p>
     <p>
-      Lighting is volatile, but for the brightness the G515 TKL and the G915 X
-      LIGHTSPEED keep through a power-off, as the G515 LIGHTSPEED TKL is taken
-      to and the G915 X, G915 X LIGHTSPEED TKL, G316 X, G316 X 98, G512 X 75
-      and G512 X 98 may, and the keyboard's onboard profile is never written.
+      Keyboard lighting is lost at a power-off, but for the brightness: the
+      G515 TKL and the G915 X LIGHTSPEED keep it, the G515 LIGHTSPEED TKL is
+      taken to keep it, and the G915 X, G915 X LIGHTSPEED TKL, G316 X,
+      G316 X 98, G512 X 75 and G512 X 98 may keep it. The keyboard's onboard
+      profile is never written.
       Each write to the mouse's onboard profile, from the window or
       gearbench-ctl, backs up every profile sector first and reads the written
       sector back after. The A50 X keeps each setting written to it through a
       power cycle, the G432's adapter keeps its sidetone through an unplug, and
-      the G432's relatives may keep theirs.
+      the rest of the G432's family may keep theirs. The G933 also keeps its
+      auto shut-off time, its startup effect and the lighting saved to it.
     </p>
   </description>
 
   <screenshots>
     <screenshot type="default">
       <caption>Keyboard: keys painted by click or drag, G keys and M profiles</caption>
-      <image>https://raw.githubusercontent.com/gearbench/gearbench/v1.2.1/docs/images/hero.png</image>
+      <image>https://raw.githubusercontent.com/gearbench/gearbench/v1.3.0/docs/images/hero.png</image>
     </screenshot>
   </screenshots>
 
@@ -197,10 +200,15 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
-    <release version="1.2.1" date="2026-10-28">
+    <release version="1.3.0" date="2026-11-04">
       <description>
-        <p>Installing from a checkout works again: install.sh had lost the
-        permission to run, so ./install.sh failed with "Permission denied".</p>
+        <p>Gearbench Game, Chat and Media: three outputs for games, voice
+        chat and music, with a balance between game and chat. Noise
+        suppression for headset microphones, with a test that plays your
+        voice back.</p>
+        <p>G-Shift on keyboards, mice and headsets' G keys, low-battery
+        notices set per device, and a Firmware row on the Keyboard and
+        Mouse tabs. Packages for Fedora and Arch Linux beside the .deb.</p>
       </description>
     </release>
   </releases>

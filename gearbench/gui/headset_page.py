@@ -2,17 +2,18 @@
 dialog over the presets Gearbench keeps beside them (presets_dialog).
 
 A change goes to the base station's RAM at once and to its flash only on Save,
-so a banner lists what differs from flash. The tab polls the daemon on its own
-timer, with its own re-entry guard, as the Mouse tab does. Game output and Chat output
+so a banner lists what differs from flash. The window's 5 s headset poll (polls.Polls) calls
+tick, which reads the headset unless a drag is under way or its last read is still out, as
+the Mouse tab's does. Game output and Chat output
 follow Balance, their volume as GNOME's Sound settings set it (volume_rows), and the
-Microphone group ends with Mic input, the microphone's volume set the same way, and Input
-level, its level live (input_meter_row).
+Microphone group ends with Noise suppression, the window's own on the computer, with Test the
+microphone under it (noise_rows), Mic input, the microphone's volume set the same way, and
+Input level, its level live (input_meter_row).
 """
 
 from __future__ import annotations
 
-import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, replace
 from functools import partial
 from pathlib import Path
@@ -20,18 +21,20 @@ from typing import cast
 
 from gi.repository import Adw, Gio, GLib, GObject, Gtk
 
-from ..a50_library import a50_preset, default_slot
+from ..a50_library import EqPreset, a50_preset, default_slot, slot_number
 from ..astro import (
     AUTO_OFF_MINUTES,
     BALANCE_RANGE,
     BANDS,
-    BASE_SILENT,
+    BASE_SETTINGS,
     DOCKED_OFF,
     FREQ_RANGE,
     GAIN_RANGE,
+    MIC_SETTINGS,
+    NAME as A50_NAME,
     NOISE_GATES,
+    NOT_ANSWERING as A50_NOT_ANSWERING,
     OFF_OR_AWAY,
-    PRESETS,
     SETTING_CHOICES,
     SETTING_NAMES,
     SETTING_RANGES,
@@ -39,19 +42,29 @@ from ..astro import (
     SETTINGS,
     SHELVES,
     SLOW_REQUEST_WAIT,
+    STREAM_SETTINGS,
     WIDTH_RANGE,
     Band,
-    EqPreset,
-    game_share,
 )
 from ..astroeq import load_astroeq
 from ..battery import kept_at
-from ..spatial import A50
-from ..system_volume import MIC
-from ..wording import capitalized, hertz, number, printable, reason, shares_words, signed, whole
+from ..pipewire_headsets import A50
+from ..wording import (
+    capitalized,
+    hertz,
+    number,
+    printable,
+    reason,
+    shares_words,
+    signed,
+    whole,
+    whole_within,
+)
+from .computer_rows import ComputerRows
+from .device_rows import show_gone, status_rows
 from .holds import Holds
-from .input_meter_row import InputMeterRow
 from .presets_dialog import SAVE_BODY, TITLE, PresetsDialog
+from .save_watch import SaveWatch
 from .style import (
     ASLEEP,
     ASTROEQ_IMPORT,
@@ -60,7 +73,7 @@ from .style import (
     ASTROEQ_TITLE,
     BALANCE,
     DAEMON_WAIT,
-    FIRMWARE,
+    HEADSET_NEAR,
     HEADSET_TAB,
     LOOKING,
     NOT_FOUND,
@@ -70,13 +83,20 @@ from .style import (
     REVERT_TO_SAVED,
     SAVE_HEADING,
     SIDETONE,
+    STREAM_HELP,
     STREAM_MIX,
+    WRITING_BASE,
     DeviceView,
     EntryTexts,
+    NoticesRow,
     ask_name,
     astroeq_dialog,
+    between,
     confirm,
-    displayable,
+    firmware_row,
+    header_spinner,
+    holds_focus,
+    name_button,
     name_refusal,
     offer_save_new,
     percent,
@@ -86,17 +106,20 @@ from .style import (
     save_new_row,
     set_dot,
     show_battery,
+    show_choice,
+    show_firmware,
+    show_header_spinner,
     spoken_scale,
-    status_rows,
     through,
     toast_note,
     watch_name,
     watch_pointer,
 )
-from .tips import NOISE_GATE_TIPS, explain_choices
-from .volume_rows import OUTPUT_WORDS, VolumeRows
+from .tips import NOISE_GATE_TIPS, NOT_READ_TIP, explain_choices
 from .worker import (
     REPLY_WAIT,
+    SETTLE_MS,
+    SPIN_SETTLE_MS,
     Call,
     DaemonWorker,
     LoadingGuard,
@@ -109,18 +132,22 @@ from .worker import (
 
 #: The status page's title over the reason while no headset has been seen (DeviceView).
 NO_HEADSET = "Headset not available"
+#: Its reason while no headset of any family is attached and the status names no problem,
+#: in place of the A50 Gen 4's own refusal, which names that model alone: the A50 Gen 4 is
+#: found only with its switch on PC, the mode with the control interface.
+NO_HEADSET_FOUND = f"no headset found; plug one in, an {A50_NAME}'s switch on PC"
 #: The Status row's subtitle, by state: the route while the headset is linked, the
-#: headset off its link, docked or not, and the base station silent.
+#: headset off its link, docked or not, and the base station silent, in status's words; off it
+#: and silent, the next step.
 LINKED = through("base station")
-HEADSET_OFF = capitalized(OFF_OR_AWAY)
+HEADSET_OFF = f"{capitalized(OFF_OR_AWAY)}; {HEADSET_NEAR.format('base station')}"
 HEADSET_DOCKED = capitalized(DOCKED_OFF)
-NOT_ANSWERING = capitalized(BASE_SILENT)
+NOT_ANSWERING = capitalized(A50_NOT_ANSWERING)
 
 #: The banner's text for unsaved settings and during a save, which hides the button.
 NOT_SAVED = "Not saved to the base station: {}"
 SAVING = "Saving to the base station…"
 SAVE_LABEL = "Save"
-SAVED = "Saved to the base station"
 REVERT_HEADING = "Revert to saved?"
 REVERT_BODY = "Auto shut-off stays as it is: the base station cannot report its saved value."
 #: A revert's toast when neither its note nor the note's first sentence
@@ -134,15 +161,10 @@ SLIDER_NAMES = {**SETTING_NAMES, "sidetone": SIDETONE}
 #: without "Stream", under their group's title.
 ROW_TITLES = {**SLIDER_NAMES, "stream_game": "Game", "stream_chat": "Voice",
               "stream_mic": "Mic", "stream_aux": "Aux"}
-#: The settings each group holds; a group with none of them in the reply hides.
-MIC_SETTINGS = ("mic_level", "sidetone", "noise_gate", "mic_eq")
-STREAM_SETTINGS = ("stream_game", "stream_chat", "stream_mic", "stream_aux")
-BASE_SETTINGS = ("default_balance", "alert_volume", "auto_off")
 #: The combo rows' labels, in SETTING_CHOICES's order: a row's index is its value's there.
 CHOICE_LABELS = {**{name: tuple(word.title() for word in words)
                     for name, words in SETTING_WORDS.items()},
                  "auto_off": tuple(f"{m} minutes" for m in AUTO_OFF_MINUTES)}
-STREAM_HELP = "What the base station's stream port sends"
 #: The tooltip of the row that saves the active preset into the library, and the row that
 #: opens the library's dialog to load one into a slot.
 SAVE_NEW_HELP = "Keeps the active preset's sound on this computer"
@@ -152,6 +174,9 @@ LOAD_PRESET_HELP = "Puts a preset of the library into slot 1, 2 or 3"
 #: comes back, as the G432's tooltip says it. Put back is the first-read values' word.
 RESET_HELP = "{} back in this slot; Save keeps it"
 MIX_HELP = "Set by the headset's Game and Voice buttons"
+#: A band's Width row's unit, as Hz is its Frequency row's: the bandwidth over the
+#: frequency, 1/Q (astro.Band).
+WIDTH_UNIT = "Multiple of the frequency"
 
 #: The room a slider other than a band's leaves at its right, where a band row draws its
 #: expander arrow, so the ends of the style.SLIDER_WIDTH sliders line up down the tab:
@@ -163,13 +188,6 @@ ARROW_ROOM = 25
 BALANCE_TICKS = (64, 128, 191)
 SNAP_STEPS = 10
 
-#: How long a slider and a spin row wait after the last change before sending, so a
-#: drag is one write.
-SLIDER_SETTLE_MS = 300
-SPIN_SETTLE_MS = 600
-#: How often the page asks whether a save is done, and for how long.
-SAVE_POLL_MS = 500
-SAVE_WAIT = 10.0
 #: The start of each equalizer edit's Holds key. gains_key and band_key add its preset, so a
 #: write to a preset the headset's EQ button switched away from holds none of the new
 #: preset's rows.
@@ -184,11 +202,6 @@ def band_key(band: int, preset: int) -> str:
     return f"{BAND_KEY}{band}:{preset}"
 
 
-def _int(value: object, low: int, high: int) -> int | None:
-    """`value` if it is an int in low..high, else None."""
-    return value if whole(value) and low <= value <= high else None
-
-
 def _active_bands(preset: dict) -> dict[int, dict]:
     """Each band's `active` values in a preset of the reply, by its number; a list or an
     entry the reply gives in a shape it should not is left out."""
@@ -200,7 +213,7 @@ def _active_bands(preset: dict) -> dict[int, dict]:
 
 def balance_text(value: int) -> str:
     """A Game/Voice balance, 0 all Voice and 255 all Game, in percent."""
-    return shares_words(game_share(value))
+    return shares_words(value, BALANCE_RANGE[1])
 
 
 def slider_text(name: str, value: int) -> str:
@@ -222,122 +235,43 @@ def unsaved_text(keys: list[str]) -> str:
 
 
 def versions_text(versions: object) -> str:
-    """The Firmware row's subtitle: the firmware versions the reply gives, or NOT_READ."""
+    """The Firmware row's subtitle: the firmware versions the reply gives, or "" for none,
+    which hides the row (show_firmware)."""
     versions = versions if isinstance(versions, dict) else {}
     parts = [f"{what} {versions[key]}"
              for what, key in (("Base station", "base"), ("headset", "headset"))
              if isinstance(versions.get(key), str)]
-    return ", ".join(parts) if parts else NOT_READ
+    return ", ".join(parts)
 
 
-def _balance_scale(label: str) -> Gtk.Scale:
-    """A Game/Voice balance's slider, with its ticks."""
-    scale = spoken_scale(*BALANCE_RANGE, label, origin=False, spoken=balance_text)
-    for tick in BALANCE_TICKS:
-        scale.add_mark(tick, Gtk.PositionType.BOTTOM, None)
-    return scale
+def _spoken_as(row: Adw.SpinRow, name: str) -> Adw.SpinRow:
+    """`row`, with the spin button that takes its focus named `name` (name_button); the row
+    shows its title still. The row's delegate is the button (libadwaita 1.9's, which the
+    tests check)."""
+    name_button(cast(Gtk.SpinButton, row.get_delegate()), name)
+    return row
 
 
-def _between(scale: Gtk.Scale) -> Gtk.Box:
-    """A balance slider with Voice and Game dimmed under its ends: beside
-    it, Game would push it out of line with the other sliders."""
-    words = Gtk.CenterBox(
-        start_widget=Gtk.Label(label="Voice", css_classes=["dimmed", "caption"]),
-        end_widget=Gtk.Label(label="Game", css_classes=["dimmed", "caption"]))
-    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
-    box.append(scale)
-    box.append(words)
-    return box
+#: The status problems' code prefixes the Headset tab says: the A50 Gen 4's, then the
+#: other families'.
+HEADSET_PREFIXES = ("headset_", "a50x_", "g432_")
 
 
-def _in_line(widget: Gtk.Widget) -> Gtk.Widget:
-    """A slider row's suffix, clear of where a band's expander arrow sits."""
-    widget.set_margin_end(ARROW_ROOM)
-    return widget
-
-
-class SaveWatch:
-    """A save of the base station's flash, from Save to the reply that says it is over:
-    once the daemon accepts it, `ask` reads the headset from what the daemon holds every
-    SAVE_POLL_MS until the save ends or SAVE_WAIT has passed; then `say` gets how it went,
-    and `read` has every setting read again unless the save worked and was read back. It
-    builds no widget."""
-
-    def __init__(self, ask: Callable[[], None], say: Callable[[str], object],
-                 read: Callable[[], None]) -> None:
-        self._ask = ask
-        self._say = say
-        self._read = read
-        #: headset_save is out and unanswered: a second click sends nothing.
-        self.sent = False
-        #: A save was accepted and its end not yet seen (take).
-        self.waiting = False
-        self._deadline = 0.0
-        #: The fast poll's GLib source while it runs.
-        self.poll: int | None = None
-        #: headset_save's round trip raised: the daemon may still have run it, which the
-        #: next reply says (take).
-        self.unsure = False
-
-    def answered(self, accepted: bool) -> None:
-        """headset_save's reply: one `accepted` waits for the save's end, and a refusal
-        leaves Save to be clicked again."""
-        self.sent = False
-        if accepted:
-            self.unsure = False
-            self._wait()
-
-    def unanswered(self) -> None:
-        """headset_save's round trip raised. The daemon still reads a request whose client
-        gave up, and answers the read sent after it: that reply says whether the save
-        runs."""
-        self.sent = False
-        self.unsure = True
-
-    def _wait(self) -> None:
-        self.waiting = True
-        self._deadline = time.monotonic() + SAVE_WAIT
-        if self.poll is None:
-            self.poll = GLib.timeout_add(SAVE_POLL_MS, self.tick)
-
-    def tick(self) -> bool:
-        """The fast poll: `ask`, until SAVE_WAIT has passed."""
-        if time.monotonic() >= self._deadline:
-            # Past the wait the five second poll sees the end.
-            self.poll = None
-            return False
-        self._ask()
-        return True
-
-    def take(self, info: dict, saving: bool) -> None:
-        """A `headset` reply, `saving` what it says of a save running."""
-        if self.unsure:
-            self.unsure = False
-            if saving:
-                self._wait()
-            return
-        if not self.waiting or saving:
-            return
-        self.stop()
-        error = info.get("save_error")
-        self._say(capitalized(str(error)) if error else SAVED)
-        # A save that worked was read back before this reply, which then lists nothing
-        # unsaved; one that failed, or whose read-back was cut short, owes the read.
-        if error or info.get("unsaved"):
-            self._read()
-
-    def stop(self) -> None:
-        """End the wait and its fast poll."""
-        self.waiting = False
-        if self.poll is not None:
-            GLib.source_remove(self.poll)
-            self.poll = None
-
-    def lost(self) -> None:
-        """The base or the daemon went, and the save with it: its end is unknown, so
-        nothing is said."""
-        self.stop()
-        self.unsure = False
+def headset_problems(problems: Sequence[dict], attached: bool, seen: bool
+                     ) -> tuple[dict | None, list[dict]]:
+    """The status's headset problems as the Headset tab says them: the one for the A50's
+    page (HeadsetPage.show_problem), the A50 Gen 4's first, then another family's while no
+    headset is attached (`attached` False), when the A50's page shows for all
+    (HeadsetStack.take): an attached A50's Status row says the problem it is given
+    (HeadsetPage.show_state). Then the tab banner's (HeadsetStack.show_problems): every
+    family's, but the one the A50's status page says in place of its rows while no headset
+    is attached and the page has seen none (`seen` False)."""
+    said = [p for p in problems if p["code"].startswith(HEADSET_PREFIXES)]
+    own = next((p for p in said if p["code"].startswith("headset_")), None)
+    if not attached:
+        own = own or next(iter(said), None)
+    on_page = own if not attached and not seen else None
+    return own, [p for p in said if p is not on_page]
 
 
 class HeadsetPage:
@@ -345,8 +279,10 @@ class HeadsetPage:
     station, with Save and Revert for what differs from flash.
 
     `call` is the window's. Every write to the base station goes through `call` and answers
-    with the whole `headset` reply, which sets the rows. HeadsetStack puts the Spatial sound
-    group under Revert, in `page`, while this page shows.
+    with the whole `headset` reply, which sets the rows. `kept_up` is told of an action the
+    page runs itself that failed (Window.kept_up). HeadsetStack puts the groups every
+    headset page shares in `shared` while this page shows: under the status page until an
+    A50 is seen, then under Revert, in `page`.
     """
 
     #: The last reply said the base station answers, and a save is running.
@@ -356,21 +292,26 @@ class HeadsetPage:
     _editable = False
 
     def __init__(self, parent: Gtk.Window, worker: DaemonWorker, call: Call,
-                 toast: Callable[..., object],
+                 toast: Callable[..., object], kept_up: Callable[[], None],
                  set_status: SetStatus) -> None:
         self._parent = parent
         self._worker = worker
         self._call = call
         self._toast = toast
+        self._kept_up = kept_up
         self._set_status = set_status
 
         self._loading = LoadingGuard()
         self._pending = False
-        #: The headset problem the last status gave the page (show_problem).
+        #: The headset problem the last status gave the page, and what the status page says
+        #: under NO_HEADSET in place of the reply's refusal: that problem, else with no headset
+        #: of any family attached NO_HEADSET_FOUND (show_problem).
         self._problem: str | None = None
+        self._reason: str | None = None
         #: A `read: True` was answered by a responsive base station with no save
-        #: running, so the daemon ran it. The tab asks for one when first shown and
-        #: after the base or the daemon was lost.
+        #: running, so the daemon ran it, and the last reply still has its `read_at`. The
+        #: tab asks for one when first shown and after the base or the daemon was lost,
+        #: between two polls too.
         self.read_done = False
         #: Each setting's active value in the last reply, and the active preset.
         self._active: dict[str, object] = {}
@@ -380,6 +321,9 @@ class HeadsetPage:
         self._preset_ids: list[int] = []
         self._preset_labels: list[str] = []
         self._holds = Holds()
+        #: How many equalizer writes are unanswered: the Equalizer group's spinner shows while
+        #: any is (_write).
+        self._eq_writes = 0
         #: The window's close ran (close): the band rows send nothing from then on.
         self._closed = False
         self._shown = EntryTexts()
@@ -390,8 +334,7 @@ class HeadsetPage:
         self.save_watch = SaveWatch(lambda: None if self._pending else self.refresh(ask=False),
                                     lambda text: self._toast(text),
                                     lambda: self.refresh(read=True))
-        self.meter = InputMeterRow(worker)
-        self.volumes = VolumeRows(worker, toast, inset=ARROW_ROOM)
+        self.computer = ComputerRows(worker, toast, kept_up, inset=ARROW_ROOM)
         self.widget = self._build()
 
     # -- construction -----------------------------------------------------
@@ -404,8 +347,8 @@ class HeadsetPage:
         self.setting_rows: dict[str, Adw.ActionRow] = {}
         page.append(self._status_group())
         page.append(self._mic_group())
-        self.library = PresetsDialog(self._parent, self._worker, self._toast, self.write_preset,
-                                     self.shown_preset, self._show_save_new)
+        self.library = PresetsDialog(self._parent, self._worker, self._toast, self._kept_up,
+                                     self.write_preset, self.shown_preset, self._show_save_new)
         page.append(self._eq_group())
         page.append(self._stream_group())
         page.append(self._base_group())
@@ -416,28 +359,31 @@ class HeadsetPage:
         # Status row's (show_state, _failed).
         self.save_banner = Adw.Banner(use_markup=False)
         self.save_banner.connect("button-clicked", self.on_save)
-        self.view = DeviceView(page, "audio-headset-symbolic", LOOKING)
+        # The groups every headset page shares (HeadsetStack), under the status page too: this
+        # page shows for every headset while none is attached, and the groups work without one.
+        self.shared = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        self.view = DeviceView(page, "audio-headset-symbolic", LOOKING, under=self.shared)
         toolbar = Adw.ToolbarView(content=self.view.stack)
         toolbar.add_top_bar(self.save_banner)
         return toolbar
 
     def _status_group(self) -> Adw.PreferencesGroup:
-        """The status group: the headset's state and its readings."""
         # Titled from the reply: its name.
         status = self.status_group = Adw.PreferencesGroup(title=HEADSET_TAB)
         self.state_row, self.state_dot, self.battery_row, self.battery_icon = status_rows(
             status)
+        # Before the readings, as on every device page.
+        self.notices = NoticesRow(status, self._call)
         # Its own row, as the G432's: the state row says the state.
-        self.firmware_row = plain_row(Adw.ActionRow, FIRMWARE, "", visible=False)
-        status.add(self.firmware_row)
+        self.firmware_row = firmware_row(status)
         # A reading, set by the headset's buttons, as the Centurion's: a grayed slider would
         # read as a setting the device refuses, beside the Default balance slider.
         self.mix_row = plain_row(Adw.ActionRow, BALANCE, "", tooltip_text=MIX_HELP,
                                  visible=False)
         status.add(self.mix_row)
         # Under Balance (the owner's decision of 2026-10-25).
-        for word in OUTPUT_WORDS:
-            status.add(self.volumes.rows[word])
+        for row in self.computer.output_rows:
+            status.add(row)
         return status
 
     def _mic_group(self) -> Adw.PreferencesGroup:
@@ -447,12 +393,13 @@ class HeadsetPage:
         mic.add(self._combo_row("noise_gate", tuple(NOISE_GATE_TIPS[gate]
                                                       for gate in NOISE_GATES)))
         mic.add(self._combo_row("mic_eq"))
-        mic.add(self.volumes.rows[MIC])
-        mic.add(self.meter.row)
+        for row in self.computer.mic_rows:
+            mic.add(row)
         return mic
 
     def _eq_group(self) -> Adw.PreferencesGroup:
         eq = self.eq_group = Adw.PreferencesGroup(title="Equalizer")
+        self.eq_spinner = header_spinner(eq)
         # The name as the subtitle, as the Keyboard tab's Active: a preset's name is one
         # people type, and the inline value is cut at 20 characters.
         self.preset_row = Adw.ComboRow(title=PRESET, use_subtitle=True,
@@ -467,6 +414,7 @@ class HeadsetPage:
         self.gain_scales: list[Gtk.Scale] = []
         self.freq_rows: list[Adw.SpinRow] = []
         self.width_rows: dict[int, Adw.SpinRow] = {}
+        valid_only = Gtk.SpinButtonUpdatePolicy.IF_VALID
         for band in BANDS:
             row = Adw.ExpanderRow(title=f"Band {band}")
             gain = spoken_scale(*GAIN_RANGE, f"Band {band} gain", page=1, origin=False,
@@ -474,15 +422,23 @@ class HeadsetPage:
             gain.add_mark(0, Gtk.PositionType.BOTTOM, None)
             gain.connect("value-changed", self.on_gain, band)
             row.add_suffix(gain)
-            freq = Adw.SpinRow(title="Frequency", subtitle="Hz", adjustment=Gtk.Adjustment(
-                lower=FREQ_RANGE[0], upper=FREQ_RANGE[1], value=1000,
-                step_increment=10, page_increment=100))
+            # Named by band for a screen reader, as the gain is: five rows say Frequency. A word
+            # or a number past the range typed in either row puts back the value shown
+            # (IF_VALID), where GTK's default would send the nearer end, and for a word ("2k")
+            # the lowest.
+            freq = _spoken_as(Adw.SpinRow(
+                title="Frequency", subtitle="Hz", update_policy=valid_only,
+                adjustment=Gtk.Adjustment(
+                    lower=FREQ_RANGE[0], upper=FREQ_RANGE[1], value=1000,
+                    step_increment=10, page_increment=100)), f"Band {band} frequency")
             freq.connect("notify::value", self.on_band, band)
             row.add_row(freq)
             if band not in SHELVES:
-                width = Adw.SpinRow(title="Width", digits=1, adjustment=Gtk.Adjustment(
-                    lower=WIDTH_RANGE[0], upper=WIDTH_RANGE[1], value=1.0,
-                    step_increment=0.1, page_increment=0.5))
+                width = _spoken_as(Adw.SpinRow(
+                    title="Width", subtitle=WIDTH_UNIT, digits=1, update_policy=valid_only,
+                    adjustment=Gtk.Adjustment(
+                        lower=WIDTH_RANGE[0], upper=WIDTH_RANGE[1], value=1.0,
+                        step_increment=0.1, page_increment=0.5)), f"Band {band} width")
                 width.connect("notify::value", self.on_band, band)
                 row.add_row(width)
                 self.width_rows[band] = width
@@ -508,7 +464,6 @@ class HeadsetPage:
         return eq
 
     def _stream_group(self) -> Adw.PreferencesGroup:
-        """The Stream mix group: a slider per STREAM_SETTINGS name."""
         stream = self.stream_group = Adw.PreferencesGroup(title=STREAM_MIX,
                                                           description=STREAM_HELP)
         for name in STREAM_SETTINGS:
@@ -525,7 +480,6 @@ class HeadsetPage:
         return base
 
     def _revert_group(self) -> Adw.PreferencesGroup:
-        """The group that holds Revert to saved."""
         self.revert_group = Adw.PreferencesGroup()
         self.revert_row = Adw.ButtonRow(title=f"{REVERT_TO_SAVED}…",
                                         start_icon_name="edit-undo-symbolic")
@@ -534,13 +488,19 @@ class HeadsetPage:
         return self.revert_group
 
     def _slider_row(self, name: str) -> Adw.ActionRow:
-        """A setting's slider."""
-        balance = name == "default_balance"
         row = Adw.ActionRow(title=ROW_TITLES[name], use_markup=False, visible=False)
-        scale = (_balance_scale(SETTING_NAMES[name]) if balance
-                 else spoken_scale(*SETTING_RANGES[name], SLIDER_NAMES[name]))
+        if name == "default_balance":
+            scale = spoken_scale(*BALANCE_RANGE, SLIDER_NAMES[name], origin=False,
+                                 spoken=balance_text)
+            for tick in BALANCE_TICKS:
+                scale.add_mark(tick, Gtk.PositionType.BOTTOM, None)
+            suffix: Gtk.Widget = between(scale, "Voice", "Game")
+        else:
+            scale = suffix = spoken_scale(*SETTING_RANGES[name], SLIDER_NAMES[name])
         scale.connect("value-changed", self.on_slider, name)
-        row.add_suffix(_in_line(_between(scale) if balance else scale))
+        # Clear of where a band's expander arrow sits (ARROW_ROOM).
+        suffix.set_margin_end(ARROW_ROOM)
+        row.add_suffix(suffix)
         self.sliders[name] = scale
         self.setting_rows[name] = row
         return row
@@ -549,7 +509,8 @@ class HeadsetPage:
         row = Adw.ComboRow(title=ROW_TITLES[name], visible=False,
                            model=Gtk.StringList.new(CHOICE_LABELS[name]))
         if tips:
-            explain_choices(row, tips)
+            # Not read's last, the entry show_choice lists after the values.
+            explain_choices(row, (*tips, NOT_READ_TIP))
         row.connect("notify::selected", self.on_choice, name)
         self.setting_rows[name] = row
         return row
@@ -562,15 +523,13 @@ class HeadsetPage:
             self.poll(ask)
 
     def poll(self, ask: bool = True) -> None:
-        """Ask for the headset as its tab needs it: every setting until the base station has
-        answered a full read, and again after it or the daemon was lost (read_done); its
-        state after that. `ask` False, and while a save runs, the daemon answers from what it
-        holds. With `ask`, the open Load preset to headset dialog reads the library again too:
-        a change the CLI made shows. The volumes are read again where their rows show
-        (VolumeRows.refresh)."""
+        """Ask for the headset: every setting until a full read is done (read_done), its state
+        after that; with `ask` False, and while a save runs, what the daemon holds. With `ask`,
+        the library is read again where PresetsDialog.refresh reads it: a change the CLI made
+        shows."""
         asking = ask and not self.saving
         self.refresh(ask=asking, read=asking and not self.read_done)
-        self.volumes.refresh()
+        self.computer.refresh()
         if ask:
             self.library.refresh()
 
@@ -593,43 +552,50 @@ class HeadsetPage:
             self._save_lost()
         self._failed(unreachable(error), DAEMON_WAIT)
 
-    def show_problem(self, problem: dict | None) -> None:
+    def show_problem(self, problem: dict | None, none_attached: bool = False) -> None:
         """Take a problem from the daemon's status: a `headset_*` one, or another family's
-        while no headset is attached (Window._take_devices). Until a headset is seen the
-        status page shows it, and after that the Status row of a base station not answering
-        does, the problem saying how to wake it (show_state); the reply's refusal says the
+        while no headset is attached (headset_problems), and whether the status named
+        no headset of any family attached, when this page shows for all (HeadsetStack).
+        Until a headset is seen the status page shows the problem, else with none attached
+        NO_HEADSET_FOUND; after that the Status row of a base station not answering shows
+        the problem, saying how to wake it (show_state), and the reply's refusal says the
         others (_failed)."""
         message = str((problem or {}).get("message") or "")
         self._problem = capitalized(message) if message else None
-        if self._problem and not self.view.seen:
-            self.view.missing(NO_HEADSET, self._problem)
+        self._reason = self._problem or (NO_HEADSET_FOUND if none_attached else None)
+        if self._reason and not self.view.seen:
+            self.view.missing(NO_HEADSET, self._reason)
 
     def _failed(self, detail: str, title: str = NO_HEADSET) -> None:
         """No headset to show: said on the status page until one has been seen, and after
         that on the Status row alone, as the Keyboard tab says it: a toast would repeat it."""
         self.read_done = False
-        set_dot(self.state_dot, False)
-        self.state_row.set_subtitle(capitalized(detail))
-        # The readings were the gone base's, as the Mouse and Keyboard tabs have it.
-        self.state_row.set_tooltip_text(None)
-        show_battery(self.battery_row, self.battery_icon, None, gone=True)
-        self.firmware_row.set_visible(False)
+        show_gone(self.state_row, self.state_dot, self.battery_row, self.battery_icon,
+                  self.notices, detail)
+        show_firmware(self.firmware_row, None)
         self.mix_row.set_visible(False)
-        self.meter.show_headset(None)
-        self.volumes.show_headset(None)
+        self.computer.gone()
         self._set_editable(False)
         self.revert_row.set_sensitive(False)
         self.save_banner.set_sensitive(False)
         if not self.view.seen:
-            self.view.missing(title, self._problem if title == NO_HEADSET and self._problem
+            self.view.missing(title, self._reason if title == NO_HEADSET and self._reason
                               else detail)
 
     def _set_editable(self, editable: bool) -> None:
         """Load preset to headset stays sensitive: its dialog renames, deletes and adds with
-        no base station, and grays out its own Load (set_writable)."""
-        if not editable and self._shown.typing(self._parent, self.name_row):
-            # Grayed out, the row loses the cursor, which EntryTexts.typing goes by.
-            self._typed_when_grayed = True
+        no base station, and grays out its own Load (set_writable). Graying the Name row with
+        the cursor in it takes the cursor out first."""
+        if not editable and holds_focus(self._parent.get_focus(), self.name_row):
+            if self._shown.typed(self.name_row):
+                # Grayed out, the row loses the cursor, which EntryTexts.typing goes by.
+                self._typed_when_grayed = True
+            # GTK grays a widget before it moves the cursor out, and a grayed widget's
+            # controllers get no focus-out: the row's text still took itself for focused, so
+            # a name put in it later started a cursor blink, which warned "did not receive a
+            # focus-out event" at the next frame (GTK 4.22.4). A spin row is left to GTK:
+            # its focus-out takes the number typed in it.
+            self._parent.set_focus(None)
         for row in (*self.setting_rows.values(), self.preset_row, self.name_row,
                     *self.band_rows, self.import_row, self.reset_row):
             row.set_sensitive(editable)
@@ -653,13 +619,15 @@ class HeadsetPage:
             self._failed(str(info.get("error") or NOT_FOUND))
             return
         self.view.found()
-        self.meter.show_headset(A50.key)
-        self.volumes.show_headset(A50.key)
+        self.computer.show_headset(A50.key)
         self.answering = info.get("answering") is not False
         self.saving = info.get("saving") is True
         # The daemon skips a read while the base is silent or a save runs,
-        # and a timeout cuts one short, which leaves the base silent too.
-        self.read_done = self.read_done or (read and self.answering and not self.saving)
+        # and a timeout cuts one short, which leaves the base silent too. A reply with no
+        # read_at is from a daemon that holds no full read: one restarted, or a base station
+        # replugged, between two polls, which no failed reply showed.
+        self.read_done = info.get("read_at") is not None and (
+            self.read_done or (read and self.answering and not self.saving))
         self._set_editable(self.answering and not self.saving)
         self.save_banner.set_sensitive(self.answering)
         self.show_state(info)
@@ -675,7 +643,8 @@ class HeadsetPage:
         linked = info.get("linked") is True
         state: bool | str
         if not self.answering:
-            # The daemon's problem says how to wake it, where status gave one.
+            # Status's headset problem where it gave one (another can come first);
+            # NOT_ANSWERING's words until then.
             words, state = self._problem or NOT_ANSWERING, ASLEEP
         elif linked:
             words, state = LINKED, True
@@ -687,50 +656,56 @@ class HeadsetPage:
             # set_dot's label, asleep or switched off, is wrong for a silent base station.
             self.state_dot.update_property([Gtk.AccessibleProperty.LABEL], [words])
         self.state_row.set_subtitle(words)
-        self.firmware_row.set_subtitle(displayable(versions_text(info.get("versions"))))
-        self.firmware_row.set_visible(True)
+        show_firmware(self.firmware_row, versions_text(info.get("versions")))
         device = info.get("device")
-        self.state_row.set_tooltip_text(str(device) if device else None)
+        self.state_row.show_node(str(device) if device else None)
         battery = info.get("battery") if isinstance(info.get("battery"), dict) else None
         # A headset away from the base says when its reading was taken.
-        show_battery(self.battery_row, self.battery_icon, battery, kept_at(info))
-        balance = _int(info.get("balance"), *BALANCE_RANGE)
+        show_battery(self.battery_row, self.battery_icon, battery, kept_at(info),
+                     preset=info.get("battery_notices"))
+        self.notices.show({"headset": A50.key}, info)
+        balance = whole_within(info.get("balance"), *BALANCE_RANGE)
         self.mix_row.set_visible(balance is not None)
         if balance is not None:
             self.mix_row.set_subtitle(balance_text(balance))
 
     def show_settings(self, settings: object, read_whole: bool) -> None:
         """Each setting's row on its active value. One the reply lacks, or gives in a shape it
-        should not, says Not read with its control off until the base station's first full
-        read (`read_whole`), as the A50 X's and the G432's rows do, and hides its row after
-        it."""
+        should not, is Not read with its control off until the base station's first full
+        read (`read_whole`), as the A50 X's and the G432's rows are, and hides its row after
+        it: a slider's row says it beneath, a list picks it (show_choice)."""
         settings = settings if isinstance(settings, dict) else {}
         self._active = {}
         for name in SETTINGS:
             value = self._active_of(settings.get(name), object)
             if name in SETTING_RANGES:
-                value = _int(value, *SETTING_RANGES[name])
+                value = whole_within(value, *SETTING_RANGES[name])
             elif value not in SETTING_CHOICES[name]:
                 value = None
             row = self.setting_rows[name]
             row.set_visible(value is not None or not read_whole)
             if value is None:
-                row.set_subtitle(NOT_READ)
+                # A slider grayed out or hidden under the pointer never sees its release.
+                self._holds.release(name)
                 row.set_sensitive(False)
+                if name in self.sliders:
+                    row.set_subtitle(NOT_READ)
+                else:
+                    show_choice(self._loading, cast(Adw.ComboRow, row), CHOICE_LABELS[name],
+                                None)
                 continue
-            if name not in self.sliders:
-                # Its value shows in the row itself.
-                row.set_subtitle("")
             self._active[name] = value
             if self._holds.held(name):
                 continue
-            # _build gives a slider to each of SETTING_RANGES, whose value _int passed above,
-            # and a combo row (_combo_row) to every other setting.
+            # _build gives a slider to each of SETTING_RANGES, whose value whole_within
+            # passed above, and a combo row (_combo_row) to every other setting.
             if name in self.sliders:
-                self._show_slider(name, cast(int, value))
+                level = cast(int, value)
+                self._loading.put_value(self.sliders[name], level)
+                row.set_subtitle(slider_text(name, level))
             else:
-                self._loading.put_selected(cast(Adw.ComboRow, self.setting_rows[name]),
-                                   SETTING_CHOICES[name].index(value))
+                show_choice(self._loading, cast(Adw.ComboRow, row), CHOICE_LABELS[name],
+                            SETTING_CHOICES[name].index(value))
         for group, names in ((self.mic_group, MIC_SETTINGS), (self.stream_group, STREAM_SETTINGS),
                              (self.base_group, BASE_SETTINGS)):
             group.set_visible(not read_whole or any(name in self._active for name in names))
@@ -741,8 +716,8 @@ class HeadsetPage:
         if self._holds.held("preset"):
             return                              # a reply to a read sent before the switch
         listed = info.get("presets")
-        presets = {p["preset"]: p for p in (listed if isinstance(listed, list) else ())
-                   if isinstance(p, dict) and whole(p.get("preset")) and p["preset"] in PRESETS}
+        presets = {slot: p for p in (listed if isinstance(listed, list) else ())
+                   if (slot := slot_number(p)) is not None}
         given = info.get("preset")
         active = given if whole(given) and given in presets else None
         switched = active != self._preset
@@ -775,7 +750,7 @@ class HeadsetPage:
             self._typed_when_grayed = False
         gains = self._active_of(preset.get("gains"), list)
         if not (gains is not None and len(gains) == len(BANDS)
-                and all(_int(g, *GAIN_RANGE) is not None for g in gains)):
+                and all(whole_within(g, *GAIN_RANGE) is not None for g in gains)):
             gains = None
         bands = _active_bands(preset)
         for index, band in enumerate(BANDS):
@@ -788,7 +763,7 @@ class HeadsetPage:
         """One band's row of `preset`, the active one: shown with its gain, and its frequency
         and width when the reply has them."""
         self.band_rows[index].set_visible(gain is not None)
-        freq = _int(found.get("freq"), *FREQ_RANGE)
+        freq = whole_within(found.get("freq"), *FREQ_RANGE)
         width = found.get("width")
         shown = freq is not None and (band in SHELVES or (
             number(width) and WIDTH_RANGE[0] <= width <= WIDTH_RANGE[1]))
@@ -823,10 +798,6 @@ class HeadsetPage:
         value = pair.get("active") if isinstance(pair, dict) else None
         return value if isinstance(value, kind) else None
 
-    def _show_slider(self, name: str, value: int) -> None:
-        self._loading.put_value(self.sliders[name], value)
-        self.setting_rows[name].set_subtitle(slider_text(name, value))
-
     def _band_subtitle(self, band: int) -> None:
         index = BANDS.index(band)
         gain = signed(round(self.gain_scales[index].get_value()))
@@ -841,13 +812,25 @@ class HeadsetPage:
                then: Callable[[dict], None] | None = None) -> None:
         """Send a write through the window's `call` and take the `headset` reply it
         answers with. A refusal, which `call` says, reads the headset again, which puts
-        the rows back."""
+        the rows back. The Equalizer group's spinner shows while a `headset_eq` is out."""
         self._holds.sent(key)
         # Only a write that changes the name puts it back over one being typed.
         force = key in ("name", "revert", "import")
+        # Each takes several round trips, up to SLOW_REQUEST_WAIT.
+        equalizer = request["command"] == "headset_eq"
+        if equalizer:
+            self._eq_writes += 1
+            show_header_spinner(self.eq_spinner, WRITING_BASE)
+
+        def landed() -> None:
+            self._holds.answered(key)
+            if equalizer:
+                self._eq_writes -= 1
+                if not self._eq_writes:
+                    show_header_spinner(self.eq_spinner, None)
 
         def done(reply: dict | None) -> None:
-            self._holds.answered(key)
+            landed()
             if reply is None:
                 self.refresh(force=force)
                 return
@@ -857,7 +840,7 @@ class HeadsetPage:
 
         def unanswered(_error: Exception) -> None:
             # `call` set the status; the next poll reads the headset.
-            self._holds.answered(key)
+            landed()
         self._call(request, done, unanswered, timeout=timeout)
 
     def _flush_eq(self) -> None:
@@ -865,16 +848,16 @@ class HeadsetPage:
 
     def flush(self) -> bool:
         """Send what is still settling now, a frequency or a width typed and not yet taken
-        and a volume among it (VolumeRows), for the window's close or a save; True if any."""
+        and a volume among it (ComputerRows.flush), for the window's close or a save; True if
+        any."""
         take_typed(*self.freq_rows, *self.width_rows.values())
-        return self.volumes.flush() | self._holds.flush()
+        return self.computer.flush() | self._holds.flush()
 
     def close(self) -> None:
         self._closed = True
         self._holds.cancel_all()
         self.save_watch.stop()
-        self.meter.close()
-        self.volumes.close()
+        self.computer.close()
 
     def on_slider(self, scale: Gtk.Scale, name: str) -> None:
         value = round(scale.get_value())
@@ -886,7 +869,7 @@ class HeadsetPage:
     def _send_later(self, name: str) -> None:
         self._holds.settle(
             name, lambda: self._send_setting(name, round(self.sliders[name].get_value())),
-            SLIDER_SETTLE_MS)
+            SETTLE_MS)
 
     def on_press(self, name: str) -> None:
         """The pointer went down on a slider that snaps: nothing is sent
@@ -947,7 +930,7 @@ class HeadsetPage:
         preset = self._preset
         if self._loading.active or preset is None:
             return
-        self._holds.settle(gains_key(preset), lambda: self._send_gains(preset), SLIDER_SETTLE_MS)
+        self._holds.settle(gains_key(preset), lambda: self._send_gains(preset), SETTLE_MS)
 
     def _send_gains(self, preset: int) -> None:
         key = gains_key(preset)
@@ -990,10 +973,10 @@ class HeadsetPage:
 
     @property
     def busy(self) -> bool:
-        """A save of the library is out, or the library's read of a file to import before one,
-        or a volume set (VolumeRows), which the window's close waits for; the Import row's
-        own read (import_path) is not counted."""
-        return self.library.busy or self.volumes.busy
+        """An action of the library (PresetsDialog.busy) or of the computer's rows
+        (ComputerRows.busy) is out, which the window's close waits for; the Import row's own
+        read (import_path) is not counted."""
+        return self.library.busy or self.computer.busy
 
     def shown_preset(self) -> EqPreset | None:
         """The active preset as its rows show it, an edit still settling included, under the
@@ -1010,10 +993,11 @@ class HeadsetPage:
 
     def _show_save_new(self) -> None:
         """Save as new preset, usable while the rows are (_set_editable) and the active preset
-        is read whole, grayed out with the library full (style.offer_save_new); again as each
-        read or change of the library lands."""
-        offer_save_new(self.save_new_row, self._editable and self.shown_preset() is not None,
-                       self.library.saved(), SAVE_NEW_HELP)
+        is read whole, grayed out with the library full (style.offer_save_new), which the
+        Equalizer group's line then says; again as each read or change of the library lands."""
+        self.eq_group.set_description(offer_save_new(
+            self.save_new_row, self._editable and self.shown_preset() is not None,
+            self.library.saved()))
 
     def on_save_new(self, _row: Adw.ButtonRow) -> None:
         """Save as new preset: what the rows show, an edit still settling sent first, into
@@ -1035,6 +1019,11 @@ class HeadsetPage:
             self._holds.cancel(key)
         self._write("import", {**default_slot(preset).request(), "preset": preset},
                     SLOW_REQUEST_WAIT)
+
+    def toast_overlay(self) -> Adw.ToastOverlay | None:
+        """Where the window's messages go while the Load preset to headset dialog is up
+        (PresetsDialog.toast_overlay); None while it is not."""
+        return self.library.toast_overlay()
 
     def write_preset(self, slot: int, preset: EqPreset) -> None:
         """A preset of the library to `slot`, as an import writes one: its name, gains and
@@ -1078,13 +1067,12 @@ class HeadsetPage:
         """Save: what still settles goes first, then `headset_save`, whose end save_watch
         follows."""
         watch = self.save_watch
-        if watch.sent or watch.waiting or self.saving:
+        if self.saving or not watch.send():
             return
         self.flush()
-        watch.sent = True
 
         def done(reply: dict | None) -> None:
-            watch.answered(reply is not None)
+            watch.answered(reply)
             if reply is not None:
                 self._on_info(reply)
 

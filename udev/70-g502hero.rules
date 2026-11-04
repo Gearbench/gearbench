@@ -4,7 +4,7 @@
 # collection is on interface 01, as Solaar's device descriptors
 # (interface=1) give it. The mouse has no receiver, so its USB identity is
 # its own and the property match below is scoped by interface, as the
-# keyboard's is.
+# G915's is.
 #
 # Interface 01 also carries the mouse's own key reports: libratbag's log of
 # one lists report ids 01, 03 and 04 beside HID++'s 10 and 11 on that node. A

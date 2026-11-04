@@ -1,17 +1,28 @@
 """Configuration for Gearbench: ~/.config/gearbench/config.json.
 
 Three profiles, one per M key, each with its G-key bindings, a shift layer held on
-MR, its lighting for each keyboard model, and its bindings for each mouse model's buttons. A
-binding is a key spec like "ctrl+f13" or `macro:<name>`; a mouse button also takes a
-built-in action. G keys ship unbound, so nothing sends keystrokes the user did not ask
+MR, its lighting for each keyboard model, and its bindings for each mouse model's buttons,
+on the base layer and on the G-Shift layer. A binding is a key spec like "ctrl+f13",
+`macro:<name>`, one of the balance's words, g-shift (G_SHIFT) on the base layer or nothing
+(NOTHING) on the G-Shift layer; a mouse button also takes a built-in action, and a headset's
+G key one of its own. G keys ship unbound, so nothing sends keystrokes the user did not ask
 for; G keys that are a model's F row, as the G915 TKL's are, type their own keys while
-unbound (KeyboardModel.g_key_defaults and .reports_unbound in keyboard.py). JSON, since
-the daemon writes this file and the standard library only reads TOML.
+unbound (KeyboardModel.g_key_defaults and .reports_unbound in keyboard.py). JSON, since the
+daemon writes this file and the standard library only reads TOML.
 
 Version 2 keeps the lighting and the brightness by keyboard model, under the model's
 first product id (keyboard.model_key). Version 1 kept one of each, which are read as the
 G915's (V1_KEYBOARD). Version 3 keeps the mouse bindings by mouse model in the same way
 (mouse.model_key); versions 1 and 2 kept one set, read as the G502 X PLUS's (V2_MOUSE).
+Version 4 keeps what came after Gearbench 1.2.0, which 1.2.0's save would leave out or
+refuse: the mouse's G-Shift layer (Profile.mouse_shift), each device's battery notices
+(Config.battery_notices), the balance's words (BALANCE_ACTIONS), g-shift on a key or a
+button (G_SHIFT), a headset's G key bound on the G-Shift layer, a G key's binding to nothing
+on the G-Shift layer (NOTHING) and the switch that keeps the keyboard from dimming with a game
+profile loaded (Config.never_dim_with_game_profile).
+1.2.1 and every Gearbench before it refuse the file by its version and start on their
+defaults without writing over it, and the first save in version 4 keeps an older file's bytes
+once (settings_files.keep_old_version; the owner's decision 3 of 2026-10-28).
 """
 
 from __future__ import annotations
@@ -22,7 +33,7 @@ import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import NamedTuple, cast
 
 from .lighting import (
     ANIMATIONS,
@@ -31,6 +42,7 @@ from .lighting import (
     SPEEDS,
     TWO_COLORED,
     WAVE_DIRECTIONS,
+    nearest_speed,
 )
 from .settings_files import (
     FIRST_VERSION,
@@ -48,6 +60,7 @@ from .settings_files import (
 )
 from .uinput import UinputError, parse_binding
 from .wording import (
+    NOT_WHOLE_IN,
     both_ends,
     escaped,
     kind_of,
@@ -60,7 +73,7 @@ from .wording import (
 
 log = logging.getLogger("gearbench")
 
-VERSION = 3
+VERSION = 4
 #: The first format to keep the mouse bindings by mouse model; an older one's are V2_MOUSE's.
 MOUSE_BY_MODEL = 3
 #: The model a version 1 file's lighting and brightness are read as: the G915, which
@@ -94,8 +107,8 @@ G515_F_KEYS = tuple(f"G515-F{n}" for n in range(1, 13))
 PRO_X_TKL_F_KEYS = tuple(f"PROXTKL-F{n}" for n in range(1, 13))
 #: The G515 generation's other keyboards' keys of their own, which their custom assignments
 #: bind, under names of their own (the owner's decisions of 2026-10-18, "Their own", and of
-#: 2026-10-21) in the G515s' form: the G915 X's G1 to G9, shared with the G915 X LIGHTSPEED, which has its keys, and
-#: each other board's F1 to F12, shared by the two models on one board.
+#: 2026-10-21) in the G515s' form: the G915 X's G1 to G9, which the G915 X LIGHTSPEED shares,
+#: and each other board's F1 to F12, the G316 X's shared with the G316 X 98.
 G915X_G_KEYS = tuple(f"G915X-G{n}" for n in range(1, 10))
 G915XTKL_F_KEYS = tuple(f"G915XTKL-F{n}" for n in range(1, 13))
 G316X_F_KEYS = tuple(f"G316X-F{n}" for n in range(1, 13))
@@ -112,10 +125,15 @@ G633_G_KEYS = tuple(f"G633-G{n}" for n in range(1, 4))
 G635_G_KEYS = tuple(f"G635-G{n}" for n in range(1, 4))
 HEADSET_G_KEYS = (G933_G_KEYS, G935_G_KEYS, G633_G_KEYS, G635_G_KEYS)
 HEADSET_KEYS = tuple(key for keys in HEADSET_G_KEYS for key in keys)
-#: What a headset's G key can do but hold a key spec or run a macro, the owner's answers of
-#: 2026-10-25: nothing; the lighting's brightness cycle, G HUB's G1 on a G933; the lighting
+#: The binding that does nothing: a mouse button's and a headset's key's on either layer,
+#: and a keyboard's G key's on the G-Shift layer alone (key_binding), where with no binding
+#: it would send its base one (the owner's decision of 2026-10-28). Unbound on the base
+#: layer, a G key does nothing or types its own key.
+NOTHING = "none"
+#: The headset's actions a headset's G key can take, beside a key spec, a macro, G_SHIFT and
+#: BALANCE_ACTIONS, the owner's answers of 2026-10-25: nothing; the lighting's brightness cycle, G HUB's G1 on a G933; the lighting
 #: off or on; the next preset of the headset's equalizer library; sidetone off or on.
-HEADSET_ACTIONS = ("none", "brightness-cycle", "lights-toggle", "eq-next", "sidetone-toggle")
+HEADSET_ACTIONS = (NOTHING, "brightness-cycle", "lights-toggle", "eq-next", "sidetone-toggle")
 #: What a headset's G key does while unbound: G1 the brightness cycle, as G HUB has it on a
 #: G933 (the owner's answer of 2026-10-25), and as the G933's on the models whose G keys are
 #: taken to be its (their setup guides give G1 a lighting cycle); the others nothing.
@@ -169,13 +187,42 @@ MOUSE_LABELS = {
 }
 #: Built-in actions a mouse button can be bound to instead of a key spec.
 #: back and forward hold the virtual mouse's buttons uinput.POINTER_ACTIONS names;
-#: dpi-shift drops to the profile's shift stage while held; dpi-cycle steps up and from the
+#: dpi-shift goes to the profile's shift stage while held; dpi-cycle steps up and from the
 #: last stage round to the first, as the PRO WIRELESS's DPI button does.
-MOUSE_ACTIONS = ("none", "back", "forward", "dpi-shift", "dpi-up", "dpi-down", "dpi-cycle")
+MOUSE_ACTIONS = (NOTHING, "back", "forward", "dpi-shift", "dpi-up", "dpi-down", "dpi-cycle")
+#: The balance's words, toward the game and toward chat, which a mouse button and a G key, a
+#: keyboard's or a headset's, may be bound to on either layer (the owner's decisions 3 and 5 of
+#: 2026-10-28): read in any case and with white space around them, as an action is, and kept.
+#: A press sends Outputs its word (daemon.bindings).
+BALANCE_ACTIONS = ("balance-game", "balance-chat")
+#: The binding that holds G-Shift while its key or button is held: a G key, a keyboard's or a
+#: headset's, or a mouse button takes it on the base layer alone (the owner's decisions 4, 5
+#: and 14 of 2026-10-28), in any case and with white space around it, as an action. What a
+#: held one shifts is daemon.bindings.shifts.
+G_SHIFT = "g-shift"
+#: The words a G key, a keyboard's or a headset's, and a mouse button may be bound to that are
+#: no key spec or macro, each kept as the word, stripped and in lowercase (key_binding,
+#: parse_mouse_binding): a headset's actions on a headset's key alone, NOTHING apart, which a
+#: keyboard's G key takes on the G-Shift layer too. A G key's `back` is a key spec, KEY_BACK,
+#: where a mouse button's is its action.
+KEY_WORDS = frozenset((*HEADSET_ACTIONS, G_SHIFT, *BALANCE_ACTIONS))
+MOUSE_WORDS = frozenset((*MOUSE_ACTIONS, G_SHIFT, *BALANCE_ACTIONS))
+#: The refusal of g-shift on the G-Shift layer, the key's or button's name put in.
+NO_SHIFTED_G_SHIFT = ("{} cannot hold G-Shift from the G-Shift layer; bind g-shift on its "
+                      "base layer")
+#: The refusal of a headset's action on a keyboard's key, the action and the key put in.
+HEADSET_ACTION_ONLY = "{} is for a headset's G key, not {}"
+#: The refusal of NOTHING on a keyboard's key's base layer, where null unbinds the key.
+NOTHING_ON_BASE = f"{NOTHING} is for the G-Shift layer; null leaves a key unbound"
+#: The refusals of a G-Shift binding on a key or button that holds G-Shift, which its own
+#: release must let go of, and of g-shift on one that has a G-Shift binding; its name put in.
+HOLDS_G_SHIFT = "{} holds G-Shift, so it takes no G-Shift binding; change its base binding first"
+HAS_G_SHIFT_BINDING = ("{} has a G-Shift binding, so it cannot hold G-Shift; clear that binding "
+                       "first")
 #: What versions 1 and 2 gave a button their file left out: the G502 X PLUS's factory jobs
 #: for G4 to G8 and nothing on G9, a profile cycle there (mouse.G502X_BUTTONS.defaults).
 MOUSE_DEFAULTS = {"g4": "back", "g5": "forward", "g6": "dpi-shift",
-                  "g7": "dpi-down", "g8": "dpi-up", "g9": "none"}
+                  "g7": "dpi-down", "g8": "dpi-up", "g9": NOTHING}
 
 #: The report rates a mouse's onboard profile and its live write take, in Hz, the fastest
 #: first, as a message lists them: an interval of 1, 2, 4 or 8 ms (onboard.RATE_BYTES).
@@ -263,15 +310,17 @@ def refuse_controls(text: str, where: str) -> None:
 #: The most characters a game profile, macro or M profile name may hold. A row wraps a
 #: name with no space in time that grows with its square (40,000 characters: 29 s,
 #: measured 2026-10-12). Room above the G HUB import's 256-character cut
-#: (ghub.MAX_NAME_CHARS) for the " (N)" an import adds.
+#: (ghub_file.MAX_NAME_CHARS) for the " (N)" an import adds.
 MAX_NAME_LENGTH = 1000
+#: What refuse_name says of a name over MAX_NAME_LENGTH, after its where: the name's length,
+#: then the most.
+TOO_LONG_NAME = "{:,} characters is more than the {:,} a name may hold"
 
 
 def refuse_name(text: str, where: str) -> None:
     """refuse_controls for a name, length first, so a refusal never quotes a long name."""
     if len(text) > MAX_NAME_LENGTH:
-        raise ConfigError(f"{where}: {len(text)} characters is more than the "
-                          f"{MAX_NAME_LENGTH} a name may hold")
+        raise ConfigError(f"{where}: {TOO_LONG_NAME.format(len(text), MAX_NAME_LENGTH)}")
     refuse_controls(text, where)
 
 
@@ -326,18 +375,20 @@ def direction_problem(value: object) -> str | None:
     return f"wave's direction is {word_list(list(WAVE_DIRECTIONS))}, not {written(value)}"
 
 
-#: (where, effect, ms) of each clamp or drop read_speeds has said at info.
-_CLAMPS_SAID: set[tuple[str, str, int]] = set()
+#: What the reads of one owner have said once (_say_once): the daemon keeps one for
+#: config.json's reloads and profiles.Library one for its reads of the game profiles.
+type Said = set[tuple[object, ...]]
 
 
-def _say_once(said: tuple[str, str, int], message: str, *args: object) -> None:
-    """`message` at info the first time read_speeds meets `said`, (where, effect, ms), and at
-    debug after: the daemon reads every game profile every 5 s."""
-    log.log(logging.DEBUG if said in _CLAMPS_SAID else logging.INFO, message, *args)
-    _CLAMPS_SAID.add(said)
+def _say_once(said: Said, what: tuple[object, ...], message: str, *args: object) -> None:
+    """`message` at info the first time a read that keeps `said` meets `what`, which it adds
+    to `said`, and at debug after: the daemon reads every game profile every 5 s, and
+    config.json at each reload."""
+    log.log(logging.DEBUG if what in said else logging.INFO, message, *args)
+    said.add(what)
 
 
-def read_speeds(raw: object, where: str) -> dict[str, int]:
+def read_speeds(raw: object, where: str, said: Said) -> dict[str, int]:
     """A profile's saved animation speeds from JSON, {effect: ms}, each in its range.
     Absent or null is none saved: every animation at its default.
 
@@ -353,15 +404,15 @@ def read_speeds(raw: object, where: str) -> dict[str, int]:
     speeds = {}
     for name, value in raw.items():
         if name in ANIMATIONS and whole(value):
-            said = (where, name, value)
+            what = (where, name, value)
             if name not in SPEEDS:
-                _say_once(said, "%s.%s: %s has no speed: %s; its %d ms is left out",
+                _say_once(said, what, "%s.%s: %s has no speed: %s; its %d ms is left out",
                           escaped(where), name, name, OWN_PACE, value)
                 continue
             fastest, slowest = SPEEDS[name]
             if not fastest <= value <= slowest:
-                kept = min(max(value, fastest), slowest)
-                _say_once(said, "%s.%s: %d ms is outside %s's %d to %d; using %d",
+                kept = nearest_speed(name, value)
+                _say_once(said, what, "%s.%s: %d ms is outside %s's %d to %d; using %d",
                           escaped(where), name, value, name, fastest, slowest, kept)
                 value = kept
         if (problem := speed_problem(name, value)) is not None:
@@ -398,13 +449,15 @@ def layer_color(effect: str, mode: str, static: int, background: int) -> int:
     return static if effect in ANIMATIONS or mode != PER_KEY else background
 
 
-def layer_binding(keys: dict[str, str | None], shift: dict[str, str | None], key: str,
+def layer_binding(keys: Mapping[str, str | None], shift: Mapping[str, str | None], key: str,
                   shifted: bool) -> str | None:
-    """A G key's binding on a layer, an M profile's or a game profile's. An unbound key
-    on the shift layer falls through to the base layer, so holding MR does not silently
-    disable keys the user did bind."""
-    value = shift.get(key) if shifted else None
-    return keys.get(key) if value is None else value
+    """A G key's or a mouse button's binding on a layer, an M profile's or a game profile's.
+    An unbound key on the shift layer falls through to the base layer, so holding G-Shift does
+    not silently disable keys the user did bind, and a key bound to G_SHIFT keeps it on either
+    layer, so its own release lets go of the shift it holds."""
+    base = keys.get(key)
+    value = shift.get(key) if shifted and base != G_SHIFT else None
+    return base if value is None else value
 
 
 def read_mode(data: dict, where: str) -> str:
@@ -448,32 +501,41 @@ def validate_binding(spec: str, where: str) -> str:
     return spec
 
 
-def key_binding(key: str, spec: object, where: str) -> str | None:
+def key_binding(key: str, spec: object, where: str, shift: bool) -> str | None:
     """`key`'s binding from a file or a request, as validate_binding answers it, or None for
     None and "". Anything else must be text: str() would bind a JSON 5 to the 5 key, and 0 or
-    false would unbind. A headset's key, one of HEADSET_KEYS, takes one of HEADSET_ACTIONS
-    too, in any case and with white space around it, as a mouse button takes its actions."""
+    false would unbind. A key takes one of KEY_WORDS too: G_SHIFT or one of BALANCE_ACTIONS on
+    any key, NOTHING on the G-Shift layer, `shift`, and one of HEADSET_ACTIONS on a headset's
+    key, one of HEADSET_KEYS, each in any case and with white space around it, as a mouse button
+    takes its actions. Elsewhere a word of KEY_WORDS is refused with its own reason, NOTHING on
+    the base layer with NOTHING_ON_BASE and another of HEADSET_ACTIONS with HEADSET_ACTION_ONLY:
+    as a key spec it would be an unknown key name, which `gearbench-ctl keys` cannot answer."""
     if spec is None or spec == "":
         return None
     spec = expect(spec, str, where, "a key spec or macro:<name>")
-    if key in HEADSET_KEYS and spec.strip().lower() in HEADSET_ACTIONS:
-        return spec.strip().lower()
+    word = spec.strip().lower()
+    if word in KEY_WORDS:
+        if word not in HEADSET_ACTIONS or key in HEADSET_KEYS or shift and word == NOTHING:
+            return word
+        refused = NOTHING_ON_BASE if word == NOTHING else HEADSET_ACTION_ONLY.format(word, key)
+        raise ConfigError(f"{where}: {refused}")
     return validate_binding(spec, where)
 
 
 def parse_mouse_binding(spec: object, where: str) -> str:
-    """Validate one mouse binding: a built-in action, a key spec or a macro.
+    """Validate one mouse binding: a built-in action, G_SHIFT, a balance word, a key spec or a
+    macro.
 
-    None and "" mean "none"; anything else must be text, so a JSON 5 is not the 5 key.
-    An action matches in any case and with spaces around it, since " Back" is held as
-    "Back" otherwise, which parse_binding reads as KEY_BACK. The rest takes a G key's check,
-    `macro:<name>` included, and is stored as a G key's is.
+    None and "" mean NOTHING; anything else must be text, so a JSON 5 is not the 5 key.
+    An action, G_SHIFT or a balance word matches in any case and with spaces around it, since
+    " Back" is held as "Back" otherwise, which parse_binding reads as KEY_BACK. The rest takes
+    a G key's check, `macro:<name>` included, and is stored as a G key's is.
     """
     if spec is None or spec == "":
-        return "none"
+        return NOTHING
     spec = expect(spec, str, where, "an action, a key spec or macro:<name>")
     word = spec.strip().lower()
-    if word in MOUSE_ACTIONS:
+    if word in MOUSE_WORDS:
         return word
     return validate_binding(spec, where)
 
@@ -484,6 +546,13 @@ def mouse_button_name(name: object) -> str | None:
     return text if text in MOUSE_BUTTONS else None
 
 
+def not_a_mouse_button(key: object) -> str:
+    """The refusal of `key`, which mouse_button_name does not take, naming the buttons as the
+    window labels them."""
+    return (f"{key!r} is not a mouse button; they are "
+            f"{word_list([button.upper() for button in MOUSE_BUTTONS], 'and')}")
+
+
 def mouse_entry(raw: object, where: str) -> dict[str, str]:
     """The mouse bindings an object of JSON holds, by button name, in the file's order. A
     button a model lacks is kept and does nothing on it; one it has and the object leaves out
@@ -492,9 +561,7 @@ def mouse_entry(raw: object, where: str) -> dict[str, str]:
     found: dict[str, str] = {}
     for key, spec in raw.items():
         if (name := mouse_button_name(key)) is None:
-            raise ConfigError(
-                f"{where}: {key!r} is not a mouse button; they are {', '.join(MOUSE_BUTTONS)}"
-            )
+            raise ConfigError(f"{where}: {not_a_mouse_button(key)}")
         # Refused in any key order, or the later of "G4" and "g4" wins unsaid.
         if name in found:
             raise ConfigError(f"{where}: {key!r} names a button another key names")
@@ -509,6 +576,24 @@ def read_mouse_bindings(raw: object, where: str, version: int) -> dict[str, dict
     if version >= MOUSE_BY_MODEL:
         return by_model(raw, where, mouse_entry, MOUSE_MODEL, "mouse")
     return {} if raw is None else {V2_MOUSE: MOUSE_DEFAULTS | mouse_entry(raw, where)}
+
+
+def shift_entry(raw: object, where: str) -> dict[str, str]:
+    """One mouse model's bindings on the G-Shift layer, as mouse_entry reads a model's, but a
+    button bound to null or "" is left out, as if the object did not name it, where on the base
+    layer it would be bound to none, and one bound to G_SHIFT is refused (NO_SHIFTED_G_SHIFT)."""
+    raw = expect(raw, dict, where, "an object of mouse buttons and bindings")
+    entry = mouse_entry({key: spec for key, spec in raw.items() if spec not in (None, "")}, where)
+    for button, spec in entry.items():
+        if spec == G_SHIFT:
+            raise ConfigError(f"{where}: {NO_SHIFTED_G_SHIFT.format(button.upper())}")
+    return entry
+
+
+def read_mouse_shift(raw: object, where: str) -> dict[str, dict[str, str]]:
+    """A profile's mouse bindings on the G-Shift layer by mouse model (Profile.mouse_shift),
+    each model's read by shift_entry. Absent or null is none."""
+    return by_model(raw, where, shift_entry, MOUSE_MODEL, "mouse")
 
 
 def mouse_json(entries: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
@@ -625,7 +710,7 @@ def read_brightness(value: object, where: str) -> int:
     """A keyboard's saved brightness, a whole number from 0 to 100, or ConfigError naming
     `where`."""
     if not whole(value) or not 0 <= value <= 100:
-        raise ConfigError(f"{where} is a whole number from 0 to 100, not {written(value)}")
+        raise ConfigError(NOT_WHOLE_IN.format(where, "", 0, 100, written(value)))
     return value
 
 
@@ -653,28 +738,79 @@ def mouse_rate_map(raw: object) -> dict[str, int]:
                      f"one of {RATE_CHOICES} Hz")
 
 
+#: The low-battery notices a device can be set to, config.json's battery_notices (the owner's
+#: decisions 3 and 10 of 2026-10-28), each named by what it does: notices at 30% and 15%,
+#: G HUB's levels; at 10% and 5%; none; and at 30% and 15% with the second urgent, which
+#: GNOME shows over a full-screen game.
+AT_30_AND_15, AT_10_AND_5, NO_NOTICES, URGENT = "30/15", "10/5", "off", "30/15-urgent"
+#: In the order the CLI's choices and the window's Battery notices row list them.
+BATTERY_PRESETS = (AT_30_AND_15, AT_10_AND_5, NO_NOTICES, URGENT)
+#: What a device with no entry, or with a preset this version does not know, takes.
+DEFAULT_BATTERY_NOTICES = AT_30_AND_15
+
+
+def read_battery_notices(raw: object, said: Said) -> dict[str, str]:
+    """config.json's battery_notices: each device's preset of BATTERY_PRESETS by its model, a
+    keyboard's or a mouse's product id or a headset's key (pipewire_headsets.HEADSET_KEYED),
+    each key and preset without the white space around it and in lowercase, as product_key
+    reads an id. A key
+    or a preset this version does not know is kept, the preset as written, so what a later
+    Gearbench adds outlasts this one's save; such a preset is said once and reads as
+    DEFAULT_BATTERY_NOTICES (battery_notices_of). Absent or null is none."""
+    if raw is None:
+        return {}
+    raw = expect(raw, dict, "battery_notices",
+                 "an object keyed by a device model like 'c33e' or 'a50'")
+    notices: dict[str, str] = {}
+    for key, value in raw.items():
+        refuse_name(key, "battery_notices")
+        model = key.strip().lower()
+        # Refused in any key order, as by_model refuses one, or the later would win unsaid.
+        if model in notices:
+            raise ConfigError(f"battery_notices: {key!r} names a device another key names")
+        where = f"battery_notices.{key}"
+        expect(value, str, where, word_list(BATTERY_PRESETS))
+        refuse_name(value, where)
+        preset = value.strip().lower()
+        if preset not in BATTERY_PRESETS:
+            _say_once(said, ("battery_notices", model, value),
+                      "%s: %s is not %s; read as %s, and the file keeps it", escaped(where),
+                      repr(value), word_list(BATTERY_PRESETS), DEFAULT_BATTERY_NOTICES)
+            preset = value
+        notices[model] = preset
+    return notices
+
+
+def battery_notices_of(notices: Mapping[str, str], ids: Sequence[str]) -> str:
+    """The preset of BATTERY_PRESETS a device takes from `notices` (Config.battery_notices): its
+    entry under the first of `ids` it has (entry_under), a keyboard's or a mouse's model ids or a
+    headset's key alone; DEFAULT_BATTERY_NOTICES for none, or for one this version does not
+    know."""
+    preset = entry_under(notices, ids)
+    return preset if preset in BATTERY_PRESETS else DEFAULT_BATTERY_NOTICES
+
+
 def not_bindable(key: object) -> str:
-    """The refusal of a key no binding takes. It names the bindable keys, because M1 to M3
-    and MR look bindable and are not."""
-    return (f"{written(key)} is not bindable; bindable keys are {G_KEYS[0]} to {G_KEYS[-1]}, "
-            f"{own_keys_words('and')}; M1 to M3 switch profiles, and holding MR switches to "
-            f"the MR layer")
+    """The refusal of a key no binding takes. It names the bindable keys' forms, because M1
+    to M3 and MR look bindable and are not; every model's list is `gearbench-ctl bind`'s help
+    (own_keys_words), too long for the window's config banner."""
+    row, row_models = OWN_KEYS[0]
+    return (f"{written(key)} cannot be bound; the keys that can are {G_KEYS[0]} to {G_KEYS[-1]} "
+            f"and each model's own, such as {row[0]} on {row_models}, {G515_F_KEYS[0]} or "
+            f"{G933_G_KEYS[0]}, which `gearbench-ctl bind --help` lists; M1 to M3 switch "
+            "profiles, and MR holds G-Shift")
 
 
-def own_keys_words(last: str) -> str:
-    """Each model's keys of its own (OWN_KEYS) as a line names them, `last` before the last
-    group: "F1 to F12 on the G915 TKL, ... and G512X98-F1 to G512X98-F12 on the G512 X 98"."""
-    return word_list([f"{keys[0]} to {keys[-1]} on {models}" for keys, models in OWN_KEYS], last)
-
-
-#: The refusal of a headset's G key bound on the MR layer, the key's name put in.
-NO_HEADSET_SHIFT = "{} has no MR layer: MR shifts a keyboard's G keys alone"
+def own_keys_words() -> str:
+    """Each model's keys of its own (OWN_KEYS) as `gearbench-ctl bind`'s help names them:
+    "F1 to F12 on the G915 TKL, ... or G635-G1 to G635-G3 on the G635"."""
+    return word_list([f"{keys[0]} to {keys[-1]} on {models}" for keys, models in OWN_KEYS])
 
 
 def g_key_layer(raw: object, where: str, shift: bool = False) -> dict[str, str | None]:
     """A layer of G-key bindings from JSON, every one of BINDABLE_KEYS, unbound ones None;
-    game profiles share it. On the MR layer (`shift`) a headset's key that is bound is
-    refused, as `bind` refuses it (NO_HEADSET_SHIFT), since nothing reads it there."""
+    game profiles share it. On the G-Shift layer (`shift`) a key may be bound to NOTHING, and
+    one bound to G_SHIFT is refused (NO_SHIFTED_G_SHIFT)."""
     if raw is None:
         raw = {}
     raw = expect(raw, dict, where, "an object of G keys and bindings")
@@ -682,10 +818,25 @@ def g_key_layer(raw: object, where: str, shift: bool = False) -> dict[str, str |
     for key, spec in raw.items():
         if key not in BINDABLE_KEYS:
             raise ConfigError(f"{where}: {not_bindable(key)}")
-        out[key] = key_binding(key, spec, f"{where}.{key}")
-        if shift and key in HEADSET_KEYS and out[key] is not None:
-            raise ConfigError(f"{where}: {NO_HEADSET_SHIFT.format(key)}")
+        out[key] = key_binding(key, spec, f"{where}.{key}", shift)
+        if shift and out[key] == G_SHIFT:
+            raise ConfigError(f"{where}: {NO_SHIFTED_G_SHIFT.format(key)}")
     return out
+
+
+def g_shift_refusal(name: str, base: str | None, shifted: str | None,
+                    shift: bool) -> str | None:
+    """Why a bind may not leave the key or button `name` bound to `base` on its base layer and
+    to `shifted` on its G-Shift layer, None for nothing there, the bind made on the G-Shift
+    layer with `shift`; None where it may. Refused: G_SHIFT on the G-Shift layer
+    (NO_SHIFTED_G_SHIFT), and G_SHIFT beside a G-Shift binding, which a press while shifted
+    never reads (layer_binding), by the bind on the G-Shift layer (HOLDS_G_SHIFT) or by the
+    bind of G_SHIFT (HAS_G_SHIFT_BINDING)."""
+    if shifted == G_SHIFT:
+        return NO_SHIFTED_G_SHIFT.format(name)
+    if base == G_SHIFT and shifted is not None:
+        return (HOLDS_G_SHIFT if shift else HAS_G_SHIFT_BINDING).format(name)
+    return None
 
 
 def layer_json(layer: dict[str, str | None]) -> dict[str, str | None]:
@@ -767,10 +918,11 @@ class Lighting:
 
     @classmethod
     def from_json(cls, data: object, where: str, *, color_field: str = "color",
-                  with_params: bool = True) -> Lighting:
+                  with_params: bool = True, said: Said) -> Lighting:
         """One keyboard model's lighting from a file's JSON: config.json's, and a game
         profile's (profiles.game_lighting), whose Static color is its `color_field` and
-        whose `params`, which only an M profile has, are left unread (`with_params`)."""
+        whose `params`, which only an M profile has, are left unread (`with_params`); a
+        speed is said once in `said` (read_speeds)."""
         data = expect(data, dict, where, "an object")
         # Only null is the default, as in Config.from_json.
         params = data.get("params") if with_params else None
@@ -796,7 +948,7 @@ class Lighting:
             second_color=parse_color(data.get("second_color", DEFAULT_SECOND_COLOR),
                                      f"{where}.second_color"),
             params=dict(params),
-            speeds=read_speeds(data.get("speeds"), f"{where}.speeds"),
+            speeds=read_speeds(data.get("speeds"), f"{where}.speeds", said),
             direction=read_direction(data.get("direction"), f"{where}.direction"),
             keys={k: parse_color(v, f"{where}.keys.{k}") for k, v in keys.items()},
             mode=mode,
@@ -805,13 +957,25 @@ class Lighting:
         )
 
 
+class Layers(NamedTuple):
+    """A profile's layers of bindings, an M profile's or a game profile's, as its `layers`
+    gives and takes them whole: its G keys' on the base layer and on the G-Shift layer, and
+    its mouse bindings by model on each, the G-Shift one sparse."""
+
+    keys: dict[str, str | None]
+    shift: dict[str, str | None]
+    mouse: dict[str, dict[str, str]]
+    mouse_shift: dict[str, dict[str, str]]
+
+
 @dataclass
 class Profile:
     name: str = "Profile"
     #: G-key bindings by BINDABLE_KEYS' names, None meaning unbound. Values are specs like
     #: "ctrl+f5".
     keys: dict[str, str | None] = field(default_factory=lambda: dict.fromkeys(BINDABLE_KEYS))
-    #: Bindings used while MR is held.
+    #: The G-Shift layer of `keys`, used while G-Shift is held (daemon.bindings.shifts): by MR,
+    #: or by a key or button bound to G_SHIFT.
     shift: dict[str, str | None] = field(default_factory=lambda: dict.fromkeys(BINDABLE_KEYS))
     #: Its lighting by keyboard model (keyboard.model_key). A model with none shows another
     #: model's, cut to what it can show (keyboard.shown_lighting), until its first change.
@@ -820,6 +984,18 @@ class Profile:
     #: action, a key spec or a macro, never None. A model with none, or a button its entry
     #: leaves out, takes the model's defaults (mouse.bindings_of).
     mouse: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: Its mouse bindings on the G-Shift layer, kept as `mouse` keeps them but sparse: in the
+    #: design of format 4 (the owner's decision 3 of 2026-10-28), a button its model's entry
+    #: leaves out falls through to its binding in `mouse`, not to the model's default.
+    mouse_shift: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    @property
+    def layers(self) -> Layers:
+        return Layers(self.keys, self.shift, self.mouse, self.mouse_shift)
+
+    @layers.setter
+    def layers(self, layers: Layers) -> None:
+        self.keys, self.shift, self.mouse, self.mouse_shift = layers
 
     def to_json(self) -> dict:
         return {
@@ -828,10 +1004,12 @@ class Profile:
             "shift": layer_json(self.shift),
             "lighting": {model: entry.to_json() for model, entry in sorted(self.lighting.items())},
             "mouse": mouse_json(self.mouse),
+            "mouse_shift": mouse_json(self.mouse_shift),
         }
 
     @classmethod
-    def from_json(cls, data: object, where: str, default_name: str, version: int) -> Profile:
+    def from_json(cls, data: object, where: str, default_name: str, version: int,
+                  said: Said) -> Profile:
         """An M profile from a file of format `version`: version 1's one lighting, its defaults
         for any field it lacks, is V1_KEYBOARD's, and an older format's mouse bindings are
         read_mouse_bindings'."""
@@ -844,9 +1022,10 @@ class Profile:
         lighting = data.get("lighting")
         if version == FIRST_VERSION:
             entries = {V1_KEYBOARD: Lighting.from_json({} if lighting is None else lighting,
-                                                       f"{where}.lighting")}
+                                                       f"{where}.lighting", said=said)}
         else:
-            entries = by_model(lighting, f"{where}.lighting", Lighting.from_json,
+            entries = by_model(lighting, f"{where}.lighting",
+                               lambda raw, at: Lighting.from_json(raw, at, said=said),
                                KEYBOARD_MODEL, "keyboard")
         return cls(
             name=name,
@@ -854,6 +1033,7 @@ class Profile:
             shift=g_key_layer(data.get("shift"), f"{where}.shift", shift=True),
             lighting=entries,
             mouse=read_mouse_bindings(data.get("mouse"), f"{where}.mouse", version),
+            mouse_shift=read_mouse_shift(data.get("mouse_shift"), f"{where}.mouse_shift"),
         )
 
 
@@ -886,8 +1066,8 @@ class Config:
     #: Each keyboard model's follow switch, by keyboard.model_key as `brightness` is: on, while
     #: another keyboard leads it shows the leader's lighting at the leader's brightness in place
     #: of its own (the owner's decision of 2026-10-21, "B: separate pages, follow switch"). On
-    #: for a model not named. Gearbench 1.1.0 reads a file with the field and leaves it out of
-    #: its next save.
+    #: for a model not named. Gearbench 1.1.0 reads a version 3 file with the field and leaves
+    #: it out of its next save.
     follow_leader: dict[str, bool] = field(default_factory=dict)
     #: The keyboard's lights, and a synced mouse's, go off while the screen is locked
     #: or blanked and before a suspend (the owner's decision of 2026-09-23).
@@ -898,11 +1078,20 @@ class Config:
     idle_dim_after: int = IDLE_DIM_AFTER
     idle_off_after: int = IDLE_OFF_AFTER
     never_dim: bool = False
+    #: The switch that keeps the keyboard from dimming while a game profile is loaded, one for
+    #: every game profile, beside the idle times: the owner's request of 2026-10-03, its shape of
+    #: 2026-10-08 and decision 13 of 2026-10-28. Off by default.
+    never_dim_with_game_profile: bool = False
     #: A desktop notice with the new DPI when a DPI button steps it; a step within
     #: session.DPI_NOTICE_REPLACE of its post replaces it in place, a later one closes it and
     #: posts a new one (the owner's decisions of 2026-09-24 and 2026-10-18). Its own switch
     #: because GNOME's switch for the app would silence the battery notices too.
     dpi_notices: bool = True
+    #: Each device's low-battery notices, a preset of BATTERY_PRESETS by its model: a keyboard's
+    #: or a mouse's key (keyboard.model_key, mouse.model_key) or a headset's
+    #: (pipewire_headsets.HEADSET_KEYED). A device with none takes DEFAULT_BATTERY_NOTICES
+    #: (battery_notices_of).
+    battery_notices: dict[str, str] = field(default_factory=dict)
     #: HOST mode for each mouse model in spy.SPY_MODELS (MouseModel.host_mode): while the
     #: daemon runs, the mouse is in HOST mode with 0x8110 armed and its buttons reach the
     #: daemon as the spy's masks; at a stop it goes back to ONBOARD mode, on profile 1 where
@@ -962,7 +1151,9 @@ class Config:
             "idle_dim_after": self.idle_dim_after,
             "idle_off_after": self.idle_off_after,
             "never_dim": self.never_dim,
+            "never_dim_with_game_profile": self.never_dim_with_game_profile,
             "dpi_notices": self.dpi_notices,
+            "battery_notices": dict(sorted(self.battery_notices.items())),
             "mouse_host_mode": self.mouse_host_mode,
             "tray": self.tray,
             "keyboard_link_notices": self.keyboard_link_notices,
@@ -973,9 +1164,11 @@ class Config:
         }
 
     @classmethod
-    def from_json(cls, data: object) -> Config:
-        if not isinstance(data, dict):
-            raise ConfigError(f"config is a JSON object, not {kind_of(data)}")
+    def from_json(cls, data: object, said: Said | None = None) -> Config:
+        """config.json's configuration from its JSON. What it says once goes in `said`, the
+        caller's record across its reads; None starts a record of this read alone."""
+        said = set() if said is None else said
+        data = expect(data, dict, "config", "a JSON object")
         if (problem := version_problem(data, VERSION, FIRST_VERSION)) is not None:
             raise ConfigError(f"config {problem}")
         version = data.get("version", FIRST_VERSION)
@@ -995,7 +1188,7 @@ class Config:
         for i in PROFILE_IDS:
             raw = stored.get(str(i))
             profiles[i] = Profile.from_json({} if raw is None else raw, f"profiles.{i}",
-                                            f"Profile {i}", version)
+                                            f"Profile {i}", version, said)
         active = data.get("active_profile", 1)
         # An int check first: 2.0 is `in` PROFILE_IDS and would reach `1 << (which - 1)`.
         if not whole(active) or active not in PROFILE_IDS:
@@ -1029,7 +1222,9 @@ class Config:
                                    KEYBOARD_MODEL, "keyboard"),
             lights_off_when_locked=flag(data, "lights_off_when_locked", True),
             never_dim=flag(data, "never_dim", False),
+            never_dim_with_game_profile=flag(data, "never_dim_with_game_profile", False),
             dpi_notices=flag(data, "dpi_notices", True),
+            battery_notices=read_battery_notices(data.get("battery_notices"), said),
             mouse_host_mode=flag(data, "mouse_host_mode", True),
             tray=flag(data, "tray", True),
             keyboard_link_notices=flag(data, "keyboard_link_notices", True),
@@ -1044,15 +1239,15 @@ class Config:
 
 
     @classmethod
-    def load(cls, path: Path | None = None) -> Config:
+    def load(cls, path: Path | None = None, said: Said | None = None) -> Config:
         """Read config.json; defaults when there is no file, and a ConfigError for a
         link to nothing, the file's or a folder's above it, so nothing is saved over it.
-        Every ConfigError names the file."""
+        Every ConfigError names the file. `said` is from_json's."""
         target = path or config_path()
 
         def parse(raw: object) -> Config:
             try:
-                return cls.from_json(raw)
+                return cls.from_json(raw, said)
             except ConfigError as exc:
                 raise ConfigError(f"{target}: {exc}") from None
 

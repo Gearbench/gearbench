@@ -1,6 +1,7 @@
 """The Headset tab's stack: the A50's page and each `add` puts in, by what `status` says is
-attached; the one Spatial sound group in the box of the page that shows; and the polls of
-each page attached (`HeadsetStack.poll`).
+attached; the tab's problem banner over them; the groups every page shows, Headset for
+computer sound, Outputs and Spatial sound, in the box of the page that shows; and the polls
+of each page attached (`HeadsetStack.poll`).
 """
 
 from __future__ import annotations
@@ -9,9 +10,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import cast
 
-from gi.repository import GObject, Gtk
+from gi.repository import Adw, GObject, Gtk
 
 from ..astro import NAME as A50_NAME
+from ..wording import capitalized
 from .style import HEADSET_TAB, gray_switched_off, switched_off_title, top_switcher
 
 
@@ -32,15 +34,18 @@ class HeadsetStack:
     """The Headset tab: the A50's page or one `add` put in, each titled by the model attached,
     by what `status` says is attached, with a switcher between those attached while more than
     one is, on which one `status` gives as not answering is switched off. The A50's shows while
-    none is. `poll` runs the reads of each page attached
-    (AddedPage). `a50_box` is the A50's page's box, and `spatial`, the one Spatial sound
-    group, goes last in the box of the page that shows: a widget has one parent."""
+    none is. Under the switcher, a banner gives the headsets' problems (`show_problems`), as
+    the Mouse tab's gives the mice's. `poll` runs the reads of each page attached
+    (AddedPage). `shared`, the groups of which the window builds one for every page, go last
+    in the box of the page that shows, in their order, `a50_box` for the A50's page
+    (HeadsetPage.shared): a widget has one parent."""
 
-    def __init__(self, a50: Gtk.Widget, a50_box: Gtk.Box, spatial: Gtk.Widget) -> None:
-        self._spatial = spatial
+    def __init__(self, a50: Gtk.Widget, a50_box: Gtk.Box, *shared: Gtk.Widget) -> None:
+        self._shared = shared
         #: Each page's box, by its name in the stack.
         self._boxes = {"a50": a50_box}
-        a50_box.append(spatial)
+        for group in shared:
+            a50_box.append(group)
         #: The pages other than the A50's, in the order `add` put them in, by name.
         self._added: dict[str, AddedPage] = {}
         self.stack = Gtk.Stack()
@@ -52,15 +57,19 @@ class HeadsetStack:
         # Its name for a screen reader, the tab's noun, as the Keyboard and Mouse tabs' are;
         # each button is named by its headset.
         self.switcher.update_property([Gtk.AccessibleProperty.LABEL], [HEADSET_TAB])
+        # Over the pages, so it shows on whichever is up and however it is scrolled. Not
+        # markup: the title is the daemon's words.
+        self.problem_banner = Adw.Banner(use_markup=False)
         self.widget = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.widget.append(self.switcher)
+        self.widget.append(self.problem_banner)
         self.widget.append(self.stack)
 
     def add(self, name: str, title: str, widget: Gtk.Widget, box: Gtk.Box,
             names: frozenset[str], refresh: Callable[[], None],
             tick: Callable[[], None]) -> None:
         """Another headset's page: `names` are its models' names in `status`'s headsets,
-        `box` where the Spatial sound group goes while it shows, and `refresh` and `tick` its
+        `box` where the shared groups go while it shows, and `refresh` and `tick` its
         reads (AddedPage). Hidden until `status` first names one, and titled then by the
         model named."""
         self.stack.add_titled(widget, name, title).set_visible(False)
@@ -88,8 +97,6 @@ class HeadsetStack:
         # mouse is on theirs.
         for name, title in titles.items():
             self._page(name).set_title(switched_off_title(title, title in silent))
-        gray_switched_off(self.switcher, {index for index, name in enumerate(self._boxes)
-                                          if titles.get(name) in silent})
         shown = [name for name, here in there.items() if here] or ["a50"]
         # Hidden after the flip: hiding the page that shows flips the stack to its first page,
         # the A50's even while that page is hidden, and each flip reads (Polls.on_page).
@@ -99,9 +106,21 @@ class HeadsetStack:
             self.stack.set_visible_child_name(shown[0])
         for name in there.keys() - set(shown):
             self._page(name).set_visible(False)
+        # After the pages are shown and hidden: the switcher builds a button's label again at
+        # each change to its page, which loses the label's centering (read off GTK 4.22.4 on
+        # 2026-10-31, not promised by its documentation).
+        gray_switched_off(self.switcher, {index for index, name in enumerate(self._boxes)
+                                          if titles.get(name) in silent})
         self.switcher.set_visible(len(shown) > 1)
         for told in came:
             told()
+
+    def show_problems(self, problems: list[dict]) -> None:
+        """Show the daemon's headset problems on the banner, a line each, or take it down."""
+        lines = [capitalized(p["message"]) for p in problems]
+        if lines:
+            self.problem_banner.set_title("\n".join(lines))
+        self.problem_banner.set_revealed(bool(lines))
 
     def _page(self, name: str) -> Gtk.StackPage:
         return self.stack.get_page(cast(Gtk.Widget, self.stack.get_child_by_name(name)))
@@ -117,5 +136,7 @@ class HeadsetStack:
                 (page.tick if on_tab and name == showing else page.refresh)()
 
     def _place(self, _stack: Gtk.Stack, _pspec: GObject.ParamSpec) -> None:
-        cast(Gtk.Box, self._spatial.get_parent()).remove(self._spatial)
-        self._boxes[cast(str, self.stack.get_visible_child_name())].append(self._spatial)
+        box = self._boxes[cast(str, self.stack.get_visible_child_name())]
+        for group in self._shared:
+            cast(Gtk.Box, group.get_parent()).remove(group)
+            box.append(group)

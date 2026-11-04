@@ -67,21 +67,14 @@ class Setting:
         """A wire value as the socket gives it: a word, or the number."""
         return self.names[self.wire.index(raw)] if self.names else raw
 
-    def shown(self, value: int | str) -> str:
-        """A value as the window says it: its word, "never" for a 0 where the setting has that
-        word, or the number with its unit."""
+    def level(self, value: int | str) -> str:
+        """A value as the window's rows and lists and `audio` give it: its word, "never" for
+        a 0 where the setting has that word, its number with its unit, a 0-to-100 level as a
+        percent, "55%", or a number of its range's top, "3 of 6"."""
         if isinstance(value, str):
             return value
-        if value == 0 and self.never:
-            return self.never
-        return counted(value, self.unit) if self.unit else str(value)
-
-    def level(self, value: int | str) -> str:
-        """A value as the window's rows and `audio` give it: its word, its number with its
-        unit (shown), a 0-to-100 level as a percent, "55%", or a number of its range's
-        top, "3 of 6"."""
-        if isinstance(value, str) or self.unit:
-            return self.shown(value)
+        if self.unit:
+            return self.never if value == 0 and self.never else counted(value, self.unit)
         # As the A50 Gen 4's and the G432's levels are given.
         if self.range == PERCENT_RANGE:
             return f"{value}%"
@@ -105,11 +98,10 @@ class Setting:
             raise unreadable(self.words, reply)
         return self.value(reply[self.at])
 
-    def params(self, value: object, read: bytes) -> bytes:
-        """The write's parameters for `value`, checked first (checked): the bytes before it
-        and the value, or for a setting with `kept` the read's first `kept` bytes, `read`,
-        with the value put in at `at`; UnreadableAnswer for a read too short for them."""
-        raw = self.checked(value)
+    def params(self, raw: int, read: bytes) -> bytes:
+        """The write's parameters for the wire value `raw`: the bytes before it and `raw`, or
+        for a setting with `kept` the read's first `kept` bytes, `read`, with `raw` put in at
+        `at`; UnreadableAnswer for a read too short for them."""
         if not self.kept:
             return self.before + bytes([raw])
         if len(read) < self.kept:

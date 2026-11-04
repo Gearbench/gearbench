@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Launcher for gearbench-ctl, installed to ~/.local/bin for the terminal and the desktop
-# entry. -P keeps the working directory off sys.path; an empty or relative element of an
+# entry, with the checkout's path and the interpreter install.sh picks written in.
+# -P keeps the working directory off sys.path; an empty or relative element of an
 # inherited PYTHONPATH puts it back ("$PYTHONPATH:/opt/x" with none set starts with one),
 # so only absolute elements are kept.
 set -euo pipefail
@@ -10,4 +11,4 @@ for part in "${parts[@]}"; do
     if [[ $part == /* ]]; then inherited+=":$part"; fi
 done
 export PYTHONPATH="@CHECKOUT@$inherited"
-exec /usr/bin/python3 -P -m gearbench "$@"
+exec @PYTHON@ -P -m gearbench "$@"

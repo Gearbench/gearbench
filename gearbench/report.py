@@ -13,7 +13,7 @@ goes only to an index a root lookup named: an index is what one firmware reports
 taken from another table.
 
 What it reads, a node at a time (`gather`): from sysfs, with nothing opened, the ids, the
-interface, the driver and the report descriptor (`describe`, which tells a HID++
+interface, the driver and the report descriptor (`hidpp.describe`, which tells a HID++
 collection, a long-only one and key reports); then, on a node with a HID++ collection that
 this account may open, the device index and read_device's sections, every read with its
 reply. A node the daemon holds gets what the daemon itself says of it instead. Sent
@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import os
 from collections import Counter
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, cast
@@ -41,7 +41,6 @@ from .a50x import MODELS as A50X_OF
 from .g432 import (
     CELLS as HEADSET_CELLS,
     F_EQUALIZER,
-    F_FEATURE_SET,
     MODEL_OF as HEADSET_OF,
     SIDETONE as F_SIDETONE,
     eq_frequencies,
@@ -53,22 +52,23 @@ from .hidpp import (
     ENTITIES_MAX,
     EXTENDED_MODEL_SINCE,
     F_DEVICE_INFO,
+    F_FEATURE_SET,
     FN_FW_INFO,
     MODEL_IDS_SINCE,
     RECEIVER_INDEX,
-    REPORT_LONG,
-    REPORT_SHORT,
     REQUEST_RETRIES,
     REQUEST_TIMEOUT,
     ROOT_FEATURE,
     SET_REGISTER,
     UNIT_ID,
+    Descriptor,
     DeviceGone,
     Feature,
     Hidpp,
     HidppError,
     HidppFailure,
     SysfsNode,
+    describe,
     feature_of,
     find_index,
     firmware_entity,
@@ -77,7 +77,11 @@ from .hidpp import (
     still_there,
     walk_nodes,
 )
-from .keyboard import CELLS as KEYBOARD_CELLS, MODEL_OF as KEYBOARD_OF
+from .keyboard import (
+    CELLS as KEYBOARD_CELLS,
+    MODEL_OF as KEYBOARD_OF,
+    RECEIVER_NODE_IDS as KEYBOARD_RECEIVERS,
+)
 from .keycontrol import (
     CONTROLS_A_READ,
     F_CONTROL_LIST,
@@ -143,6 +147,12 @@ def model_record(product: int) -> ModelRecord | None:
     return next((records[product] for records in MODEL_RECORDS if product in records), None)
 
 
+def cell_of(product: int) -> battery.CellCurves | None:
+    """The cell `product`'s model reads its millivolts against, of its family's CELLS; None
+    for a model with none, and for a product this build does not drive."""
+    return KEYBOARD_CELLS.get(product) or MOUSE_CELLS.get(product) or HEADSET_CELLS.get(product)
+
+
 def untested(product: int | None) -> bool:
     """Whether `product` is the id of a model this build drives that Gearbench has not yet run
     on (its record's `tested`); None is no device."""
@@ -162,124 +172,6 @@ def untested_note(name: str) -> str:
 
 
 F_NAME = 0x0005
-
-
-# -- the report descriptor -----------------------------------------------------
-
-#: The vendor usage pages a HID++ collection is on: 0xFF00 on the keyboards and mice, 0xFF43
-#: on the G432 (its descriptor, read off the hardware 2026-10-17).
-HIDPP_PAGES = frozenset({0xFF00, 0xFF43})
-#: Generic Desktop's page, and its keyboard and keypad usages: a top-level collection of
-#: either carries keystrokes (HUT 1.5, section 4).
-DESKTOP_PAGE, KEYBOARD_USAGES = 0x01, frozenset({0x06, 0x07})
-#: The Keyboard/Keypad page (HUT 1.5, section 10): an Input item on it carries keystrokes,
-#: whatever collection it is in.
-KEYBOARD_KEYPAD_PAGE = 0x07
-
-
-@dataclass(frozen=True)
-class Descriptor:
-    """What a report descriptor declares, as the report says it: each report id with the
-    usage page of the top-level collection it is in (declared between collections, the next
-    one), and whether the node carries keystrokes, which anyone who may open it can read: a
-    top-level collection that is a keyboard or keypad, or an Input item on the
-    Keyboard/Keypad page in any collection."""
-
-    reports: Mapping[int, int]
-    key_reports: bool
-    #: Whether the walk ended inside an item: a descriptor cut short.
-    cut: bool
-
-    @property
-    def hidpp_short(self) -> bool:
-        return self.reports.get(REPORT_SHORT) in HIDPP_PAGES
-
-    @property
-    def hidpp_long(self) -> bool:
-        return self.reports.get(REPORT_LONG) in HIDPP_PAGES
-
-    @property
-    def hidpp(self) -> str | None:
-        """The HID++ reports in words, None for none."""
-        if self.hidpp_short and self.hidpp_long:
-            return "short and long"
-        if self.hidpp_long:
-            return "long only"
-        return "short only" if self.hidpp_short else None
-
-
-#: Item tags (HID 1.11, section 6.2.2): main Input, Collection and End Collection; global
-#: Usage Page, Report ID, Push and Pop; local Usage.
-_INPUT, _COLLECTION, _END_COLLECTION = (0, 0x8), (0, 0xA), (0, 0xC)
-_USAGE_PAGE, _REPORT_ID, _PUSH, _POP = (1, 0x0), (1, 0x8), (1, 0xA), (1, 0xB)
-_USAGE = (2, 0x0)
-#: A long item's prefix byte.
-_LONG_ITEM = 0xFE
-
-
-def describe(data: bytes) -> Descriptor:
-    """Walk a report descriptor's items, HID 1.11's short and long forms, and keep what
-    Descriptor holds. Bytes past an item cut short are not read."""
-    reports: dict[int, int] = {}
-    key_reports = cut = False
-    page, pages, depth, top_page = 0, [], 0, 0
-    usage: tuple[int | None, int] = (None, 0)
-    # Report ids declared outside every collection: a Report ID is global (HID 1.11,
-    # 6.2.2.7), so one before a top-level collection numbers that collection's reports.
-    waiting: list[int] = []
-    for kind, value, size in _items(data):
-        if kind == _CUT:
-            cut = True
-        elif kind == _USAGE_PAGE:
-            page = value
-        elif kind == _PUSH:
-            pages.append(page)
-        elif kind == _POP and pages:
-            page = pages.pop()
-        elif kind == _INPUT:
-            key_reports |= page == KEYBOARD_KEYPAD_PAGE
-        elif kind == _USAGE:
-            # A four-byte usage carries its own page in its top half (HID 1.11, 6.2.2.8).
-            usage = (value >> 16 if size == 4 else None, value & 0xFFFF)
-        elif kind == _COLLECTION:
-            if depth == 0:
-                # A collection named by a four-byte usage is on that usage's page; by a
-                # shorter one (page None), on the page in effect at the collection.
-                top_page = page if usage[0] is None else usage[0]
-                key_reports |= top_page == DESKTOP_PAGE and usage[1] in KEYBOARD_USAGES
-                while waiting:
-                    reports.setdefault(waiting.pop(), top_page)
-            depth += 1
-            usage = (None, 0)
-        elif kind == _END_COLLECTION:
-            depth = max(depth - 1, 0)
-        elif kind == _REPORT_ID and depth == 0:
-            waiting.append(value)
-        elif kind == _REPORT_ID:
-            reports.setdefault(value, top_page)
-    return Descriptor(reports, key_reports, cut=cut)
-
-
-#: What _items gives for an item that runs past the end of the descriptor, and its last.
-_CUT = (-1, -1)
-
-
-def _items(data: bytes) -> Iterator[tuple[tuple[int, int], int, int]]:
-    """Each short item as ((type, tag), value, size), the value little-endian as HID gives
-    it; long items are stepped over, and one cut short ends the walk with _CUT."""
-    at = 0
-    while at < len(data):
-        prefix = data[at]
-        size = (data[at + 1] if at + 1 < len(data) else 0xFF) if prefix == _LONG_ITEM \
-            else (0, 1, 2, 4)[prefix & 0x03]
-        header = 3 if prefix == _LONG_ITEM else 1
-        if at + header + size > len(data):
-            yield _CUT, 0, 0
-            return
-        if prefix != _LONG_ITEM:
-            yield ((prefix >> 2) & 0x03, prefix >> 4), int.from_bytes(
-                data[at + 1:at + 1 + size], "little"), size
-        at += header + size
 
 
 # -- the reads -------------------------------------------------------------------
@@ -774,6 +666,12 @@ def runs(numbers: list[int]) -> list[list[int]]:
     return found
 
 
+def run_words(found: Sequence[Sequence[int]]) -> str:
+    """`runs`' [first, last] runs in words, "0 to 79, 97 to 111, 254"; none for none."""
+    return ", ".join(str(first) if first == last else f"{first} to {last}"
+                     for first, last in found) or "none"
+
+
 def zones(dev: ReadOnly) -> dict | None:
     """0x8070's zones and their effects, as mouse_lighting.ZoneLighting reads them. The
     report sends no effect, so no model's claim before each one applies."""
@@ -821,9 +719,9 @@ def refusal(exc: HidppError) -> str:
 
 
 def battery_reading(dev: ReadOnly, cell: battery.CellCurves | None) -> dict | None:
-    """The first battery feature of battery.READERS the table lists, read and decoded as
-    battery.read decodes it, None for none. A refusal is raised, where battery.read gives
-    None, so that read_device names it in `failed`."""
+    """The first battery feature of battery.READERS the root lookup finds, of those the table
+    lists, read and decoded as battery.read decodes it, None for none. A refusal is raised,
+    where battery.read gives None, so that read_device names it in `failed`."""
     for feature_id, function, decode in battery.READERS:
         if dev.has(feature_id):
             return decode(dev.read(feature_id, function), cell)
@@ -1029,8 +927,7 @@ def read_device(dev: ReadOnly, product: int) -> dict:
     report's order. A section that fails is named in `failed` with why, and the rest go on;
     the first that finds the device not there (hidpp.not_there) ends the reads, which would
     each wait out their timeout, and so does a device gone. NotARead is let through."""
-    cell = (KEYBOARD_CELLS.get(product) or MOUSE_CELLS.get(product)
-            or HEADSET_CELLS.get(product))
+    cell = cell_of(product)
     sections: tuple[tuple[str, Callable[[], object]], ...] = (
         ("protocol", lambda: protocol(dev)), ("features", lambda: feature_table(dev)),
         ("device", lambda: device_info(dev)), ("name", lambda: device_name(dev)),
@@ -1087,7 +984,12 @@ NO_PERMISSION = "not read: no permission to open it"
 #: Any other failed open, with its cause.
 NOT_OPENED = "not read: it could not be opened: {}"
 NO_ANSWER = "no HID++ 2.0 device answered on it"
-#: A node unplugged, or taken by another device, between the listing and its open.
+#: NO_ANSWER where a device is reached behind its receiver, on a node of its own or on
+#: the receiver's own node of a keyboard that has none (KEYBOARD_RECEIVERS): one asleep or
+#: switched off answers nothing there, as a G502 X PLUS asleep on its receiver did twice
+#: (measured 2026-10-28).
+MAY_BE_ASLEEP = f"{NO_ANSWER}: a device behind a receiver may be asleep or switched off"
+#: A node unplugged, or taken by another device, between the listing and its open or probe.
 REPLACED = "not read: unplugged or taken by another device after the report listed it"
 
 
@@ -1146,8 +1048,6 @@ def node_report(node: SysfsNode, held: Mapping[str, Mapping[str, object]],
     # now be another device's, of any vendor.
     if not still_there(node):
         return {**record, "state": REPLACED}
-    if not os.access(DEV / node.name, os.R_OK | os.W_OK):
-        return {**record, "state": NO_PERMISSION}
     return {**record, **read_node(DEV / node.name, node, found)}
 
 
@@ -1159,16 +1059,20 @@ def read_node(path: Path, node: SysfsNode, found: Descriptor) -> dict:
         # A collection that declares no short report gets every request on the long one.
         return ReadOnly.open(at, index, long_only=not found.hidpp_short)
 
+    behind = paired(node.product, node.usb_product)
     try:
         opened = find_index(path, F_FEATURE_SET, opener,
-                            RECEIVER_INDEX if paired(node.product, node.usb_product)
-                            else DEVICE_INDEX)
+                            RECEIVER_INDEX if behind else DEVICE_INDEX)
     except PermissionError:
         return {"state": NO_PERMISSION}
     except OSError as exc:
         return {"state": NOT_OPENED.format(reason(exc))}
     if opened is None:
-        return {"state": NO_ANSWER}
+        # find_index gives None for a node gone at its open or mid-probe too.
+        if not still_there(node):
+            return {"state": REPLACED}
+        return {"state": MAY_BE_ASLEEP if behind or node.product in KEYBOARD_RECEIVERS
+                else NO_ANSWER}
     dev, index = opened
     try:
         read = read_device(dev, node.product)

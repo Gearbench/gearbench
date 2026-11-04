@@ -8,7 +8,7 @@ color a synced mouse takes from the leader, at the level it shows it (sync), as 
 does (the owner's decisions of 2026-10-25): every path that gives a synced mouse its color
 gives it here too (Daemon.sync_to_leader), the headset's own effect, its release and a store
 are refused meanwhile (SYNC_ON), a G key's step goes to the keyboard's brightness in their
-place (_step_keyboard), sync turned off gives the lights back what Gearbench
+place (step), sync turned off gives the lights back what Gearbench
 showed on them before, or the headset's own lighting (sync_changed), and a power-off leaves
 them black with their claim held in place of the release (go_dark)."""
 
@@ -27,9 +27,9 @@ from ...headset_lights import (
     HeadsetZones,
     find_lights,
 )
-from ...hidpp import HidppError, HidppFailure
+from ...hidpp import DeviceGone, HidppError, HidppFailure
 from ...keyboard import followed
-from ...lighting import EffectParams, effect_order
+from ...lighting import OFF, EffectParams, effect_order
 from ..shared import (
     NOT_SYNCED,
     SYNC_ON,
@@ -55,17 +55,23 @@ NO_LIGHTS = "the {} lists no lights"
 #: plugged in by, as "its receiver".
 LIGHTS_UNREAD = ("the {}'s lights could not be read when it attached ({}); unplug {} and "
                  "plug it back in")
+#: Its refusal, and the `g432` reply's words, where the lights read but their startup
+#: effect's setting did not: the model's name, then why.
+STARTUP_UNREAD = ("the {}'s lights' startup effect could not be read ({}), so Gearbench does "
+                  "not set it until a read of it gives on or off")
 #: Its refusal of the startup effect where the lights list no such setting, and of a store
 #: where Gearbench shows no lighting, the model's name in each; and of more than one change
 #: of the lights in a request.
 NO_STARTUP = "the {}'s lights list no startup effect"
 NOTHING_TO_STORE = ("Gearbench shows no lighting on the {} to store: send it an effect "
                     "first")
-ONE_LIGHTS_CHANGE = "give the lights an effect, release, startup or store, one of the four"
-#: The effect that shows a zone off, as G HUB's G1 sends the cycle's last step (`01 00`),
-#: and the lighting a G key takes where Gearbench has shown none: static in `g432_lights`'
+ONE_LIGHTS_CHANGE = ("give the lights an effect or a color, release, startup or store, one of "
+                     "the four")
+#: Why lights Gearbench drives do not follow the keyboard: no zone lists static, the effect
+#: a synced headset shows; the model's name goes in.
+NO_STATIC_SYNC = "the {}'s lights list no static effect, so they do not follow the keyboard"
+#: The lighting a G key takes where Gearbench has shown none: static in `g432_lights`'
 #: default color.
-OFF_EFFECT = "disabled"
 DEFAULT_SHOWN = {"effect": STATIC, "color": format_color(DEFAULT_COLOR)}
 #: The wait for the lights' release as the headset is let go, each of its three tries
 #: (HeadsetZones.release's two retries): a shutdown waits on them.
@@ -105,8 +111,10 @@ class HeadsetLighting:
         #: (_may_hold).
         self._release_owed = False
         #: Whether the lights show their startup effect as the headset switches on, as last
-        #: read, None on lights that list no such setting.
+        #: read, None on lights that list no such setting or whose read of it failed; and why
+        #: that read failed, None where it answered (read_unread reads it again).
         self.startup: bool | None = None
+        self.startup_unread: str | None = None
         #: By product id, the effect and color the daemon last stored in the lights (`store`),
         #: kept across a replug, since nothing reads what a headset keeps; none for an id
         #: whose store failed, which may have reached it.
@@ -121,7 +129,7 @@ class HeadsetLighting:
         self.unread: str | None = None
         #: With Follow the keyboard on: the color the lights took last, at its level, None
         #: while not known; whether they are owed the synced color (give_owed); and whether
-        #: NOT_SYNCED was said since the attach.
+        #: not_driven's words were said since the attach.
         self.sync_shown: int | None = None
         self.sync_owed = False
         self._not_synced_said = False
@@ -133,14 +141,41 @@ class HeadsetLighting:
 
     def read(self) -> None:
         """Read the lights' zones, None for a headset that lists none, and their startup
-        effect, and forget why an earlier read failed; nothing is kept from a read that
-        fails. Raises HidppFailure."""
+        effect (_startup_of), and forget why an earlier read failed; nothing is kept from a
+        read that fails, but the zones where only the startup effect's failed, short of the
+        node gone. Raises HidppFailure."""
         zones = find_lights(cast("G432", self.g432.dev))
-        startup = None if zones is None else zones.startup()
-        self.zones, self.startup, self.unread = zones, startup, None
+        startup, unread = (None, None) if zones is None else self._startup_of(zones)
+        self.zones, self.unread = zones, None
+        self.startup, self.startup_unread = startup, unread
         # What they show is not known: a synced headset takes its color at the next
         # give_owed.
         self.sync_owed = True
+
+    def read_unread(self) -> None:
+        """Read again what the attach's read could not: the zones and startup effect (read)
+        where the lights did not read, else the startup effect alone, the zones kept;
+        nothing where both read. Raises HidppFailure from the zones' read and DeviceGone."""
+        if self.unread is not None:
+            self.read()
+        elif self.startup_unread is not None:
+            self.startup, self.startup_unread = self._startup_of(
+                cast("HeadsetZones", self.zones))
+
+    def _startup_of(self, zones: HeadsetZones) -> tuple[bool | None, str | None]:
+        """`zones`' startup effect (HeadsetZones.startup) and None, or None and why its read
+        failed, an answer the headset gave or none: the effects still go. Said in the journal
+        once, at debug while it keeps failing. Raises DeviceGone."""
+        try:
+            return zones.startup(), None
+        except DeviceGone:
+            raise
+        except HidppFailure as exc:
+            why = failure_reason(exc)
+            log.log(logging.INFO if self.startup_unread is None else logging.DEBUG,
+                    "%s: its lights' startup effect could not be read: %s",
+                    self.g432.model.key, why)
+            return None, why
 
     def read_at_attach(self) -> None:
         """The attach's read (read), a failure said in the journal and kept as `unread`, so
@@ -168,7 +203,7 @@ class HeadsetLighting:
             with contextlib.suppress(HidppFailure, OSError):
                 self.zones.release(timeout=RELEASE_TIMEOUT)
         self.zones, self.claimed, self.shown = None, False, None
-        self.refused = self.unread = self.startup = self.sync_shown = None
+        self.refused = self.unread = self.startup = self.startup_unread = self.sync_shown = None
         self._not_synced_said = self._kept_dark = self._release_owed = False
         return said
 
@@ -181,28 +216,43 @@ class HeadsetLighting:
         """At a power-off while the lights follow the keyboard (config.headset_sync_color):
         black on them (sync), and their claim kept at let_go, so they do not light up in the
         headset's own lighting with the machine off, as a synced mouse stays dark with its
-        claim held (the owner's decision of 2026-10-26). Lights it does not drive and a
-        headset away are sent nothing, as sync sends them nothing."""
+        claim held (the owner's decision of 2026-10-26). Lights that do not follow the
+        keyboard (follows) keep no claim, so let_go releases them where Gearbench holds them,
+        as with sync off; a headset away is sent nothing, as sync sends it nothing."""
         self.sync(0x000000)
-        self._kept_dark = self.d.config.headset_sync_color
+        self._kept_dark = self.follows()
+
+    def follows(self) -> bool:
+        """Whether the lights take the keyboard's color: Follow the keyboard on
+        (config.headset_sync_color) and lights that sync drives (not_driven)."""
+        return self.d.config.headset_sync_color and self.not_driven() is None
+
+    def listed(self) -> bool:
+        """Whether the attached headset lists lights: the `g432` reply gives `lights`, so the
+        window shows its Lights group with the Follow switch, and the tray its Follow item."""
+        return self.zones is not None
 
     def reply(self) -> dict | None:
         """The `g432` reply's `lights`: on a headset that lists them, its zones and the effects
         they all take, whether Gearbench holds them, what it last wrote and at what brightness,
         in percent, 0 off (a G key's), each null while it shows none, as after a return with
         Follow the keyboard off (returned), why a write is refused,
-        whether they show their startup effect, null where they list no such setting, and what
+        whether they show their startup effect, null where they list no such setting or its
+        read failed, why that read failed (_startup_words), null where it did not, and what
         the daemon last stored in them, null for none known, and whether they follow the
         keyboard that leads (config.headset_sync_color), `shown` staying what Gearbench
-        showed on them before, which sync turned off gives back; null on another."""
-        if self.zones is None:
+        showed on them before, which sync turned off gives back, and whether they take its
+        color now, false where sync sends them nothing (not_driven); null on another."""
+        if not self.listed():
             return None
-        return {"zones": [zone.name for zone in self.zones.clusters],
+        return {"zones": [zone.name for zone in cast("HeadsetZones", self.zones).clusters],
                 "effects": self.effects(), "claimed": self.claimed, "shown": self.shown,
                 "brightness": None if self.shown is None else self.brightness,
                 "refused": self.refused, "startup": self.startup,
+                "startup_unread": self._startup_words(),
                 "stored": self._stored.get(cast("G432", self.g432.dev).product),
-                "synced": self.d.config.headset_sync_color}
+                "synced": self.d.config.headset_sync_color,
+                "follows": self.follows()}
 
     def effects(self) -> list[str]:
         """The effects every zone takes, by name, in every Effect row's order (effect_order),
@@ -216,21 +266,24 @@ class HeadsetLighting:
         taken from the lighting shown (_filled), on every zone, each right after its claim;
         or with `release` the lights back to the headset's own;
         or `startup`, true or false, their startup effect (_set_startup); or with `store` the
-        lighting shown kept in the headset (_store). More than one of the four is refused
-        with nothing sent, and while the lights follow the keyboard all but `startup`
-        (SYNC_ON). The first claim a headset with no host control refuses ends every write
-        (NO_CONTROL), the effect never sent."""
+        lighting shown kept in the headset (_store). More than one of the four, a color
+        alone counted as an effect, is refused with nothing sent, and while the lights
+        follow the keyboard all but `startup` (SYNC_ON). The first claim a headset with no
+        host control refuses ends every write (NO_CONTROL), the effect never sent."""
         if (refused := self.refusal()) is not None:
             return refused
         zones = cast("HeadsetZones", self.zones)
         startup, store = request.get("startup"), request.get("store") is True
-        if sum((request.get("effect") is not None, request.get("release") is True,
-                startup is not None, store)) > 1:
+        # A color alone is an effect (_filled).
+        effect = request.get("effect") is not None or request.get("color") is not None
+        if sum((effect, request.get("release") is True, startup is not None, store)) > 1:
             return {"ok": False, "error": ONE_LIGHTS_CHANGE}
         if startup is not None:
             return self._set_startup(zones, read_switch(startup, "g432_lights.startup"))
-        if (refused := self.sync_refusal()) is not None:
-            return refused
+        if self.d.config.headset_sync_color:
+            leader = followed(self.d.per_keyboard.leader())
+            return {"ok": False, "error": SYNC_ON.format(device="headset", leader=leader,
+                                                         command="headset-sync")}
         if store:
             return self._store(zones)
         if request.get("release") is True:
@@ -276,25 +329,23 @@ class HeadsetLighting:
         model = self.g432.model
         return LIGHTS_UNREAD.format(model.short, self.unread, f"its {model.plugged_by}")
 
-    def sync_refusal(self) -> dict | None:
-        """Why the headset's own lighting is refused, while its lights follow the keyboard
-        that leads (SYNC_ON); None while they do not."""
-        if not self.d.config.headset_sync_color:
+    def _startup_words(self) -> str | None:
+        """Why the startup effect is not known, in STARTUP_UNREAD's words; None where its read
+        answered or none was made."""
+        if self.startup_unread is None:
             return None
-        leader = followed(self.d.per_keyboard.leader())
-        return {"ok": False,
-                "error": SYNC_ON.format(device="headset", leader=leader, command="headset-sync")}
+        return STARTUP_UNREAD.format(self.g432.model.short, self.startup_unread)
 
     def set_effect(self, zones: HeadsetZones, request: dict,
                    percent: int = FULL_BRIGHTNESS) -> dict:
         """`g432_lights` with `effect`: on every zone, with `color`, each right after its
-        claim, the first claim alone (_first_claim); a G key's lighting at `percent` of its
+        claim, the first claim alone (_hold); a G key's lighting at `percent` of its
         brightness (zone_writes), which a reply gives till the next effect."""
         model = self.g432.model
         name = name_text(request.get("effect"), "g432_lights.effect")
         color = parse_color(request["color"], "g432_lights.color")
         effects = self.effects()
-        wanted = [name, OFF_EFFECT] if percent == 0 else [name]
+        wanted = [name, OFF] if percent == 0 else [name]
         if (missing := next((effect for effect in wanted if effect not in effects),
                             None)) is not None:
             return {"ok": False, "error": no_effect(model.short, missing, effects,
@@ -309,10 +360,10 @@ class HeadsetLighting:
                 zones.set_effect(index, effect, wait=True, **params)
             shown = self.shown = {"effect": name, "color": format_color(color)}
             self._last_shown[product], self.brightness = shown, percent
-            log.info("%s: lights set to %s%s", model.key,
-                     _effect_words(name, format_color(color),
-                                   (params for _index, _effect, params in writes)),
-                     "" if percent == FULL_BRIGHTNESS else f", at {percent}%")
+            log.info("%s: lights set to %s", model.key, "off" if percent == 0 else (
+                _effect_words(name, format_color(color),
+                              (params for _index, _effect, params in writes))
+                + ("" if percent == FULL_BRIGHTNESS else f", at {percent}%")))
 
         refused = self.g432.call(write)
         if self.refused is not None:
@@ -323,15 +374,16 @@ class HeadsetLighting:
     def zone_writes(zones: HeadsetZones, name: str, color: int,
                     percent: int) -> list[tuple[int, str, EffectParams]]:
         """Each zone's effect and its parameters for `name` in `color` at `percent` of its
-        brightness, and at 0 the zone off (OFF_EFFECT): the color scaled where the effect
-        has one, breathe's too, else the intensity, as cycle's. Measured on a G933 on
-        2026-10-25: breathe at intensity 50, 25 and 12 looked no dimmer, breathe at full in
-        its color cut to 12 % was clearly dimmer, and static dimmed at each step of its
-        color; cycle's intensity is not yet checked on one."""
+        brightness, and at 0 the zone off (lighting.OFF, as G HUB's G1 sends the cycle's
+        last step, `01 00`): the color scaled where the effect has one, breathe's too, else
+        the intensity, as cycle's; an effect with neither, as off, goes as it is. Measured on a
+        G933 on 2026-10-25: breathe at intensity 50, 25 and 12 looked no dimmer, breathe at
+        full in its color cut to 12 % was clearly dimmer, and static dimmed at each step of
+        its color; cycle's intensity is not yet checked on one."""
         writes: list[tuple[int, str, EffectParams]] = []
         for zone in zones.clusters:
             if percent == 0:
-                writes.append((zone.index, OFF_EFFECT, {}))
+                writes.append((zone.index, OFF, {}))
                 continue
             params = zones.effect_params(zone.index, name, color)
             if "color" in params:
@@ -347,26 +399,25 @@ class HeadsetLighting:
         it takes the lighting: the last effect it showed, by product id, or the default,
         static in DEFAULT_COLOR, at the step after full, or off (the owner's answer of
         2026-10-25). While the lights follow the keyboard, the keyboard takes the step in
-        their place (_step_keyboard)."""
+        their place."""
         if (refused := self.refusal()) is not None:
             return refused
         if self.d.config.headset_sync_color:
-            return self._step_keyboard(cycle)
+            # As the keyboard's own `brightness` command sets it, so the synced lights and
+            # mice follow (the owner's decision of 2026-10-26).
+            level = _next_level(self.d.per_keyboard.brightness(), cycle)
+            return self.d.handle_command({"command": "brightness", "value": level})
         percent = _next_level(FULL_BRIGHTNESS if self.shown is None else self.brightness, cycle)
         return self.set_effect(cast("HeadsetZones", self.zones), self._last_lighting(), percent)
 
-    def _step_keyboard(self, cycle: bool) -> dict:
-        """The leading keyboard's brightness at the next level after the one it shows
-        (_next_level), set as the keyboard's own `brightness` command sets it, so the synced
-        lights and mice follow (the owner's decision of 2026-10-26)."""
-        level = _next_level(self.d.per_keyboard.brightness(), cycle)
-        return self.d.handle_command({"command": "brightness", "value": level})
-
     def _set_startup(self, zones: HeadsetZones, on: bool) -> dict:
         """`g432_lights` with `startup`: the startup effect's setting written, then read
-        back (HeadsetZones.set_startup). Refused where the lights list no such setting, and,
-        with nothing sent, on a model not tested on this hardware (kept_refusal)."""
+        back (HeadsetZones.set_startup). Refused where its read failed (_startup_words) or
+        the lights list no such setting, and, with nothing sent, on a model not tested on
+        this hardware (kept_refusal)."""
         model = self.g432.model
+        if (unread := self._startup_words()) is not None:
+            return {"ok": False, "error": unread}
         if self.startup is None:
             return {"ok": False, "error": NO_STARTUP.format(model.short)}
 
@@ -404,18 +455,12 @@ class HeadsetLighting:
         return self.g432.checked_call(write) or self.g432.reply()
 
     def _hold(self, zones: HeadsetZones) -> bool:
-        """The first claim, alone, where Gearbench does not hold the lights yet
-        (_first_claim): whether Gearbench holds them, False for lights with no host control.
-        Raises HidppFailure."""
-        if not self.claimed:
-            # Held from its answer: an effect that fails after it leaves them the host's.
-            self.claimed = self._first_claim(zones)
-        return self.claimed
-
-    def _first_claim(self, zones: HeadsetZones) -> bool:
-        """The first claim, alone: True once answered. A refusal for want of host control
-        makes the lights' writes refused (NO_CONTROL) before any effect is sent, said once,
-        and is False. Raises HidppFailure for any other failure."""
+        """The first claim, alone, where Gearbench does not hold the lights yet: whether
+        Gearbench holds them. A refusal for want of host control makes the lights' writes
+        refused (NO_CONTROL) before any effect is sent, said once, and is False. Raises
+        HidppFailure for any other failure."""
+        if self.claimed:
+            return True
         try:
             zones.claim()
         except HidppError as exc:
@@ -426,6 +471,8 @@ class HeadsetLighting:
             log.info("%s: its lights take no host control, so Gearbench does not write "
                      "them: %s", self.g432.model.key, failure_reason(exc))
             return False
+        # Held from its answer: an effect that fails after it leaves them the host's.
+        self.claimed = True
         return True
 
     def _release(self) -> None:
@@ -443,13 +490,13 @@ class HeadsetLighting:
         headset that shows it already is sent nothing, nor one away, which is owed it as it
         comes back (returned); one whose write fails is owed it (give_owed), but for a drag's
         preview (`repeat` False). Lights Gearbench does not drive are left as they are
-        (not_driven), said once an attach. Never raises into the keyboard's paths that call
-        it."""
+        (not_driven), and so are lights none of whose zones lists static, each said once an
+        attach. Never raises into the keyboard's paths that call it."""
         if not self.d.config.headset_sync_color:
             return
-        zones = self.zones
-        if zones is None or self.refused is not None:
-            if (said := self.not_driven()) is not None and not self._not_synced_said:
+        zones, said = self.zones, self.not_driven()
+        if zones is None or said is not None:
+            if said is not None and not self._not_synced_said:
                 self._not_synced_said = True
                 log.info("%s", said)
             return
@@ -480,14 +527,17 @@ class HeadsetLighting:
                 refused["error"])
 
     def not_driven(self) -> str | None:
-        """NOT_SYNCED's words for an attached headset whose lights Gearbench does not drive,
-        none listed or no host control (NO_CONTROL); None for lights it drives, lights the
-        attach could not read, which it reads again, and no headset."""
+        """Why the attached headset's lights do not follow the keyboard: NOT_SYNCED's words
+        where Gearbench does not drive them, none listed or no host control (NO_CONTROL), and
+        NO_STATIC_SYNC's where none of their zones lists static; None for lights that follow
+        it, lights the attach could not read, which it reads again, and no headset."""
         if self.g432.dev is None or self.unread is not None:
             return None
-        if self.zones is not None and self.refused is None:
-            return None
-        return NOT_SYNCED.format(self.g432.model.short)
+        if self.zones is None or self.refused is not None:
+            return NOT_SYNCED.format(self.g432.model.short)
+        if not any(zone.has_effect(STATIC) for zone in self.zones.clusters):
+            return NO_STATIC_SYNC.format(self.g432.model.short)
+        return None
 
     def returned(self) -> None:
         """The headset is back from away, or the machine from a suspend: its lights may have
@@ -503,9 +553,8 @@ class HeadsetLighting:
         self.claimed, self.shown = False, None
 
     def give_owed(self) -> None:
-        """The color a synced headset is owed (sync_owed), sent once: after the attach's read,
-        at a return and after each battery read that goes through (G432Headset.tend), never
-        at every pass, so a write that keeps failing is tried again no faster."""
+        """The color a synced headset is owed (sync_owed), sent once. Called at reads and
+        returns, never at every pass, so a write that keeps failing is tried again no faster."""
         if self.sync_owed:
             self.sync_owed = False
             self.sync(self.d.synced_color())
@@ -526,18 +575,20 @@ class HeadsetLighting:
             return
         # Taken first: a write that finds the node gone lets the headset go (call).
         model, zones = self.g432.model, cast("HeadsetZones", self.zones)
-        reply = (self.set_effect(zones, self.shown, self.brightness) if self.shown is not None
-                 else self.g432.call(self._release) or {"ok": True})
+        if self.shown is not None:
+            what, reply = "the lighting it showed before", self.set_effect(
+                zones, self.shown, self.brightness)
+        else:
+            what, reply = "its own lighting", self.g432.call(self._release) or {"ok": True}
         if not reply["ok"]:
-            log.info("%s: its own lighting could not be given back: %s", model.key,
-                     reply["error"])
+            log.info("%s: %s could not be given back: %s", model.key, what, reply["error"])
 
     def _cmd_headset_sync(self, request: dict) -> dict:
         """Follow the keyboard on or off for the lights of every headset and every profile
         (config.headset_sync_color), saved before it acts, so a refused save changes nothing,
         then acted on (sync_changed). On, the reply gives the color the lights follow, before
         the keyboard's brightness scales it, and a note where the headset attached has lights
-        Gearbench does not drive (not_driven)."""
+        that do not follow it (not_driven)."""
         value = switch_value(request.get("value"), "headset_sync")
         was = self.d.config.headset_sync_color
         self.d.save_setting(headset_sync_color=value)

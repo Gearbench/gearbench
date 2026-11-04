@@ -1,5 +1,5 @@
 """Astro Command Center's .astroeq preset files, Qt INI read as QSettings reads it, into an
-astro.EqPreset. Standard library only.
+a50_library.EqPreset. Standard library only.
 """
 
 from __future__ import annotations
@@ -8,7 +8,8 @@ import configparser
 import os
 import re
 
-from .astro import BANDS, FREQ_RANGE, GAIN_RANGE, SHELVES, WIDTH_RANGE, Band, EqPreset, preset_name
+from .a50_library import EqPreset
+from .astro import BANDS, FREQ_RANGE, GAIN_RANGE, SHELVES, WIDTH_RANGE, Band, preset_name
 from .settings_files import ConfigError, read_capped, unprefixed
 from .wording import both_ends, turns_replaced
 
@@ -64,8 +65,9 @@ def read_astroeq(text: str) -> EqPreset:
         parser.read_string(text.removeprefix("\ufeff"))
     except configparser.Error as exc:
         # configparser's own text names the source '<string>' and runs over several lines.
-        errors = getattr(exc, "errors", None)
-        line = getattr(exc, "lineno", None) or (errors[0][0] if errors else "?")
+        # A plain ParsingError has no lineno, and lists each line it refuses, at least one.
+        errors: list[tuple[int, str]] = getattr(exc, "errors", [])
+        line = getattr(exc, "lineno", None) or errors[0][0]
         what = next((w for kind, w in _INI_PROBLEMS if isinstance(exc, kind)), "is not key=value")
         raise ValueError(f"not an .astroeq file: line {line} {what}") from None
 
@@ -84,8 +86,8 @@ def read_astroeq(text: str) -> EqPreset:
             # 4,300 by default; said as out of range, which it is unless zero-padded.
             if re.fullmatch(r"[+-]?\d+", raw):
                 raise ValueError(out_of_range) from None
-            raise ValueError(f"{key} is {raw!r}, "
-                             f"not a {'whole ' if kind is int else ''}number") from None
+            raise ValueError(f"{key} is a {'whole ' if kind is int else ''}number, "
+                             f"not {raw!r}") from None
         if not low <= got <= high:
             raise ValueError(out_of_range)
         return got

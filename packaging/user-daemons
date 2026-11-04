@@ -1,0 +1,117 @@
+#!/bin/sh
+# Usage: /usr/lib/gearbench/user-daemons start|restart|stop
+#
+# The package's scripts run this as root, the .deb's, the .rpm's and the Arch
+# package's alike, on a running systemd: start after a first install, restart
+# after an upgrade, and stop before a remove, while the package's files are
+# still there. It calls each running user manager, a lingering account's
+# included. Needs systemd 249 or later for --machine.
+set -e
+
+# The most seconds one call to an account's user manager may take: systemctl reaches the
+# manager through a bridge and a bus that, like the manager, run as that account, so the
+# account can leave a call unanswered until sd-bus gives up, minutes for a reload.
+CALL_WAIT=15
+
+# One call to the user manager of account $1, bounded by CALL_WAIT. What systemctl prints of
+# a failure comes unescaped from that account's side of the bus, so it stays off the admin's
+# terminal, and the caller's line stands in for it.
+user_manager() {
+    account=$1
+    shift
+    timeout "$CALL_WAIT" systemctl --user --machine "$account@" "$@" 2>/dev/null
+}
+
+# The admin's line for a call to account $1's manager, with the rest as its arguments, that
+# failed or took over CALL_WAIT.
+call_failed() {
+    account=$1
+    shift
+    echo "gearbench: systemctl --user $* failed or took over $CALL_WAIT seconds for" \
+        "uid $account; run it as that account to see why" >&2
+}
+
+manager_call() {
+    user_manager "$@" || call_failed "$@"
+}
+
+# The uid of each running user manager, one still starting included, one a line. list-units
+# alone lists a failed one too, which systemd keeps loaded until reset-failed (CollectMode=,
+# systemd.unit(5)), as a stop that timed out at a logout leaves it.
+manager_uids() {
+    systemctl --no-legend --plain --state=active,reloading,activating \
+        list-units 'user@*.service' |
+        awk '{sub(/^user@/, "", $1); sub(/\.service$/, "", $1); print $1}'
+}
+
+# On an upgrade ($1 restart), each logged-in user's running unit restarts on the new code
+# (the owner's decision of 2026-10-02). A unit not running stays stopped, and a daemon
+# started by hand with gearbench-ctl daemon runs outside the unit, so a window from this
+# version talks to it until it is stopped. On a first install, or a reinstall after a
+# remove ($1 start), the unit starts in each manager whose desktop session is running, so
+# the devices work before the next login (the owner's decisions of 2026-10-16 and
+# 2026-10-25), with the spatial and Outputs units the account switched on (the owner's
+# decision of 2026-10-31). Each manager is reloaded first, since the package's enable reloads none: a
+# running one sees the enable only through this reload, and until then its next graphical
+# login starts no daemon.
+restart_daemons() {
+    if [ "$1" = start ]; then
+        # The uaccess grants of the package's udev trigger land asynchronously, and a daemon
+        # that finds /dev/uinput shut has no virtual keyboard or mouse until it tries again,
+        # 30 s later or at a bind. Bounded, so a stuck queue cannot hold the package manager.
+        udevadm settle --timeout=10 || true
+    fi
+    for uid in $(manager_uids)
+    do
+        manager_call "$uid" daemon-reload
+        # Queued, not waited for: the account can override the unit, and a stop that
+        # never ends would hold the package manager here.
+        if [ "$1" = restart ]; then
+            manager_call "$uid" --no-block try-restart gearbench.service
+        # Only where a desktop session runs: the unit is part of graphical-session.target,
+        # which a manager kept by an ssh login or lingering does not have. A spatial or
+        # Outputs unit the account switched on starts too: its switch-on is its enable link
+        # in the account's own folder, which a remove leaves, and the remove stopped it.
+        elif user_manager "$uid" --quiet is-active graphical-session.target; then
+            manager_call "$uid" --no-block start gearbench.service
+            for unit in gearbench-spatial.service gearbench-outputs.service; do
+                if user_manager "$uid" --quiet is-enabled "$unit"; then
+                    manager_call "$uid" --no-block start "$unit"
+                fi
+            done
+        fi
+    done
+}
+
+# On a remove the daemon, the spatial and Outputs units and the equalizer watches of each
+# running user manager stop before their code goes, so none runs on without it and the
+# daemon hands the keyboard and mouse back (the owner's decision of 2026-10-16). Each stop
+# is waited for, since the hand-back runs the code that is about to go, but at most
+# CALL_WAIT seconds an account, so one account's service cannot hold the package manager
+# for long.
+stop_daemons() {
+    for uid in $(manager_uids)
+    do
+        # Each headset equalizer's watch runs the package's code too. Their names go as a
+        # pattern, which matches only units in memory (systemctl(1), "start PATTERN"): the
+        # transient unit is unloaded while the equalizer is off, and its plain name would
+        # fail the stop as not loaded. The equalizer's own unit and noise suppression's run
+        # PipeWire alone and last to the logout: a stop would skip the equalizer's
+        # switch-off, which gives the headset its volume back. The failure line gets the
+        # pattern quoted, as manager_call would not give it, so the line runs as printed in
+        # a shell that refuses a glob that matches no file.
+        user_manager "$uid" stop 'gearbench-*-eq-watch.service' gearbench-spatial.service \
+            gearbench-outputs.service gearbench.service \
+            || call_failed "$uid" stop "'gearbench-*-eq-watch.service'" \
+                gearbench-spatial.service gearbench-outputs.service gearbench.service
+    done
+}
+
+case "${1-}" in
+    start | restart) restart_daemons "$1" ;;
+    stop) stop_daemons ;;
+    *)
+        echo "usage: $0 start|restart|stop" >&2
+        exit 2
+        ;;
+esac

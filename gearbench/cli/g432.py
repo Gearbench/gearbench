@@ -3,8 +3,9 @@
 `g432-lights` ask the daemon about the headset it has attached, `headset-sync` switches
 whether every headset's lights follow the keyboard, attached or not, and
 `g432-headset-presets` keeps the library of the attached headset's equalizer on this
-computer (presets.run_library); `g432-eq` and `g432-noise` run systemd's and PipeWire's
-programs in this process, with no daemon, on the headset `headset_of` picks.
+computer (presets.run_library); `g432-eq` runs systemd's and PipeWire's programs in this
+process on the headset `headset_of` picks: it needs no daemon, and asks a running one
+which headset it drives when --headset is left out.
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ import argparse
 import sys
 from collections.abc import Callable
 from dataclasses import asdict, replace
-from pathlib import Path
 from typing import cast
 
 from .. import (
@@ -22,32 +22,40 @@ from .. import (
     g432,
     g432_eq,
     g432_library,
-    g432_mic,
     g432_presets,
     pipewire_client,
     pipewire_unit,
 )
 from ..battery import kept_at
 from ..config import DEFAULT_COLOR, format_color
-from ..g432 import G432_MODEL, MODEL_KEYED, MODEL_OF, HeadsetModel, find_g432
+from ..g432 import G432_MODEL, MODEL_KEYED, HeadsetModel
 from ..g432_eq_words import EQ_MODELS
 from ..headset_lights import FULL_BRIGHTNESS
 from ..lighting import EFFECT_IDS, has_color
 from ..report import untested_note
-from ..wording import NOT_READ, escaped as _escaped, gain_range, hertz, route, word_list
+from ..wording import (
+    NOT_READ,
+    bands_words,
+    escaped as _escaped,
+    gain_range,
+    hertz,
+    route,
+    word_list,
+)
 from .output import (
     PUT_BACK,
     RELEASE_ALONE,
     Subcommands,
-    bands_words,
     battery_words,
     device_words,
+    driven_g432,
     failed,
     print_block,
-    print_json,
     print_reply,
+    print_unit_state,
     send,
     silent_note,
+    writes_lines,
 )
 from .presets import (
     ALONE,
@@ -60,14 +68,14 @@ from .presets import (
 )
 
 #: g432-eq's refusal of a headset with an equalizer of its own, found plugged in: its name.
-OWN_EQ = ("the {} has an equalizer of its own, which `gearbench-ctl g432-headset-eq` shows "
-          "and sets; --headset picks a headset whose equalizer runs on the computer")
+OWN_EQ = ("the {}'s equalizer is in the headset: `gearbench-ctl g432-headset-eq` shows and "
+          "sets it; --headset picks a headset whose equalizer runs on the computer")
 #: `g432-headset-presets`' refusal where the daemon read no equalizer in the headset, the
 #: model's short name; and its list with none in the library yet.
 EQ_NOT_READ = ("the {}'s equalizer has not been read, so there are no gains to save: read it "
                "with `gearbench-ctl g432-headset-eq`")
-NONE_SAVED = LIBRARY_EMPTY.format("g432-headset-presets --save-as NAME saves the gains the "
-                                  "headset plays")
+NONE_SAVED = LIBRARY_EMPTY.format("`gearbench-ctl g432-headset-presets --save-as NAME` saves "
+                                  "the gains the headset plays")
 #: g432-sidetone's words for writing back the level first read: PUT_BACK, and reset, its
 #: name in 1.1.0, which still works.
 PUT_BACK_WORDS = (PUT_BACK, "reset")
@@ -76,18 +84,12 @@ PICKED = "{}, sent again each time the headset connects"
 #: `g432-lights`' refusal of --startup or --store with another change, before anything is
 #: sent.
 KEPT_ALONE = "--startup and --store take no effect, --color, --release or each other"
-#: --headset's words, the command's own after "the headset".
-HEADSET_HELP = ("the headset of the G432's family {}, by its key; left out, the one plugged "
-                "in, found by its USB ids as the daemon finds it, else the G432")
-
-
 def headset_of(args: argparse.Namespace) -> HeadsetModel:
-    """The model `--headset` names, else the headset of the family found plugged in, read
-    from sysfs (find_g432, which opens nothing), else the G432."""
+    """The model `--headset` names, else the headset of the family the daemon drives, or
+    would drive at its next look (driven_g432), else the G432."""
     if args.headset is not None:
         return MODEL_KEYED[args.headset]
-    found = find_g432()
-    return G432_MODEL if found is None else MODEL_OF[found[1]]
+    return driven_g432() or G432_MODEL
 
 
 def _checked(text: str, check: Callable[[object], int]) -> int:
@@ -103,7 +105,7 @@ def _checked(text: str, check: Callable[[object], int]) -> int:
 def g432_device(reply: dict) -> str:
     """The `g432` reply's device line: the node, the model, and its route in the window's
     words, for a model this install knows."""
-    model = MODEL_KEYED.get(str(reply.get("model")))
+    model = g432.reply_model(reply)
     return device_words(reply["device"], reply["name"],
                         None if model is None else route(model.plugged_by))
 
@@ -125,7 +127,7 @@ def cmd_g432_sidetone(args: argparse.Namespace) -> int:
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-    reply = send(request)
+    reply = send(request, timeout=g432.READ_WAIT if args.level is None else None)
     asleep = False
     if args.level is None and not args.json and not reply.get("ok"):
         # A read that failed: the last readings of a headset the daemon marks not answering
@@ -141,13 +143,14 @@ def cmd_g432_sidetone(args: argparse.Namespace) -> int:
     if asleep:
         # Under the device line.
         lines.append((None, silent_note(reply)))
-    lines.append(("firmware", reply.get("firmware") or NOT_READ))
     if reply.get("battery_found"):
-        battery = reply.get("battery")
-        volts = f" ({battery['volts']} V)" if battery and battery.get("volts") else ""
         # Dated after a write too: only a battery reading marks the headset answering again.
-        lines.append(("battery", battery_words(battery, kept_at(reply)) + volts))
-        lines.append((g432.AUTO_OFF_LABEL, g432.auto_off_words(reply.get("power_off"))))
+        lines.append(("battery", battery_words(reply.get("battery"), kept_at(reply))))
+    if reply.get("firmware"):
+        lines.append(("firmware", reply["firmware"]))
+    if reply.get("battery_found"):
+        lines.append((astro.SETTING_SUBJECTS["auto_off"],
+                      g432.auto_off_words(reply.get("power_off"))))
     first = reply["sidetone_first"]
     lines.append(("sidetone", f"{reply['sidetone']}%" if reply["sidetone"] is not None
                   else NOT_READ))
@@ -171,7 +174,7 @@ def _auto_off_minutes(text: str) -> int:
 def cmd_g432_auto_off(args: argparse.Namespace) -> int:
     """The minutes of silence the headset powers off after: shown, or set and read back.
     Where the daemon refuses the writes the headset keeps (`flash_refused`), its reason is
-    the writes: field (_writes_lines)."""
+    the writes: field (writes_lines)."""
     if args.minutes is None:
         request: dict = {"command": "g432"}
     else:
@@ -184,17 +187,10 @@ def cmd_g432_auto_off(args: argparse.Namespace) -> int:
     if args.json or not reply.get("ok"):
         return print_reply(reply, args.json)
     print_block([("device", g432_device(reply)),
-                 (g432.AUTO_OFF_LABEL, g432.auto_off_words(reply.get("power_off"))
+                 (astro.SETTING_SUBJECTS["auto_off"], g432.auto_off_words(reply.get("power_off"))
                   if reply.get("battery_found") else "none: it lists no battery"),
-                 *_writes_lines(reply.get("flash_refused"))])
+                 *writes_lines(reply.get("flash_refused"))])
     return 0
-
-
-def _writes_lines(*refusals: object) -> list[tuple[str | None, object]]:
-    """A report's writes: field, as `audio` gives it, one line for each refusal given, the
-    later ones under the first; none where none is."""
-    said = [f"refused: {why}" for why in refusals if why]
-    return [("writes" if index == 0 else None, line) for index, line in enumerate(said)]
 
 
 def _headset_gains(text: str) -> list[int]:
@@ -203,7 +199,8 @@ def _headset_gains(text: str) -> list[int]:
     try:
         return [int(part) for part in text.split(",")]
     except ValueError:
-        raise ValueError(f"--gains takes whole dB split by commas, not {text!r}") from None
+        raise ValueError(f"--gains is whole numbers of dB split by commas, like 0,3,0, "
+                         f"not {text!r}") from None
 
 
 def cmd_g432_headset_eq(args: argparse.Namespace) -> int:
@@ -241,7 +238,7 @@ def _headset_eq_report(reply: dict) -> None:
                                                  strict=True))))
     if eq.get("picked") is not None:
         lines.append(("picked", PICKED.format(eq["picked"])))
-    print_block([*lines, *_writes_lines(eq["refused"])])
+    print_block([*lines, *writes_lines(eq["refused"])])
 
 
 class HeadsetPresets:
@@ -255,16 +252,13 @@ class HeadsetPresets:
     def attached(args: argparse.Namespace) -> tuple[dict, HeadsetModel] | None:
         """The daemon's `g432` reply and the model it names, one with an equalizer of its
         own; None once why there is none is said (presets.library_reply)."""
-        attached = library_reply(args, lambda reply: MODEL_KEYED.get(str(reply.get("model"))),
-                                 command="g432")
+        attached = library_reply(args, g432.reply_model, command="g432")
         if attached is not None and not attached[1].onboard_eq:
             print(f"error: {g432.NO_HEADSET_EQ.format(attached[1].short)}", file=sys.stderr)
             return None
         return attached
 
-    @staticmethod
-    def load(model: HeadsetModel) -> eq_presets.Saved[g432_library.Preset]:
-        return g432_library.load_library(model)
+    load = staticmethod(g432_library.load_library)
 
     @staticmethod
     def edit(change: Callable[[eq_presets.Saved[g432_library.Preset]],
@@ -274,9 +268,7 @@ class HeadsetPresets:
         return g432_library.edit(
             cast("Callable[[g432_library.Library], g432_library.Library]", change), model)
 
-    @staticmethod
-    def path(model: HeadsetModel) -> Path:
-        return g432_library.library_path(model)
+    path = staticmethod(g432_library.library_path)
 
     @staticmethod
     def saved_preset(_args: argparse.Namespace, reply: dict, model: HeadsetModel,
@@ -301,13 +293,8 @@ class HeadsetPresets:
         return f"{preset.name}: " + bands_words((band.freq, band.gain)
                                                 for band in preset.bands)
 
-    @staticmethod
-    def entry(preset: g432_library.Preset) -> dict:
-        return g432_library.entry(preset)
-
-    @staticmethod
-    def report(reply: dict) -> None:
-        _headset_eq_report(reply)
+    entry = staticmethod(g432_library.entry)
+    report = staticmethod(_headset_eq_report)
 
 
 HEADSET_PRESETS: LibraryKind[HeadsetModel, g432_library.Preset] = HeadsetPresets()
@@ -360,7 +347,8 @@ def _lights_request(args: argparse.Namespace) -> dict:
 
 
 def _lights_report(reply: dict) -> None:
-    """`g432-lights`' report on an ok reply, or _no_lights_report's where it has no lights."""
+    """`g432-lights`' report on an ok reply, or _no_lights_report's where it has no lights;
+    where the startup effect's read failed, why under note:."""
     lights = reply.get("lights")
     if lights is None:
         _no_lights_report(reply)
@@ -369,17 +357,22 @@ def _lights_report(reply: dict) -> None:
         ("device", g432_device(reply)),
         ("zones", word_list(lights["zones"], "and")),
         # Empty where the zones list no effect they all take.
-        ("effects", word_list(lights["effects"]) if lights["effects"]
+        ("effects", word_list(lights["effects"], "and") if lights["effects"]
          else "none every zone takes"),
         ("showing", _showing_words(lights))]
     # Left out where the lights list no startup effect, and where the daemon stored none.
     startup, stored = lights.get("startup"), lights.get("stored")
+    startup_unread = lights.get("startup_unread")
     if startup is not None:
         lines.append(("startup", "on" if startup else "off"))
+    elif startup_unread is not None:
+        lines.append(("startup", NOT_READ))
     if stored:
         lines.append(("stored", _shown_words(stored)))
-    print_block([*lines, *_writes_lines(
+    print_block([*lines, *writes_lines(
         lights["refused"], reply.get("flash_refused") if startup is not None else None)])
+    if startup_unread is not None:
+        print(f"note: {_escaped(startup_unread)}")
 
 
 def _no_lights_report(reply: dict) -> None:
@@ -393,11 +386,11 @@ def _no_lights_report(reply: dict) -> None:
 
 
 def _showing_words(lights: dict) -> str:
-    """What the lights show: the keyboard's color while they follow it (`headset-sync`) on
-    lights whose writes are not refused, since sync sends refused ones nothing; else
-    _shown_words, off where a G key turned them off, and the brightness a G key set where it
-    is not full."""
-    if lights.get("synced") and not lights.get("refused"):
+    """What the lights show: the keyboard's color where they take it (`follows`), since sync
+    sends nothing to lights whose writes are refused or none of whose zones lists static;
+    else _shown_words, off where a G key turned them off, and the brightness a G key set
+    where it is not full."""
+    if lights.get("follows"):
         return "follows the keyboard that leads"
     brightness = lights.get("brightness")
     if brightness == 0:
@@ -418,17 +411,17 @@ def _shown_words(shown: dict | None) -> str:
     return f"{effect}, {shown['color']}"
 
 
-def _eq_band(text: str) -> tuple[int, int]:
-    """`--band`'s FREQ:GAIN, a band of g432_presets.BAND_FREQS and a whole dB, or a printable
+def _eq_gain(text: str) -> tuple[int, int]:
+    """`--gain`'s FREQ:GAIN, a band of g432.BAND_FREQS and a whole dB, or a printable
     ValueError; the gain's range is g432_presets.checked's to refuse."""
     freq, _, gain = text.partition(":")
-    bands = word_list([str(b) for b in g432_presets.BAND_FREQS])
+    bands = word_list([str(b) for b in g432.BAND_FREQS])
     try:
         pair = (int(freq), int(gain))
     except ValueError:
         pair = None
-    if pair is None or pair[0] not in g432_presets.BAND_FREQS:
-        raise ValueError(f"--band is FREQ:GAIN, FREQ one of {bands} Hz and GAIN whole dB, "
+    if pair is None or pair[0] not in g432.BAND_FREQS:
+        raise ValueError(f"--gain is FREQ:GAIN, FREQ one of {bands} Hz and GAIN whole dB, "
                          f"not {text!r}")
     return pair
 
@@ -439,9 +432,9 @@ def _eq_gains(args: argparse.Namespace, gains: g432_presets.Gains) -> g432_prese
     take."""
     gains = g432_presets.Gains() if args.flat else gains
     bands = list(gains.bands)
-    for text in args.band:
-        freq, gain = _eq_band(text)
-        bands[g432_presets.BAND_FREQS.index(freq)] = gain
+    for text in args.gain:
+        freq, gain = _eq_gain(text)
+        bands[g432.BAND_FREQS.index(freq)] = gain
     return g432_presets.checked(replace(
         gains, bands=tuple(bands),
         bass=gains.bass if args.bass is None else args.bass,
@@ -479,7 +472,7 @@ def cmd_g432_eq(args: argparse.Namespace) -> int:
     if model.onboard_eq:
         print(f"error: {OWN_EQ.format(model.short)}", file=sys.stderr)
         return 1
-    gains = args.flat or args.band or args.bass is not None or args.treble is not None
+    gains = args.flat or args.gain or args.bass is not None or args.treble is not None
     changes = args.pick is not None or args.reset or gains or args.save_as is not None
     # What the chain plays can change; a name alone leaves it as it is.
     played = changes or args.delete
@@ -519,31 +512,6 @@ def cmd_g432_eq(args: argparse.Namespace) -> int:
     return _eq_report(args.json, shown, notes, starting=args.state == "on", model=model)
 
 
-def cmd_g432_noise(args: argparse.Namespace) -> int:
-    """The headset's noise suppression (headset_of), after on or off, then its state,
-    waiting up to pipewire_client.SETTLE while it starts after on: switch_on's wait for a
-    unit it started, else the report's own."""
-    model = headset_of(args)
-    state = None
-    try:
-        if args.state == "on":
-            state = g432_mic.switch_on(model=model)
-        elif args.state == "off":
-            g432_mic.switch_off(model=model)
-    except (pipewire_client.StepError, OSError) as exc:
-        return failed(exc, pipewire_unit.switch_folder)
-    if state is None:
-        state = pipewire_client.settled(lambda: g432_mic.read_state(model=model),
-                                        lambda read: g432_mic.summary(read, model=model),
-                                        args.state == "on")
-    if args.json:
-        kind, words = g432_mic.summary(state, model=model)
-        print_json({**asdict(state), "kind": kind, "summary": words})
-        return 0
-    print_block(g432_mic.describe(state, model=model))
-    return 0
-
-
 def _eq_report(as_json: bool, shown: int | None, notes: list[str], starting: bool, *,
                model: HeadsetModel) -> int:
     """The equalizer's report, after waiting up to pipewire_client.SETTLE while it is
@@ -551,14 +519,9 @@ def _eq_report(as_json: bool, shown: int | None, notes: list[str], starting: boo
     `as_json` the state whole."""
     state = pipewire_client.settled(lambda: g432_eq.read_state(model=model),
                                     lambda read: g432_eq.summary(read, model=model), starting)
-    if as_json:
-        kind, words = g432_eq.summary(state, model=model)
-        print_json({**asdict(state), "kind": kind, "summary": words, "notes": notes})
-        return 0
-    print_block(g432_eq.describe(state, shown, model=model))
-    for note in notes:
-        print(f"note: {_escaped(note)}")
-    if state.presets.refused:
+    print_unit_state(asdict(state), g432_eq.summary(state, model=model),
+                     g432_eq.describe(state, shown, model=model), notes, as_json)
+    if not as_json and state.presets.refused:
         # A problem on stderr is a warning, as report's; note: is stdout's label.
         print(f"warning: {_escaped(state.presets.refused)}", file=sys.stderr)
     return 0
@@ -574,7 +537,7 @@ def add_g432(sub: Subcommands) -> None:
 def _add_daemon_commands(sub: Subcommands) -> None:
     low, high = g432.SIDETONE_RANGE
     gst = sub.add("g432-sidetone",
-                  help=f"show or set the sidetone of the Logitech G432, or of another HID++ "
+                  help=f"show or set the sidetone of the G432, or of another HID++ "
                        f"headset of its family, {g432.SIDETONE_MEANS}, and show the battery "
                        "of one that has one")
     gst.add_argument("level", nargs="?",
@@ -628,27 +591,28 @@ def _add_daemon_commands(sub: Subcommands) -> None:
     gli.add_argument("--release", action="store_true",
                      help="give the lights back to the headset's own lighting")
     gli.add_argument("--startup", choices=["on", "off"],
-                     help="the effect the lights show as the headset switches on, which it "
-                          "keeps")
+                     help="turn on or off the effect the lights show as the headset switches "
+                          "on, which the headset keeps")
     gli.add_argument("--store", action="store_true",
                      help="keep the effect and color shown now in the headset, which shows "
                           "them without Gearbench, after a power-off too")
     gli.set_defaults(func=cmd_g432_lights)
 
     sub.switch("headset-sync", command="headset_sync", state="headset_sync_color",
-               help="on: a headset's lights take the keyboard's color (under Per-key, the "
-                    "background) and dim with it, and g432-lights refuses an effect, "
-                    "--release and --store; off: they show what they showed before")
+               help="on: a headset's lights take the color of the keyboard that leads "
+                    "(under Per-key, the background) and dim with it, and g432-lights refuses an effect or "
+                    "--color, --release and --store; off: they show what they showed before")
 
 
 def _add_computer_commands(sub: Subcommands) -> None:
     low, high = g432_presets.DB_RANGE
     geq = sub.add("g432-eq",
-                  help="show or set the equalizer on this computer for the Logitech G432, or "
+                  help="show or set the equalizer on this computer for the G432, or "
                        "for another headset of its family with none of its own: a separate "
                        "output, on or off, its presets and their gains; no daemon needed")
     geq.add_argument("--headset", choices=[model.key for model in EQ_MODELS],
-                     help=HEADSET_HELP.format("whose equalizer it shows or sets"))
+                     help="the headset of the G432's family, by its key; left out, the one "
+                          "the daemon drives or would drive, else the G432")
     geq.add_argument("state", nargs="?", choices=["on", "off"],
                      help="on: it runs until off or the end of the login session; off: it "
                           "stops, which removes the output, and changes given with it are "
@@ -664,17 +628,21 @@ def _add_computer_commands(sub: Subcommands) -> None:
     geq.add_argument("--name", help=f"the preset's name, {astro.NAME_BYTES[0]} to "
                                     f"{astro.NAME_BYTES[1]} bytes")
     geq.add_argument("--reset", action="store_true",
-                     help=f"a shipped preset, {shipped}, back to its default, its name and "
-                          "its gains, before the other options")
+                     help="put a shipped preset, "
+                          f"{word_list([str(number) for number in g432_presets.SHIPPED])}, back "
+                          "to its default name and gains, before the other options")
     geq.add_argument("--delete", action="store_true",
-                     help="delete the preset, one saved as new, alone; those after it move up "
-                          "a number, and with the active one deleted the one before it plays")
+                     help="delete the preset, one saved as new, alone; those after it go a "
+                          "number lower, and with the active one deleted the one before it "
+                          "plays")
     geq.add_argument("--save-as", metavar="NAME",
                      help="after the other options, save the preset as a new one named "
                           f"NAME, which plays; at most {eq_presets.PRESETS_MAX} presets in all")
-    geq.add_argument("--band", action="append", default=[], metavar="FREQ:GAIN",
+    # --band, its name in 1.1.0 to 1.2.1, still works; headset-eq's --band moves a band.
+    geq.add_argument("--gain", "--band", dest="gain", action="append", default=[],
+                     metavar="FREQ:GAIN",
                      help=f"a band's gain, FREQ one of "
-                          f"{word_list([str(b) for b in g432_presets.BAND_FREQS], 'and')} Hz, GAIN "
+                          f"{word_list([str(b) for b in g432.BAND_FREQS], 'and')} Hz, GAIN "
                           f"a whole number of dB, {gain_range(low, high)}; repeatable")
     geq.add_argument("--bass", type=int, metavar="GAIN",
                      help=f"the bass shelf's gain at {hertz(g432_presets.BASS_FREQ)}, "
@@ -686,14 +654,3 @@ def _add_computer_commands(sub: Subcommands) -> None:
                      help="every gain of the preset to 0 dB first, before any other gain "
                           "given")
     geq.set_defaults(func=cmd_g432_eq)
-
-    gns = sub.add("g432-noise",
-                  help="show or set the noise suppression of the Logitech G432, or of another "
-                       "headset of its family: a cleaned-up input made from its microphone, to "
-                       "pick in a game or chat app; no daemon needed")
-    gns.add_argument("--headset", choices=[model.key for model in g432.MODELS],
-                     help=HEADSET_HELP.format("whose microphone it cleans"))
-    gns.add_argument("state", nargs="?", choices=["on", "off"],
-                     help="on: it runs until off or the end of the login session; off: it "
-                          "stops, which removes the input")
-    gns.set_defaults(func=cmd_g432_noise)

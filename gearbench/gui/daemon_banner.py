@@ -1,8 +1,9 @@
-"""The window's daemon banner: what a failed round trip says of the daemon, and its Start it.
+"""The window's daemon banner: what a failed round trip says of the daemon, and its Start daemon.
 
-This part owns the banner, its title for each kind of failure, and Start it, which runs the
-user service on the worker thread and waits for the socket to accept. Its window builds it,
-places the banner, and shows it at a failure and hides it at a good status (set_status).
+This part owns the banner, its title for each kind of failure, and Start daemon, which runs the
+user service on the worker thread and waits for a daemon to listen on the socket. Its window
+builds it, places the banner, and shows it at a failure and hides it at a good status
+(set_status).
 """
 
 from __future__ import annotations
@@ -15,19 +16,10 @@ from typing import cast
 from gi.repository import Adw
 
 from .. import pipewire_client
-from ..wording import SERVICE, SERVICE_JOURNAL, ended, reason
-from .worker import (
-    BUSY,
-    DOWN,
-    UNREAD,
-    DaemonWorker,
-    SetStatus,
-    daemon_listening,
-    failure,
-    unusable_socket,
-)
+from ..wording import SERVICE, SERVICE_JOURNAL, capitalized, ended, reason
+from .worker import DOWN, DaemonWorker, SetStatus, daemon_listening, failure, unreachable
 
-#: What the banner's Start it runs, the command the guide's First-time setup gives.
+#: What the banner's Start daemon runs, the command the guide's First-time setup gives.
 START_COMMAND = ["systemctl", "--user", "start", SERVICE]
 #: Seconds to wait for systemctl, which blocks until the unit is up or has failed.
 START_TIMEOUT = 30.0
@@ -35,37 +27,31 @@ START_TIMEOUT = 30.0
 #: returns once the process forks, before it binds the socket.
 SOCKET_WAIT = 5.0
 
-#: The banner's titles. A busy daemon, most likely on a mouse profile write, gets no
-#: Start it. Stopped, the daemon leaves the keyboard to its onboard profiles, whose bindings
-#: differ by model: a G915's bind G1-G5 to F1-F5 on M1, 1-5 on M2 and 6-0 on M3 (its
-#: sectors 1 to 3 at 0x20, in G HUB's backup images of them), a G915 TKL's F1 to F12 type
-#: F1 to F12 (keyboard.G915_TKL). The window cannot tell which keyboard is meant while the
-#: daemon is down, so the title names no binding. Killed, it hands nothing back: a keyboard
-#: it had set up stays in host mode with the G keys diverted, and the socket file it leaves
-#: refuses the connect.
+#: The banner's title while no daemon runs. Stopped, the daemon leaves the keyboard to its
+#: onboard profiles, whose bindings differ by model: a G915's bind G1-G5 to F1-F5 on M1, 1-5
+#: on M2 and 6-0 on M3 (its sectors 1 to 3 at 0x20, in G HUB's backup images of them), a G915
+#: TKL's F1 to F12 type F1 to F12 (keyboard.G915_TKL). The window cannot tell which keyboard
+#: is meant while the daemon is down, so the title names no binding. Killed, it hands nothing
+#: back: a keyboard it had set up stays in host mode with the G keys diverted, and the socket
+#: file it leaves refuses the connect.
 DOWN_TITLE = ("The Gearbench daemon is not running, so the G keys type their onboard "
               "bindings, or may type nothing if it was killed")
-BUSY_TITLE = "The Gearbench daemon did not answer in time; it may be busy"
-#: A reply that does not parse: something answered, so no Start it either.
-UNREAD_TITLE = "The Gearbench daemon's reply could not be read"
-#: A socket that could not be used (another user's, say): Start it would not help.
-UNREACHABLE_TITLE = "The Gearbench daemon could not be reached"
-START_LABEL = "Start it"
-#: The banner while Start it's systemctl run is out, with no button: up to START_TIMEOUT and
+START_LABEL = "Start daemon"
+#: The banner while Start daemon's systemctl run is out, with no button: up to START_TIMEOUT and
 #: SOCKET_WAIT with no other sign, where every other wait in the window shows one.
 STARTING_TITLE = "Starting the Gearbench daemon…"
-#: The banner after Start it failed, with the reason _on_start's done gives.
+#: The banner after Start daemon failed, with the reason _on_start's done gives.
 START_FAILED = "The Gearbench daemon did not start: {}"
 #: Why a start systemctl took failed: the unit is Type=simple, so systemctl exits 0 for a
 #: daemon that exits at once, at an import error or a socket it cannot bind, say.
-NOT_LISTENING = (f"it exited at once or did not listen within {SOCKET_WAIT:g} s; "
+NOT_LISTENING = (f"it exited at once or was not ready within {SOCKET_WAIT:g} s; "
                  f"`{SERVICE_JOURNAL}` says why")
 
 
 def start_daemon(run: pipewire_client.Run = subprocess.run) -> tuple[int, str]:
     """Run START_COMMAND with `run` on the worker thread, as it blocks. Returns its exit code
-    and stderr, or for a start that succeeded, 0 and "" once the daemon accepts, so the read
-    that follows finds it listening, and 0 and NOT_LISTENING if it does not within
+    and stderr, or for a start that succeeded, 0 and "" once a daemon listens on the socket,
+    so the read that follows finds one running, and 0 and NOT_LISTENING if none does within
     SOCKET_WAIT.
     """
     done = run(START_COMMAND, check=False, capture_output=True, text=True, timeout=START_TIMEOUT)
@@ -80,16 +66,16 @@ def start_daemon(run: pipewire_client.Run = subprocess.run) -> tuple[int, str]:
 
 
 class DaemonBanner:
-    """The banner up while the daemon cannot be used, with Start it while it is not running.
+    """The banner up while the daemon cannot be used, with Start daemon while it is not running.
 
     `resync` reads the daemon again once a start is up, and a start that failed is shown
-    through `failed`, the window's set_status. Start it runs START_COMMAND with `run`.
+    through `failed`, the window's set_status. Start daemon runs START_COMMAND with `run`.
     """
 
-    #: What Start it failed with, which the banner says until a start succeeds or a daemon
+    #: What Start daemon failed with, which the banner says until a start succeeds or a daemon
     #: answers.
     _start_failed: str | None = None
-    #: Start it's systemctl run is out (_on_start).
+    #: Start daemon's systemctl run is out (_on_start).
     _starting = False
 
     def __init__(self, worker: DaemonWorker, resync: Callable[[], None], failed: SetStatus,
@@ -98,7 +84,7 @@ class DaemonBanner:
         self._resync = resync
         self._failed = failed
         self._run = run
-        # A banner for its Start it button: a header label could carry the command only in a
+        # A banner for its Start daemon button: a header label could carry the command only in a
         # tooltip, which the keyboard cannot reach and a screen reader is not given. Not
         # markup: the title carries the socket's path and the error's words.
         self.banner = Adw.Banner(use_markup=False)
@@ -106,21 +92,18 @@ class DaemonBanner:
 
     def show(self, error: Exception | None) -> None:
         """Up, titled for what `failure` makes of `error`, a round trip's that failed."""
-        kind = failure(error)
-        if kind == UNREAD:
-            title, button = UNREAD_TITLE, ""
-        elif kind == BUSY:
-            title, button = BUSY_TITLE, ""
-        elif kind == DOWN and self._starting:
+        if failure(error) != DOWN:
+            # Busy, unreadable or an unusable socket: the status rows' words, and no Start
+            # daemon, since a daemon runs or a start would not help. Shown for a failure, so
+            # its caller gave the error.
+            title, button = capitalized(unreachable(cast(Exception, error))), ""
+        elif self._starting:
             # A poll while the start is out: it says so, until the start answers.
             title, button = STARTING_TITLE, ""
-        elif kind == DOWN:
+        else:
             title = (START_FAILED.format(self._start_failed) if self._start_failed
                      else DOWN_TITLE)
             button = START_LABEL
-        else:
-            # Shown for a failure, so its caller gave the error.
-            title, button = f"{UNREACHABLE_TITLE} at {unusable_socket(cast(Exception, error))}", ""
         self.banner.set_title(title)
         self.banner.set_button_label(button)
         self.banner.set_revealed(True)
@@ -144,7 +127,7 @@ class DaemonBanner:
             self._starting = False
             if isinstance(result, subprocess.TimeoutExpired):
                 # It did run, and the exception's text quotes the command as a Python list.
-                self._start_failed = f"systemctl did not finish in {START_TIMEOUT:g} s"
+                self._start_failed = f"systemctl took over {START_TIMEOUT:g} s"
             elif isinstance(result, Exception):
                 self._start_failed = f"could not run systemctl: {reason(result)}"
             else:

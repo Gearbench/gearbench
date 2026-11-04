@@ -4,28 +4,20 @@
 which of them come and under what name, the macros they bind and the programs each loads
 for. A game profile that already holds what the import would write is left as it is
 (`_already_there`). `details`, `summary`, `notes` and `found_as_json` say what the file
-holds, for the window's list and `import-ghub --list`. Nothing here reads a file or writes
-one.
+holds, for the window's list and `import-ghub --list`, and `capped` caps that listing's
+size. Nothing here reads a file or writes one.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import NamedTuple, cast
 
 from .config import BINDABLE_KEYS, MACRO_PREFIX, PER_KEY, PROFILE_IDS, Lighting, macro_name
-from .ghub import (
-    MAX_DOCUMENT_BYTES,
-    SHOWN_DEVICES,
-    Binding,
-    Found,
-    GhubError,
-    GhubProfile,
-    MacroRef,
-    button_label,
-    mouse_where,
-)
+from .ghub import SHOWN_DEVICES, Binding, Found, GhubProfile, MacroRef
+from .ghub_file import MAX_DOCUMENT_BYTES, GhubError
+from .ghub_slots import button_label, mouse_where
 from .import_plan import (
     CLASH_MACRO,
     CLASH_PROFILE,
@@ -45,13 +37,14 @@ from .library_files import Taken, slug
 from .macros import macro_summary
 from .mouse import MouseModel, bindings_of, model_named
 from .profiles import GameProfile, layers_of
-from .wording import counted, first_of, word_list
+from .wording import counted, first_of, quoted, word_list
 
 # -- the same as what is there ---------------------------------------------
 
 def _already_there(profile: GhubProfile, have: str, found: Found, existing: Existing) -> bool:
     """Whether the game profile `have` holds what importing `profile` would write: the same
-    G keys, MR layer, mouse buttons, lighting and macros (the owner's decision of 2026-09-24).
+    G keys and mouse buttons on both layers, lighting and macros (the owner's decision
+    of 2026-09-24).
 
     Both sides are compared as the daemon keeps them: the body through
     `GameProfile.from_json`, as `import_profile` takes it, and `have` as the library read its
@@ -60,9 +53,7 @@ def _already_there(profile: GhubProfile, have: str, found: Found, existing: Exis
     (`game_form`), since a file can leave out the entry of a model at its defaults while the
     body holds each model it has whole.
     """
-    game = existing.games.get(have)
-    if game is None:
-        return False
+    game = existing.games[have]
     def by_card(binding: Binding) -> str | None:
         # The card's place in profile.macros stands in for the macro's name,
         # which a clash can change; a card id can hold what a binding may not
@@ -85,8 +76,9 @@ def _already_there(profile: GhubProfile, have: str, found: Found, existing: Exis
 
 
 def _macros_bound(game: GameProfile) -> set[str]:
-    """By slug, the macros `game` binds on a G key, the MR layer or a mouse button."""
-    return {slug(name) for layer in layers_of(game.bindings, game.shift, game.mouse)
+    """By slug, the macros `game` binds on a G key or a mouse button, on either
+    of its layers."""
+    return {slug(name) for layer in layers_of(*game.layers)
             for spec in layer.values() if (name := macro_name(spec)) is not None}
 
 
@@ -114,12 +106,12 @@ def chosen_names(found: Found, names: Iterable[str], everything: bool) -> list[s
     for name in names:
         profile = found.get(name)
         if profile is None:
-            raise GhubError(f"the file has no profile listed as {name!r}; "
+            raise GhubError(f"the file has no profile listed as {quoted(name)}; "
                             f"--list shows what it has")
         if profile.desktop:
-            if desktop not in (None, profile.name):
-                raise GhubError(f"{desktop!r} and {profile.name!r} are both desktop defaults, "
-                                f"which go onto the same M1, M2 and M3; name one")
+            if desktop is not None and desktop != profile.name:
+                raise GhubError(f"{quoted(desktop)} and {quoted(profile.name)} are both "
+                                "desktop defaults, which go onto the same M1, M2 and M3; name one")
             desktop = profile.name
         if profile.name not in chosen:
             chosen.append(profile.name)
@@ -206,7 +198,7 @@ def _pick_profiles(found: Found, wanted: set[str], existing: Existing, plan: Pla
     the macros of yours one already there binds go into `kept`, by slug."""
     picked: list[_Picked] = []
     # The chosen names too, so a rename takes none a later profile comes in under.
-    taken = Taken([*existing.profiles, *wanted])
+    taken = Taken([*existing.games, *wanted])
     for profile in (p for p in found.profiles if p.name in wanted):
         name, replacing, by_hand, unanswered = profile.name, None, False, False
         have = None if profile.desktop else existing.profile(profile.name)
@@ -229,7 +221,7 @@ def _pick_profiles(found: Found, wanted: set[str], existing: Existing, plan: Pla
                 # user already has. So the copy loads by hand.
                 name, by_hand = taken.unique(profile.name), True
                 plan.said.append(f'Game profile "{profile.name}" is imported as '
-                                 f'"{name}", loaded by hand.')
+                                 f'"{name}", which loads by hand.')
         taken.add(name)
         picked.append(_Picked(profile, name, replacing, by_hand, unanswered))
     return picked
@@ -253,6 +245,9 @@ def _macro_names(found: Found, picked: list[_Picked], existing: Existing, plan: 
     #: one share the answer, or Replace for one would write over yours after Skip for the
     #: other kept it.
     asked: dict[str, str] = {}
+    #: The Keep mine sentences said so far, each said once. A set: a file can spell one name
+    #: of yours in as many ways as it has macro cards, each with a sentence of its own.
+    skips_said: set[str] = set()
     for card in dict.fromkeys(c for p in picked for c in p.profile.macros):
         macro, steps = found.macros[card], found.steps(card)
         have = existing.macro(macro.name)
@@ -272,7 +267,8 @@ def _macro_names(found: Found, picked: list[_Picked], existing: Existing, plan: 
                 names[card] = have
                 skipped = (f'Macro "{macro.name}" is not imported; the bindings use your '
                            f'own "{have}".')
-                if choice == SKIP and skipped not in plan.said:
+                if choice == SKIP and skipped not in skips_said:
+                    skips_said.add(skipped)
                     plan.said.append(skipped)
                 continue
             if choice == KEEP:
@@ -312,10 +308,15 @@ def _body(profile: GhubProfile, bank: int, resolved: Callable[[Binding], str | N
         name=name or profile.name,
         bindings={k: resolved(keys.get(k)) for k in BINDABLE_KEYS},
         shift={k: resolved(shift.get(k)) for k in BINDABLE_KEYS},
-        # Each mouse model's that G HUB has, its defaults where G HUB binds nothing.
-        mouse={model: bindings_of({}, model) | {button: resolved(binding) or "none"
+        # Each mouse model's that G HUB has, its defaults where G HUB binds nothing. Each
+        # binding on both layers is set: ghub._Reader.mouse_button stores no None.
+        mouse={model: bindings_of({}, model) | {button: cast(str, resolved(binding))
                                                 for button, binding in entry.items()}
                for model, entry in profile.mouse.items()},
+        # Sparse, as G HUB has it: a button left out sends its binding above.
+        mouse_shift={model: {button: cast(str, resolved(binding))
+                             for button, binding in entry.items()}
+                     for model, entry in profile.mouse_shift.items()},
     )
     # The G915's, the one keyboard G HUB's lighting is read for (ghub.convert_lighting); its
     # defaults where G HUB has none, which a replace writes.
@@ -341,10 +342,15 @@ def summary(profile: GhubProfile) -> str:
                 for value in side.values() if value is not None)
     return ", ".join([
         counted(bound, "G-key binding"),
-        counted(sum(map(len, profile.mouse.values())), "mouse button"),
+        counted(sum(map(len, profile.mouse.values()))
+                + sum(map(len, profile.mouse_shift.values())), "mouse button binding"),
         "per-key lighting" if profile.lighting is not None else "no lighting",
         counted(len(profile.macros), "macro"),
     ])
+
+
+#: The start of the line that names the file's other devices (other_devices_text).
+OTHER_DEVICES = "Other devices in the file, not imported: "
 
 
 def other_devices_text(found: Found) -> str:
@@ -381,7 +387,7 @@ def _loads_for(programs: list[str], with_programs: bool) -> str:
             f"{'it' if one else 'they'} would also load the profile for {linux}.")
 
 
-def notes(profile: GhubProfile, with_programs: bool = False) -> list[str]:
+def notes(profile: GhubProfile, with_programs: bool) -> list[str]:
     """The profile's notes, the last saying what loads it: G HUB's programs
     when they come over (`make_plan`'s `with_programs`), else by hand."""
     if not profile.processes:
@@ -393,8 +399,8 @@ def notes(profile: GhubProfile, with_programs: bool = False) -> list[str]:
 NOTES = "Notes"
 
 
-def details(profile: GhubProfile, found: Found, m_names: Mapping[int, str] | None = None,
-            with_programs: bool = False) -> list[tuple[str, list[str]]]:
+def details(profile: GhubProfile, found: Found, m_names: Mapping[int, str],
+            with_programs: bool) -> list[tuple[str, list[str]]]:
     """The preview of one profile, as (heading, lines) sections.
     `with_programs` is whether G HUB's programs for it come over."""
     sections: list[tuple[str, list[str]]] = []
@@ -407,15 +413,21 @@ def details(profile: GhubProfile, found: Found, m_names: Mapping[int, str] | Non
             for k in keys]))
         if held := [f"{k}: {binding_text(shift[k], found, labels.get(at(k, True, bank)))}"
                     for k in keys if shift.get(k)]:
-            sections.append((f"{where}G keys with MR held", held))
+            sections.append((f"{where}G keys with G-Shift held", held))
     for key, mouse in profile.mouse.items():
-        # Each mouse the import reads (ghub.mice_in), whose MICE entry names a model.
+        # Each mouse the import reads (ghub_slots.mice_in), whose MICE entry names a model.
         model = cast(MouseModel, model_named(key))
         sections.append((f"The {model.name}'s buttons", [
             f"{button_label(model, b)}: "
             + (binding_text(mouse[b], found, labels.get(mouse_where(model, b)))
                if b in mouse else f"{default} (factory binding)")
             for b, default in bindings_of({}, key).items()]))
+        # Those G HUB gives a card of their own on the G-Shift layer, as G keys there.
+        if held := [f"{button_label(model, b)}: "
+                    + binding_text(binding, found,
+                                   labels.get(mouse_where(model, b, shifted=True)))
+                    for b, binding in profile.mouse_shift.get(key, {}).items()]:
+            sections.append((f"The {model.name}'s buttons with G-Shift held", held))
     if profile.lighting is not None:
         n = len(profile.lighting.keys)
         sections.append(("Lighting", [f"Per-key colors on {counted(n, 'key')}, the rest dark"]))
@@ -431,8 +443,8 @@ def details(profile: GhubProfile, found: Found, m_names: Mapping[int, str] | Non
             lines += step_lines(steps)
         sections.append(("Macros", lines))
     if profile.desktop:
-        names = m_names or {}
-        which = word_list([f"M{i} \"{names.get(i, f'Profile {i}')}\"" for i in PROFILE_IDS], "and")
+        which = word_list([f"M{i} \"{m_names.get(i, f'Profile {i}')}\"" for i in PROFILE_IDS],
+                          "and")
         first, *rest = m_profile_parts(profile.banks[1][0], bool(profile.mouse),
                                        profile.lighting is not None)
         what = word_list([f"The {first}", *(f"the {part}" for part in rest)], "and")
@@ -444,26 +456,49 @@ def details(profile: GhubProfile, found: Found, m_names: Mapping[int, str] | Non
     return sections
 
 
-def found_as_json(found: Found, with_programs: bool = False) -> list[dict]:
-    """The profiles found, for `--json`.
+def capped[N, D](profiles: Sequence[GhubProfile],
+                 named: Callable[[GhubProfile], tuple[N, int]],
+                 detailed: Callable[[GhubProfile], tuple[D, int]]
+                 ) -> Iterator[tuple[N, D | None]]:
+    """The listing's cap, for `--list` and `--json`: each profile's `named` part and its
+    `detailed` part, each made with its size in printed characters.
 
-    Each profile repeats its application's programs and the names of the macros it binds,
-    so a crafted file can make many times its own size of them: once those lists pass
-    MAX_DOCUMENT_BYTES characters as JSON writes them, as `--list`'s sections do
-    (cli.library), the profile that passed it and each after it keep their names and
-    desktop flag, with "listed_by_name": true in place of the lists, and the lists of those
-    after it are not made."""
-    entries: list[dict] = []
-    left = MAX_DOCUMENT_BYTES
-    for p in found.profiles:
-        named = {"name": p.name, "application": p.application, "ghub_name": p.ghub_name,
+    Each profile repeats its application's programs and the names and steps of the macros
+    it binds, so a crafted file can make many times its own size of details: once the
+    detailed parts pass MAX_DOCUMENT_BYTES, the profile that passed it gives None for its
+    details, as does each after it, whose details are not made. Each profile repeats its
+    application's name too: once the named parts pass MAX_DOCUMENT_BYTES of their own, the
+    profile that passed it and each after it are not given, and the caller counts them."""
+    left = names_left = MAX_DOCUMENT_BYTES
+    for profile in profiles:
+        name, size = named(profile)
+        names_left -= size
+        if names_left < 0:
+            return
+        details = None
+        if left >= 0:
+            details, size = detailed(profile)
+            left -= size
+        yield name, details if left >= 0 else None
+
+
+def found_as_json(found: Found, with_programs: bool) -> list[dict]:
+    """The profiles found, for `--json`, under `capped`'s cap: a profile past the details'
+    cap keeps its name, application, G HUB name and desktop flag, with "listed_by_name":
+    true in place of the rest; the list returned is shorter than `found.profiles` when the
+    cap on names left some out."""
+    # Each part counted as print_json writes it, its indent aside: ensure_ascii writes one
+    # character as up to 12.
+    def named(p: GhubProfile) -> tuple[dict, int]:
+        entry = {"name": p.name, "application": p.application, "ghub_name": p.ghub_name,
                  "desktop": p.desktop}
-        lists = {} if left < 0 else {
-            "processes": p.processes, "summary": summary(p),
-            "macros": [found.macros[c].name for c in p.macros],
-            "skipped": p.skipped, "notes": notes(p, with_programs)}
-        # Counted as print_json writes it, its indent aside: ensure_ascii writes one
-        # character as up to 12.
-        left -= len(json.dumps(lists))
-        entries.append(named | lists if left >= 0 else named | {"listed_by_name": True})
-    return entries
+        return entry, len(json.dumps(entry))
+
+    def detailed(p: GhubProfile) -> tuple[dict, int]:
+        lists = {"processes": p.processes, "summary": summary(p),
+                 "macros": [found.macros[c].name for c in p.macros],
+                 "skipped": p.skipped, "notes": notes(p, with_programs)}
+        return lists, len(json.dumps(lists))
+
+    return [entry | (lists if lists is not None else {"listed_by_name": True})
+            for entry, lists in capped(found.profiles, named, detailed)]

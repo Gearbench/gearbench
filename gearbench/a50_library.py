@@ -1,6 +1,6 @@
 """The Astro A50's preset library: presets Gearbench keeps in a50-eq.json, apart from the base
 station's three slots, each a name, five gains and five bands as the base station takes them
-(astro.EqPreset). The window and the CLI read and write the file; the daemon never does. A
+(EqPreset). The window and the CLI read and write the file; the daemon never does. A
 preset written to a slot goes to the base station's memory through the daemon's `headset_eq`,
 as any edit does. The slots' defaults, which Reset to default writes, are here too
 (DEFAULT_SLOTS). Standard library only.
@@ -8,11 +8,47 @@ as any edit does. The slots' defaults, which Reset to default writes, are here t
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
 from . import astro, eq_presets, settings_files, wording
+
+
+@dataclass(frozen=True)
+class EqPreset:
+    """An EQ preset, as an .astroeq file holds one: its name, five gains in dB, five
+    frequencies, the widths of bands 2 to 4."""
+
+    name: str
+    gains: tuple[int, int, int, int, int]
+    freqs: tuple[int, int, int, int, int]
+    widths: tuple[float, float, float]
+
+    @classmethod
+    def of_bands(cls, name: str, gains: Sequence[int], bands: Sequence[astro.Band]) -> EqPreset:
+        """The preset of `name`, a gain and a Band for each of astro.BANDS, band 1 first, as
+        `bands` gives them back: each band's frequency, and the width of each but SHELVES."""
+        # The caller gives five gains and five bands, BANDS' count.
+        return cls(name, cast("tuple[int, int, int, int, int]", tuple(gains)),
+                   cast("tuple[int, int, int, int, int]", tuple(band.freq for band in bands)),
+                   cast("tuple[float, float, float]", tuple(
+                       band.width for number, band in zip(astro.BANDS, bands, strict=True)
+                       if number not in astro.SHELVES)))
+
+    def bands(self) -> list[astro.Band]:
+        return [astro.Band(self.freqs[band - 1],
+                           None if band in astro.SHELVES else self.widths[band - 2])
+                for band in astro.BANDS]
+
+    def request(self) -> dict:
+        """`headset_eq` with this preset's name, gains and five bands, on the active preset
+        unless the caller adds one."""
+        return {"command": "headset_eq", "name": self.name, "gains": list(self.gains),
+                "bands": [{"band": number, "freq": band.freq, "width": band.width}
+                          for number, band in zip(astro.BANDS, self.bands(), strict=True)]}
+
 
 LIBRARY_NAME = "a50-eq.json"
 #: a50-eq.json's version.
@@ -24,11 +60,11 @@ LIBRARY_VERSION = 1
 #: named the first two Rock and Alt and FPS Spatial; a headset's
 #: shipped presets take eq_presets' names (the owner's decision of 2026-10-22).
 DEFAULT_SLOTS = (
-    astro.EqPreset(eq_presets.MEDIA, (4, -7, 2, 5, 3), (80, 180, 2700, 4400, 12000),
+    EqPreset(eq_presets.MEDIA, (4, -7, 2, 5, 3), (80, 180, 2700, 4400, 12000),
                    (1.6, 0.5, 0.3)),
-    astro.EqPreset(eq_presets.GAMING, (-5, -4, 5, 4, 1), (150, 220, 2500, 4300, 12000),
+    EqPreset(eq_presets.GAMING, (-5, -4, 5, 4, 1), (150, 220, 2500, 4300, 12000),
                    (1.5, 0.7, 0.3)),
-    astro.EqPreset(eq_presets.EVERYDAY, (2, -5, 3, 4, 2), (80, 180, 2700, 4300, 12000),
+    EqPreset(eq_presets.EVERYDAY, (2, -5, 3, 4, 2), (80, 180, 2700, 4300, 12000),
                    (1.5, 0.5, 0.4)),
 )
 #: A preset's refusal for a band it lacks: the band's number.
@@ -37,11 +73,11 @@ NO_BAND = "band {} is missing"
 TWICE = "band {} is given more than once"
 
 
-class Library(eq_presets.Saved[astro.EqPreset]):
+class Library(eq_presets.Saved[EqPreset]):
     """The library's presets (eq_presets.Saved), each an A50 preset."""
 
 
-def default_slot(slot: int) -> astro.EqPreset:
+def default_slot(slot: int) -> EqPreset:
     """Slot `slot`'s default, 1 to 3, which Reset to default writes."""
     return DEFAULT_SLOTS[astro.PRESETS.index(slot)]
 
@@ -50,13 +86,13 @@ def library_path() -> Path:
     return settings_files.config_dir() / LIBRARY_NAME
 
 
-def entry(preset: astro.EqPreset) -> dict:
+def entry(preset: EqPreset) -> dict:
     """A preset as a50-eq.json keeps it: `headset_eq`'s name, gains and bands for it."""
     return {key: value for key, value in preset.request().items() if key != "command"}
 
 
 def _check(name: object, gains: object, bands: dict[int, object],
-           named: bool = True) -> astro.EqPreset:
+           named: bool = True) -> EqPreset:
     """The preset of `name`, `gains` and `bands`, each band by its number, each value as the
     daemon's own checks take it (astro.preset_name, the name only when `named`, preset_gains
     and band_width). ValueError with their sentence for a value they refuse, or NO_BAND."""
@@ -74,7 +110,7 @@ def _check(name: object, gains: object, bands: dict[int, object],
                                 None if number in astro.SHELVES else float(band["width"])))
     # The checks above took five whole gains and the name: astro.preset_name's, or the text
     # a50_preset checks when not `named`.
-    return astro.EqPreset.of_bands(cast("str", name), cast("list[int]", gains), found)
+    return EqPreset.of_bands(cast("str", name), cast("list[int]", gains), found)
 
 
 def _bands(value: object, take: Callable[[dict], object]) -> dict[int, object]:
@@ -95,7 +131,7 @@ def _bands(value: object, take: Callable[[dict], object]) -> dict[int, object]:
     return found
 
 
-def _of_entry(saved: dict) -> astro.EqPreset:
+def _of_entry(saved: dict) -> EqPreset:
     """A preset of a50-eq.json, `entry`'s shape, through _check."""
     return _check(saved.get("name"), saved.get("gains"),
                   _bands(saved.get("bands"), lambda band: band))
@@ -106,7 +142,7 @@ def _active(pair: object) -> object:
     return pair.get("active") if isinstance(pair, dict) else None
 
 
-def a50_preset(slot: object, named: bool = True) -> astro.EqPreset | None:
+def a50_preset(slot: object, named: bool = True) -> EqPreset | None:
     """The A50 preset an entry of the daemon's `headset` reply's `presets` gives, from what
     the base station runs: its name, gains and bands. None for an entry of another shape or
     with a value _check or _bands refuses, as one not read whole. `named` False takes the name as
@@ -119,6 +155,14 @@ def a50_preset(slot: object, named: bool = True) -> astro.EqPreset | None:
                       named)
     except ValueError:
         return None
+
+
+def slot_number(slot: object) -> int | None:
+    """The base station's slot, one of astro.PRESETS, an entry of the daemon's `headset`
+    reply's `presets` gives; None for an entry of another shape or number."""
+    number = slot.get("preset") if isinstance(slot, dict) else None
+    # whole first: True in astro.PRESETS is True.
+    return number if wording.whole(number) and number in astro.PRESETS else None
 
 
 def library_of(data: object, path: Path) -> Library:
@@ -143,7 +187,5 @@ def save_library(library: Library) -> None:
 def edit(change: Callable[[Library], Library]) -> Library:
     """Save what `change` makes of the saved library, and answer it. eq_presets'
     LibraryUnread for a file that does not read and LibraryPartial for one read in part
-    (Library.whole), each left as it is."""
-    library = change(load_library().whole())
-    save_library(library)
-    return library
+    (Library.whole), each left as it is. The load and the save run under eq_presets.held."""
+    return eq_presets.edit(library_path(), load_library, change, save_library)

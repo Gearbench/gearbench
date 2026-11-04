@@ -2,7 +2,7 @@
 in the earcups, read with getSidetoneLevel, function 0, and set with setSidetoneLevel,
 function 1.
 
-Version 2, the A50 X's, measured on it (G HUB's captures of 2026-10-21, B4-01): the read
+Version 2, the A50 X's, measured on it against G HUB on 2026-10-21: the read
 answers a count of microphones, a microphone's id, 0xFF and the level, `01 01 ff 03`, and
 the write takes the id, 0xFF and the level, `01 ff 06`; function 2 answers the level count
 last, `ee 00 07` for 0 to 6 (HeadsetControl PR 531 sends the A50 Gen 5's the same; the G522's
@@ -20,6 +20,8 @@ from .setting import Setting
 ID = 0x0604
 WORDS = "sidetone"
 READ, WRITE = 0, 1
+#: Its key, the socket's word for it.
+KEY = "sidetone"
 #: The microphone's id the writes name: 1 on the A50 X, and in both drivers.
 MICROPHONE = 0x01
 
@@ -27,5 +29,5 @@ MICROPHONE = 0x01
 def setting(levels: int, version: int) -> Setting:
     """The sidetone of a model with `levels` levels, 0 up, in version `version`'s layout."""
     at, before = (3, bytes([MICROPHONE, 0xFF])) if version >= 2 else (2, bytes([MICROPHONE]))
-    return Setting("sidetone", "sidetone level", ID, read=READ, at=at, write=WRITE,
+    return Setting(KEY, "sidetone level", ID, read=READ, at=at, write=WRITE,
                    before=before, wire=tuple(range(levels)))

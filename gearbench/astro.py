@@ -15,13 +15,24 @@ import logging
 import os
 import re
 import time
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
 from .hidpp import GONE_ERRNOS, HidrawNode, find_attached
-from .wording import counted, escaped, given_count, number, reason, whole, word_list, written
+from .wording import (
+    NO_SETTING,
+    PRESET_NEEDS_A_NAME,
+    counted,
+    escaped,
+    given_count,
+    number,
+    reason,
+    whole,
+    whole_in,
+    word_list,
+    written,
+)
 
 log = logging.getLogger("gearbench")
 
@@ -32,13 +43,19 @@ VENDOR_ID = 0x9886
 #: decision of 2026-10-22).
 NAME = "Astro A50 Gen 4"
 PRODUCTS = {0x002C: NAME}
-#: The headset with no link to its base station, off it or docked on it, and the base station
-#: silent, in every view's words; the window capitalizes them.
+#: The key the files keep the model under, spatial.json's and config.json's battery_notices.
+#: pipewire_headsets.A50 keeps a copy of it and of NAME, since pipewire_headsets may not import
+#: this module.
+KEY = "a50"
+#: The headset with no link to its base station, off it or docked on it, in every view's words,
+#: and the base station silent in the CLI's; the window capitalizes the first two, gives the
+#: first its next step and says NOT_ANSWERING for the third.
 OFF_OR_AWAY = "switched off or out of range"
 DOCKED_OFF = "switched off, docked"
 BASE_SILENT = "the base station is not answering"
-#: Why the base station takes no request now: it is not answering, or it is saving. The
-#: first names the model, as `status` lists it beside other devices' problems.
+#: Why the base station takes no request now: it is not answering, or it is saving. Each
+#: names the model, as the A50 X family's refusals do, and `status` lists the first beside
+#: other devices' problems.
 NOT_ANSWERING = f"the {NAME}'s base station is not answering; unplug it and plug it back in"
 SAVING = f"the {NAME}'s base station is saving; try again in a moment"
 INTERFACE = 6
@@ -87,16 +104,24 @@ SETTING_WORDS = {"noise_gate": NOISE_GATES, "mic_eq": MIC_EQS}
 SETTINGS = (
     *SLIDERS, "noise_gate", "mic_eq", "default_balance", "alert_volume", "auto_off",
 )
+#: The settings each of the window's groups holds, in its rows' order: Microphone, Stream
+#: mix and Base station; a group with none of them in the reply hides.
+MIC_SETTINGS = ("mic_level", "sidetone", "noise_gate", "mic_eq")
+STREAM_SETTINGS = ("stream_game", "stream_chat", "stream_mic", "stream_aux")
+BASE_SETTINGS = ("default_balance", "alert_volume", "auto_off")
 # Settings whose flash value can be read beside the RAM one; the rest can
 # only be marked unsaved by having been written since the last save.
 READS_SAVED = frozenset({*SLIDERS, "noise_gate", "mic_eq", "default_balance", "alert_volume"})
 # Each setting's name, in a refusal and in the window: its socket word spaced and
 # capitalized, or its own where the word does not spell it. The stream mix's voice channel
 # is Voice, as the Balance row and the headset's Game and Voice buttons name it; the socket
-# and the command line keep stream_chat.
+# keeps stream_chat, which the command line takes as stream-voice.
 SETTING_NAMES = {**{name: name.replace("_", " ").capitalize() for name in SETTINGS},
                  "mic_eq": "Mic EQ", "auto_off": "Auto shut-off",
                  "stream_chat": "Stream voice"}
+#: Each setting's name as a refusal starts with it: its SETTING_NAMES title, first letter
+#: lowered ("mic EQ is bright, airy or warm, ...").
+SETTING_SUBJECTS = {name: title[:1].lower() + title[1:] for name, title in SETTING_NAMES.items()}
 
 PRESETS = (1, 2, 3)
 BANDS = (1, 2, 3, 4, 5)
@@ -121,12 +146,6 @@ SETTING_RANGES = {**dict.fromkeys(SLIDERS, LEVEL_RANGE), "default_balance": BALA
 #: the CLI and the window list them.
 SETTING_CHOICES: dict[str, tuple[str, ...] | tuple[int, ...]] = {
     **SETTING_WORDS, "auto_off": AUTO_OFF_MINUTES}
-
-
-def game_share(value: int) -> int:
-    """The Game share of a balance, 0 all Voice to 255 all Game, in whole percent; Voice has
-    the rest."""
-    return round(value * 100 / BALANCE_RANGE[1])
 
 
 class AstroFailure(Exception):
@@ -177,43 +196,10 @@ class Band:
     width: float | None
 
 
-@dataclass(frozen=True)
-class EqPreset:
-    """An EQ preset, as an .astroeq file holds one: its name, five gains in dB, five
-    frequencies, the widths of bands 2 to 4."""
-
-    name: str
-    gains: tuple[int, int, int, int, int]
-    freqs: tuple[int, int, int, int, int]
-    widths: tuple[float, float, float]
-
-    @classmethod
-    def of_bands(cls, name: str, gains: Sequence[int], bands: Sequence[Band]) -> EqPreset:
-        """The preset of `name`, a gain and a Band for each of BANDS, band 1 first, as
-        `bands` gives them back: each band's frequency, and the width of each but SHELVES."""
-        # The caller gives five gains and five bands, BANDS' count.
-        return cls(name, cast("tuple[int, int, int, int, int]", tuple(gains)),
-                   cast("tuple[int, int, int, int, int]", tuple(band.freq for band in bands)),
-                   cast("tuple[float, float, float]", tuple(
-                       band.width for number, band in zip(BANDS, bands, strict=True)
-                       if number not in SHELVES)))
-
-    def bands(self) -> list[Band]:
-        return [Band(self.freqs[band - 1], None if band in SHELVES else self.widths[band - 2])
-                for band in BANDS]
-
-    def request(self) -> dict:
-        """`headset_eq` with this preset's name, gains and five bands, on the active preset
-        unless the caller adds one."""
-        return {"command": "headset_eq", "name": self.name, "gains": list(self.gains),
-                "bands": [{"band": number, "freq": band.freq, "width": band.width}
-                          for number, band in zip(BANDS, self.bands(), strict=True)]}
-
-
 def find_base() -> tuple[Path, int] | None:
     """The base station's hidraw node and product id, read from sysfs by the
     same vid, pid and interface `70-astro-a50.rules` matches; opens nothing."""
-    found = find_attached(vendor=VENDOR_ID, product=tuple(PRODUCTS), interface=INTERFACE)
+    found = find_attached(vendor=VENDOR_ID, product=PRODUCTS, interface=INTERFACE)
     return (found[0], found[1]) if found else None
 
 
@@ -342,6 +328,17 @@ class A50:
     def __init__(self, base: Base) -> None:
         self.base = base
 
+    @property
+    def fileno(self) -> int:
+        return self.base.fileno
+
+    def close(self) -> None:
+        self.base.close()
+
+    def pump(self) -> None:
+        """Read and drop what the node has queued, sending nothing (Base.pump)."""
+        self.base.pump()
+
     def _ask(self, cmd: int, payload: bytes = b"", *, need: int = 1,
              echo: bytes = b"") -> bytes:
         """A read's data, at least `need` bytes of it, after checking `echo`.
@@ -394,7 +391,7 @@ class A50:
 
     # Settings: an (active, saved) pair where one reply carries both
     def slider(self, name: str) -> tuple[int, int]:
-        slider = _slider(name)
+        slider = SLIDERS[name]
         data = self._ask(0x68, bytes([slider]), need=4, echo=bytes([0x68, slider]))
         return data[2], data[3]
 
@@ -417,13 +414,12 @@ class A50:
     def set(self, setting: str, value: int | str) -> None:
         """Write one of SETTINGS; `value` is an int, or a word from
         NOISE_GATES or MIC_EQS."""
-        if not isinstance(setting, str) or setting not in SETTINGS:
+        if setting not in SETTINGS:
             raise _not_a_setting(setting)
-        # The row's title, its first letter lowered, starts the refusal.
-        what = SETTING_NAMES[setting][:1].lower() + SETTING_NAMES[setting][1:]
+        what = SETTING_SUBJECTS[setting]
         if setting in SLIDERS:
             slider = SLIDERS[setting]
-            self._put(0x62, bytes([slider, _whole(value, *SETTING_RANGES[setting], what)]),
+            self._put(0x62, bytes([slider, whole_in(value, *SETTING_RANGES[setting], what)]),
                       bytes([0x62, slider]))
         elif setting == "noise_gate":
             gate = _choice(value, NOISE_GATES, what)
@@ -431,9 +427,9 @@ class A50:
         elif setting == "mic_eq":
             self._put(0x71, bytes([_choice(value, MIC_EQS, what)]), b"\x71")
         elif setting == "default_balance":
-            self._put(0x73, bytes([_whole(value, *SETTING_RANGES[setting], what)]), b"\x73")
+            self._put(0x73, bytes([whole_in(value, *SETTING_RANGES[setting], what)]), b"\x73")
         elif setting == "alert_volume":
-            self._put(0x76, bytes([_whole(value, *SETTING_RANGES[setting], what)]), b"\x76")
+            self._put(0x76, bytes([whole_in(value, *SETTING_RANGES[setting], what)]), b"\x76")
         elif setting == "auto_off":
             minutes = _one_of(value, AUTO_OFF_MINUTES, what, " minutes")
             # Unverified on the hardware: the echo may be 74 or nothing at all.
@@ -464,15 +460,16 @@ class A50:
         wire = preset_gains(gains)
         self._put(0x63, bytes([preset, *wire]), bytes([0x63, preset]))
 
-    def band(self, preset: int, band: int) -> tuple[Band, Band]:
-        """70: (active, saved)."""
+    def band(self, preset: int, band: int) -> tuple[tuple[Band, int], tuple[Band, int]]:
+        """70: (active, saved), each a Band and the width word it was read from, which
+        the Band's width rounds to a tenth (None on a shelf)."""
         preset, band = preset_number(preset), _one_of(band, BANDS, "band")
         data = self._ask(0x70, bytes([preset, band]), need=11, echo=bytes([0x70, preset, band]))
         bw_active, bw_saved, fc_active, fc_saved = (
             int.from_bytes(data[i:i + 2], "little") for i in (3, 5, 7, 9))
 
-        def at(bw: int, freq: int) -> Band:
-            return Band(freq, None if band in SHELVES else round(bw / WIDTH_SCALE, 1))
+        def at(bw: int, freq: int) -> tuple[Band, int]:
+            return Band(freq, None if band in SHELVES else round(bw / WIDTH_SCALE, 1)), bw
 
         return at(bw_active, fc_active), at(bw_saved, fc_saved)
 
@@ -482,11 +479,14 @@ class A50:
         payload = bytes([preset, band]) + bw.to_bytes(2, "little") + freq.to_bytes(2, "little")
         self._put(0x6F, payload, bytes([0x6F, preset]))
 
-    def name(self, preset: int, saved: bool = False) -> str:
+    def name(self, preset: int, saved: bool = False) -> tuple[str, bytes]:
+        """6E: the name, with U+FFFD for bytes that are not UTF-8, and the bytes it was
+        read from, up to its NUL."""
         preset = preset_number(preset)
         data = self._ask(0x6E, bytes([preset]) + _selector(saved), need=2,
                          echo=bytes([0x6E, preset]))
-        return data[2:].split(b"\x00", 1)[0].decode("utf-8", "replace")
+        stored = data[2:].split(b"\x00", 1)[0]
+        return stored.decode("utf-8", "replace"), stored
 
     def set_name(self, preset: int, name: str) -> None:
         preset = preset_number(preset)
@@ -551,35 +551,14 @@ def _selector(saved: bool) -> bytes:
     return b"\x01" if saved else b"\x00"
 
 
-def _whole(value: object, low: int, high: int, what: str, unit: str = "") -> int:
-    """`value` where it is a whole number from `low` to `high`, else ValueError naming
-    `what`; `unit` is said after "whole number", as " of dB"."""
-    if not whole(value) or not low <= value <= high:
-        raise ValueError(f"{what} is a whole number{unit} from {low} to {high}, "
-                         f"not {written(value)}")
-    return value
-
-
 def _choice(value: object, words: tuple[str, ...], what: str) -> int:
-    if not isinstance(value, str) or value not in words:
+    if value not in words:
         raise ValueError(f"{what} is {word_list(words)}, not {written(value)}")
     return words.index(value)
 
 
-#: The refusal of a setting the A50 Gen 4 does not have, its name and the settings put in:
-#: the A50 X family's shape (daemon.a50x), and `headset-set`'s too.
-NO_SETTING = f"there is no {NAME} setting {{}}; the settings are {{}}"
-
-
 def _not_a_setting(name: object) -> ValueError:
-    return ValueError(NO_SETTING.format(written(name), word_list(SETTINGS, "and")))
-
-
-def _slider(name: str) -> int:
-    if not isinstance(name, str) or name not in SLIDERS:
-        raise ValueError(f"{written(name)} is not a slider; "
-                         f"the sliders are {word_list(list(SLIDERS), 'and')}")
-    return SLIDERS[name]
+    return ValueError(NO_SETTING.format(NAME, written(name), word_list(SETTINGS, "and")))
 
 
 def _one_of(value: object, choices: tuple[int, ...], what: str, unit: str = "") -> int:
@@ -599,12 +578,15 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 #: What a refusal of a preset's name calls it, where no file names its field ("Name" in an
 #: .astroeq); and the refusals, `what` put in: the daemon's, the command line's and, with a
-#: capital, the window's (style.name_refusal).
+#: capital, the window's (style.name_refusal). A blank preset name, spaces alone included,
+#: is PRESET_NEEDS_A_NAME, as the daemon's profile and macro names are; NAME_BLANK names a
+#: file's field.
 PRESET_NAME = "a preset name"
 NAME_NOT_TEXT = "{what} is text, not {value}"
 NAME_BLANK = "{what} cannot be blank"
 NAME_LONG = "{what} is at most {most} bytes, not {size}: an accented letter takes 2 or more"
 NAME_CONTROL = "{what} cannot hold a control character, such as a tab or a line break"
+NAME_INVALID = "{what} cannot hold a character that is not valid text"
 
 
 def name_refusal(name: object, what: str = PRESET_NAME) -> str | None:
@@ -615,9 +597,9 @@ def name_refusal(name: object, what: str = PRESET_NAME) -> str | None:
         size = len(name.encode("utf-8"))
     except UnicodeEncodeError:
         # UTF-8 refuses only a surrogate, which json.loads keeps from a lone "\ud800".
-        return NAME_CONTROL.format(what=what)
-    if size < NAME_BYTES[0]:
-        return NAME_BLANK.format(what=what)
+        return NAME_INVALID.format(what=what)
+    if size < NAME_BYTES[0] or name.isspace():
+        return PRESET_NEEDS_A_NAME if what == PRESET_NAME else NAME_BLANK.format(what=what)
     if size > NAME_BYTES[1]:
         return NAME_LONG.format(what=what, most=NAME_BYTES[1], size=size)
     # A NUL would cut the name in the base's flash. The base keeps the name in flash and
@@ -645,14 +627,14 @@ def preset_gains(gains: object) -> list[int]:
         # a request holds.
         raise ValueError(f"an equalizer takes {len(BANDS)} gains, "
                          f"not {given_count(gains, 'gain')}")
-    return [_whole(g, *GAIN_RANGE, "each gain", " of dB") + GAIN_OFFSET for g in gains]
+    return [whole_in(g, *GAIN_RANGE, "each gain", " of dB") + GAIN_OFFSET for g in gains]
 
 
 def band_width(band: object, freq: object, width: object) -> int:
     """A band's width as 6F takes it, 0 on a shelf, whose width is None. Raises ValueError
     with the sentence for a band, frequency or width it does not take."""
     band = _one_of(band, BANDS, "band")
-    _whole(freq, *FREQ_RANGE, f"band {band}'s frequency", " of Hz")
+    whole_in(freq, *FREQ_RANGE, f"band {band}'s frequency", " of Hz")
     if band in SHELVES:
         if width is not None:
             raise ValueError(f"band {band} is a shelf and takes no width, "

@@ -18,8 +18,7 @@ from ...keyboard import (
 from ...keyboard_zones import power_modes
 from ...onboard import MODE_HOST
 from ...wording import reason
-from ..shared import MOUSE_PROBE, REAPPLY_INTERVAL, look_due, unanswered
-from .notes import RECONNECT_DELAY
+from ..shared import CABLE_LOOK, MOUSE_PROBE, REAPPLY_INTERVAL, look_due, unanswered
 
 if TYPE_CHECKING:
     from ...keyboard_zones import KeyboardLights
@@ -157,8 +156,7 @@ class Link:
             self.d.bindings.keyboard_gone(held_only=True, source=self.keyboard)
             self.keyboard_moved_to_cable(force=True)
             return
-        self.say_set_up_again("linked to its receiver again")
-        self.reconfigure_keyboard()
+        self.reconfigure_keyboard("linked to its receiver again")
 
     def take_power_on_report(self, data: bytes) -> None:
         """0x1D4B fn 0 with byte 1 set (Keyboard.on_device_event): the keyboard lost its
@@ -166,26 +164,16 @@ class Link:
         in: the G915 sends `01 01 01` at both. The cable can reach the kernel after the report,
         so on the receiver it is looked for now and CABLE_WAIT later (look_for_cable_again),
         the keyboard set up in between."""
-        reconnected = data[2] == 1
+        asked = "reconnected" if data[2] == 1 else "asked to be set up again"
+        cabled = self.keyboard.keyboard_product in KEYBOARD_CABLED
+        if self.keyboard_moved_to_cable(force=True):
+            return
         # The second report of a pair, or one just after a connect, sets nothing up.
-        self.say_set_up_again("reconnected" if reconnected else "asked to be set up again")
-        if self.keyboard.keyboard_product in KEYBOARD_CABLED:
-            self.reconfigure_keyboard()
-        elif not self.keyboard_moved_to_cable(force=True):
-            self.reconfigure_keyboard()
-            if self.keyboard.dev is not None and self.cable_look_at is None:
-                self.cable_look_at = time.monotonic() + CABLE_WAIT
+        self.reconfigure_keyboard(asked)
+        if not cabled and self.keyboard.dev is not None and self.cable_look_at is None:
+            self.cable_look_at = time.monotonic() + CABLE_WAIT
 
-    def say_set_up_again(self, what: str) -> None:
-        """Say what asked for the setup again: at info once REAPPLY_INTERVAL has passed, else
-        at debug, since reconfigure_keyboard then sets nothing up."""
-        name = self.keyboard.model_name()
-        if time.monotonic() - self.keyboard_reapplied_at >= REAPPLY_INTERVAL:
-            log.info("%s %s; setting it up again", name, what)
-        else:
-            log.debug("%s %s; set up under %d s ago, so not again", name, what, REAPPLY_INTERVAL)
-
-    def reconfigure_keyboard(self) -> bool:
+    def reconfigure_keyboard(self, asked: str | None = None) -> bool:
         """Host mode, the claim, the diversion and FN's reports again (take_over), the custom
         assignments' file owed again (KeyControl.lost_power), the brightness the keyboard holds
         read again (Paint.read_brightness), then the profile, and each other keyboard whose
@@ -198,10 +186,20 @@ class Link:
         failure starts over with a reconnect, handing nothing back to a keyboard that did not
         answer; where that moves the lead, a synced mouse, a synced headset's lights and each
         other keyboard whose lighting or brightness the move changes are painted, since that
-        keyboard may stay off. False when the interval kept it from running.
+        keyboard may stay off. False when the interval kept it from running. `asked`, what asked
+        for it, is said at info where it runs, else at debug, from the clock reading that
+        decides.
         """
         now = time.monotonic()
-        if now - self.keyboard_reapplied_at < REAPPLY_INTERVAL:
+        due = now - self.keyboard_reapplied_at >= REAPPLY_INTERVAL
+        if asked is not None:
+            name = self.keyboard.model_name()
+            if due:
+                log.info("%s %s; setting it up again", name, asked)
+            else:
+                log.debug("%s %s; set up under %d s ago, so not again", name, asked,
+                          REAPPLY_INTERVAL)
+        if not due:
             return False
         self.keyboard_reapplied_at = now
         keyboard = self.keyboard
@@ -273,7 +271,7 @@ class Link:
         if (keyboard.dev is None or keyboard.keyboard_product in KEYBOARD_CABLED
                 or (not look_due(time.monotonic(), self._cable_check_at) and not force)):
             return False
-        self._cable_check_at = time.monotonic() + self.d.plugs.pace(RECONNECT_DELAY)
+        self._cable_check_at = time.monotonic() + self.d.plugs.pace(CABLE_LOOK)
         found = find_attached_keyboard(cabled_only=True, same_model_as=keyboard.keyboard_product)
         if found is None:
             return False

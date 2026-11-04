@@ -7,8 +7,9 @@ name = "gearbench"
 description = "Lighting, G keys, DPI and macros for Logitech G keyboards and mice, and headset settings"
 readme = "README.md"
 requires-python = ">=3.14"
-license = "GPL-3.0-or-later"
-license-files = ["LICENSE"]
+# The icons in gearbench/gui/icons, package data below, are Adwaita's, under its license.
+license = "GPL-3.0-or-later AND (LGPL-3.0-only OR CC-BY-SA-3.0)"
+license-files = ["LICENSE", "gearbench/gui/icons/COPYING", "gearbench/gui/icons/LGPL-3"]
 authors = [{ name = "wmuschetto", email = "113629853+wmuschetto@users.noreply.github.com" }]
 keywords = ["logitech", "g915", "g502", "hidpp", "keyboard", "mouse", "rgb", "macro",
             "astro", "a50", "headset"]
@@ -20,7 +21,7 @@ dynamic = ["version"]
 # window needs python3-gi with gir1.2-gtk-4.0 and gir1.2-adw-1, system packages
 # carrying GObject introspection typelibs; the PyPI wheels of the same name are
 # a different build that would shadow the working system module. So these are
-# debian/control's Recommends, never pip requirements.
+# the packages' Recommends (optdepends on Arch), never pip requirements.
 dependencies = []
 
 classifiers = [
@@ -50,6 +51,13 @@ gearbench-ctl = "gearbench.cli:main"
 # ship missing while the tests, run from the checkout, still passed.
 include = ["gearbench*"]
 
+[tool.setuptools.package-data]
+# The window's own icons, the tray's problem signs and their license, which every install
+# finds beside the code: without this line a package built from this file ships none of
+# the icons.
+"gearbench.gui" = ["icons/COPYING", "icons/LGPL-3", "icons/hicolor/scalable/*/*.svg",
+                   "icons/tray/*.svg"]
+
 [tool.setuptools.dynamic]
 version = { attr = "gearbench.__version__" }
 
@@ -63,7 +71,6 @@ source = ["gearbench"]
 # file, which `coverage report` combines; `coverage erase` before a run
 # removes the last run's.
 patch = ["subprocess"]
-parallel = true
 # Outside the checkout, which a run would otherwise leave one file per
 # process in. coverage.py uses ~/.cache only when XDG_CACHE_HOME is unset,
 # and takes an empty or relative value as it is.
@@ -84,7 +91,6 @@ files = ["gearbench", "spatial"]
 python_version = "3.14"
 check_untyped_defs = true
 disallow_untyped_defs = true
-disallow_incomplete_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 enable_error_code = ["ignore-without-code"]

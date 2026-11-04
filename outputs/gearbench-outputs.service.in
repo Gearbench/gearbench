@@ -1,0 +1,47 @@
+[Unit]
+Description=Gearbench - Gearbench Game, Chat and Media, outputs for games, voice chat and music
+# Runs from the login on once switched on, in the window's Headset tab or with
+# `gearbench-ctl headset-outputs on`; an install never switches it on. Its
+# process follows PipeWire and keeps the three outputs on the headset
+# Gearbench Spatial plays to, or on the default output while that headset is
+# away, so it needs no device unit.
+# A client of the session's PipeWire, stopped and restarted with it, as
+# PipeWire's own filter-chain.service is.
+BindsTo=pipewire.service
+After=pipewire.service pipewire-session-manager.service
+# One that fails at every start is left failed after five tries in a minute;
+# the Headset tab and `gearbench-ctl headset-outputs` then say so.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Lets the process say where the outputs play while the headset is away, as
+# the unit's status, which the Headset tab and `gearbench-ctl headset-outputs`
+# show.
+NotifyAccess=main
+Environment="PYTHONPATH=@CHECKOUT@"
+# Binds %t/gearbench-outputs.sock for the balance's words, renders the three
+# chains and runs them, then moves each to another output with pw-metadata,
+# never by a restart. -s keeps user site-packages off sys.path, so the
+# package's gearbench, or the checkout's on PYTHONPATH, runs it. The
+# interpreter is the one install.sh picks, and the package's build writes
+# /usr/bin/python3 there.
+ExecStart=@PYTHON@ -s -P -m gearbench.outputs_unit run %t/gearbench-outputs.conf
+Restart=on-failure
+RestartSec=2
+SyslogIdentifier=gearbench-outputs
+Slice=session.slice
+# The hardening PipeWire's filter-chain.service carries.
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+# Wanted by PipeWire, as WirePlumber is, so it starts with each start of the
+# session's PipeWire: default.target is reached once per user manager, which
+# lingering or another session of the account keeps across a logout.
+WantedBy=pipewire.service

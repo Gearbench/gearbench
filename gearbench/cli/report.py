@@ -1,7 +1,9 @@
 """`report`, the device report (gearbench/report.py): what the daemon holds, asked of it
-first, then every Logitech USB node read, then PipeWire's cards of Logitech's and Astro's
+first, then every Logitech USB node read, each of a model this build drives with the
+verdict on its record (report_verdict.py), then PipeWire's cards of Logitech's and Astro's
 audio devices, printed as a block to paste into an issue, or with --json whole. What to do
-next, a grant or a stop of the daemon, goes to stderr, so the block holds the report alone.
+next, a grant, a stop of the daemon or a run as yourself, goes to stderr, so the block holds
+the report alone.
 """
 
 from __future__ import annotations
@@ -28,24 +30,37 @@ from ..daemon import (
     failure,
     invoking_uid,
     listening,
+    root_alone,
     socket_path,
     use_invoking_users_runtime_dir,
 )
+from ..headset_audio import levels
 from ..hidpp import VENDOR_ID
-from ..pipewire_unit import levels
 from ..report import (
     BESIDE_HELD,
     FORMAT,
     HELD,
+    MAY_BE_ASLEEP,
     NO_PERMISSION,
     READ,
     REPORT_FORM,
     UNSURE,
     NotARead,
     gather,
+    run_words,
 )
-from ..wording import counted, escaped, number, whole, word_list
-from .output import PROBE_WAIT, START, STOP, Subcommands, print_json, send
+from ..report_verdict import with_verdict
+from ..wording import counted, escaped, number, reason, whole, word_list
+from .output import (
+    PROBE_WAIT,
+    START,
+    STOP,
+    Subcommands,
+    percent_list_words,
+    print_json,
+    send,
+    volts_words,
+)
 
 #: The fields of each daemon reply the report keeps for a node the daemon holds: what a
 #: model's support needs, nothing the owner named.
@@ -65,6 +80,9 @@ DAEMON_UNSURE = {BUSY: "running and did not answer in time",
 #: The daemon's state where it answered `status` with an error, which says nothing of the
 #: nodes it holds.
 STATUS_FAILED = "running, and its status failed"
+#: The daemon's state as root with no invoking user (invoking_uid), as after su - or doas:
+#: the daemon runs as a user's own account, never in root's runtime folder, where this looks.
+ROOT_ALONE = "maybe running as your own account, which root with no invoking user cannot ask"
 
 
 def kept(reply: Mapping[str, object], fields: tuple[str, ...]) -> dict:
@@ -90,12 +108,18 @@ def daemon_holds() -> tuple[str, dict[str, dict], bool]:
     """The daemon's state in words, what it says of each node it holds by node name, and
     whether the models this build drives are left alone from the start: true whenever a
     daemon runs or may when `status` is asked, since its attach retries open and probe such
-    a node it does not hold. Where it is false, cmd_report asks again before each such node."""
-    status = ask({"command": "status"})
-    if status == DOWN:
-        return "not running", {}, False
-    if isinstance(status, str):
-        return DAEMON_UNSURE[status], {}, True
+    a node it does not hold. Where it is false, cmd_report asks again before each such node.
+    A socket that could not be used is given with its cause, and root with no invoking user,
+    who cannot ask the user's daemon, counts it as one that may run (ROOT_ALONE)."""
+    try:
+        status = send({"command": "status"}, timeout=PROBE_WAIT)
+    except (OSError, json.JSONDecodeError) as exc:
+        kind = failure(exc)
+        if kind == DOWN:
+            return ("not running", {}, False) if not root_alone() else (ROOT_ALONE, {}, True)
+        # A socket that could not be used, which no stop of the daemon changes, says why.
+        return (f"{DAEMON_UNSURE[kind]}: {reason(exc)}" if kind == UNKNOWN
+                else DAEMON_UNSURE[kind]), {}, True
     held: dict[str, dict] = {}
     if node := held_node(status.get("device")):
         held[node] = kept(status, KEYBOARD_FIELDS)
@@ -118,11 +142,40 @@ def daemon_holds() -> tuple[str, dict[str, dict], bool]:
 AUDIO_VENDORS = frozenset(f"0x{vendor:04x}" for vendor in (VENDOR_ID, ASTRO_VENDOR_ID))
 
 
-def pipewire_part(run: pipewire_client.Run) -> dict:
+#: pw-dump's environment beside this process's: libpipewire then logs nothing to stderr,
+#: which a failed pw-dump's words in the block are taken from. With a client.conf it could
+#: not parse it logged the file's path, in the home folder, and the line it failed on
+#: (pw-dump 1.6.2, 2026-10-25); with this, only "can't create context: Invalid argument".
+QUIET_PIPEWIRE = {"PIPEWIRE_DEBUG": "0"}
+
+#: The variables of root's environment pw-dump gets as the invoking user: PATH, by which
+#: subprocess finds it, and XDG_RUNTIME_DIR, where it finds that user's PipeWire. That
+#: user's programs may read the environment of a process of theirs in /proc, and a root
+#: shell's profile can have exported a token.
+INVOKERS_ENVIRONMENT = ("PATH", "XDG_RUNTIME_DIR")
+
+
+def pipewire_read() -> dict:
     """The audio cards of AUDIO_VENDORS in one pw-dump (audio_cards), or, in words, why
     none was read: no pw-dump, or no PipeWire session to answer it, fails the report only
     where it read no Logitech node either (cmd_report). pw-dump only reads; nothing here
-    changes a card."""
+    changes a card. pw-dump runs with QUIET_PIPEWIRE and as the user who ran the report
+    under sudo, run0 or pkexec: it reads that user's PipeWire (use_invoking_users_runtime_dir,
+    which cmd_report calls first), whose socket any program of that user can serve, so it
+    gets that user's rights and no more, and of root's environment INVOKERS_ENVIRONMENT
+    alone, which that user's programs could read in /proc. Not checked under any of the
+    three: that pw-dump, run with that environment, finds that PipeWire."""
+    invoker = invoking_uid()
+    if invoker is None:
+        run = functools.partial(subprocess.run, env={**os.environ, **QUIET_PIPEWIRE})
+    else:
+        try:
+            group = pwd.getpwuid(invoker).pw_gid
+        except KeyError:
+            return {"unread": f"pw-dump was not run: no user has id {invoker}", "cards": []}
+        passed = {name: os.environ[name] for name in INVOKERS_ENVIRONMENT if name in os.environ}
+        run = functools.partial(subprocess.run, env={**passed, **QUIET_PIPEWIRE}, user=invoker,
+                                group=group, extra_groups=[])
     try:
         objects = pipewire_client.dump_objects(run)
     except pipewire_client.StepError as exc:
@@ -130,35 +183,18 @@ def pipewire_part(run: pipewire_client.Run) -> dict:
     return {"unread": None, "cards": audio_cards(objects)}
 
 
-#: pw-dump's environment beside this process's: libpipewire then logs nothing to stderr,
-#: which a failed pw-dump's words in the block are taken from. With a client.conf it could
-#: not parse it logged the file's path, in the home folder, and the line it failed on
-#: (pw-dump 1.6.2, 2026-10-25); with this, only "can't create context: Invalid argument".
-QUIET_PIPEWIRE = {"PIPEWIRE_DEBUG": "0"}
-
-
-def pipewire_read() -> dict:
-    """pipewire_part, pw-dump run with QUIET_PIPEWIRE and as the user who ran the report
-    under sudo, run0 or pkexec: it reads that user's PipeWire (use_invoking_users_runtime_dir,
-    which cmd_report calls first), whose socket any program of that user can serve, so it
-    gets that user's rights and no more. Not checked under any of the three: that pw-dump,
-    run with root's environment, finds that PipeWire."""
-    quiet = functools.partial(subprocess.run, env={**os.environ, **QUIET_PIPEWIRE})
-    invoker = invoking_uid()
-    if invoker is None:
-        return pipewire_part(quiet)
-    try:
-        group = pwd.getpwuid(invoker).pw_gid
-    except KeyError:
-        return {"unread": f"pw-dump was not run: no user has id {invoker}", "cards": []}
-    return pipewire_part(functools.partial(quiet, user=invoker, group=group, extra_groups=[]))
-
-
 def audio_cards(objects: list) -> list[dict]:
     """Each Audio/Device of AUDIO_VENDORS among pw-dump's objects, each value of another shape
     left out: None in its field, or no item in a list. No name of the card's or its nodes' is
     taken: PipeWire's ALSA monitor builds them from the USB serial, as
-    alsa_card.usb-Logitech_G432_Gaming_Headset_000000000000-00 (2026-10-18)."""
+    alsa_card.usb-Logitech_G432_Gaming_Headset_000000000000-00 (2026-10-18). Its description
+    is device.product.name, the USB product name, never device.description, which a
+    WirePlumber rule can set to a name the owner chose (monitor.alsa.rules' update-props,
+    applied after WirePlumber 0.5's monitors/alsa.lua builds the description from
+    device.product.name). libspa-alsa sets it from udev's ID_MODEL_FROM_DATABASE,
+    ID_MODEL_ENC or ID_MODEL beside device.product.id. The G432's card and the A50 X's carry
+    it (measured on PipeWire 1.6.2 and 1.6.10 on 2026-11-03); the A50 Gen 4's is not yet
+    measured."""
     cards = []
     for obj in objects:
         info = (obj.get("info") if isinstance(obj, dict)
@@ -169,7 +205,7 @@ def audio_cards(objects: list) -> list[dict]:
             continue
         cards.append({
             "vendor": vendor, "product": _text(props.get("device.product.id")),
-            "description": _text(props.get("device.description")),
+            "description": _text(props.get("device.product.name")),
             "profile_set": _text(props.get("device.profile-set")),
             "profiles": [name for entry in _entries(params, "EnumProfile")
                          if (name := _text(entry.get("name"))) is not None],
@@ -262,9 +298,10 @@ def cmd_report(args: argparse.Namespace) -> int:
     try:
         # A daemon `status` found down may start while the nodes are read: systemd restarts
         # a failed one 2 s after it stops (RestartSec).
-        nodes = gather(held, lambda: unsure or listening(socket_path()))
+        nodes = [with_verdict(node)
+                 for node in gather(held, lambda: unsure or listening(socket_path()))]
     except NotARead as exc:
-        print(f"error: {exc}, so the report stopped with it unsent; this is a fault in "
+        print(f"error: {exc}, so the report stopped without sending it; this is a fault in "
               "Gearbench: please report it", file=sys.stderr)
         return 1
     # An A50 Gen 4 has no Logitech node: its base station is on Astro's vendor id.
@@ -287,8 +324,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         print("```")
     # Before the advice, so a terminal shows the block first whatever buffers stdout.
     sys.stdout.flush()
-    warnings = [f"warning: {other_tool_problem(comm, pids)}; it can take the report's "
-                "replies" for comm, pids in others.items()]
+    warnings = ["warning: another program can take the report's replies: "
+                f"{other_tool_problem(comm, pids)}" for comm, pids in others.items()]
     for line in [*warnings, *advice(nodes, block=not args.json)]:
         print(escaped(line), file=sys.stderr)
     return 0
@@ -341,7 +378,8 @@ def card_lines(card: Mapping) -> list[str]:
 
 
 def node_lines(node: Mapping) -> list[str]:
-    """One node's lines: its sysfs part, its state, and what was read."""
+    """One node's lines: its sysfs part, its state, what was read, and last the verdict on
+    its model's record."""
     descriptor = node["descriptor"]
     where = (f"interface {node['interface']}" if node["interface"] is not None
              else "behind a receiver")
@@ -366,7 +404,17 @@ def node_lines(node: Mapping) -> list[str]:
     lines += ([f"  two reads back to back, {node['reply_order']['result']}"]
               if "reply_order" in node else [])
     lines.append(f"  failed: {'; '.join(node['failed']) or 'nothing'}")
-    return lines
+    return lines + _verdict_lines(node.get("verdict"))
+
+
+def _verdict_lines(found: Mapping | None) -> list[str]:
+    """The verdict on the node's model record (report_verdict.verdict): a line for each
+    assumption, those the reads confirm first."""
+    if found is None:
+        return []
+    return [f"  the {found['record']}'s record against these reads:",
+            *(f"    confirmed: {words}" for words in found["confirmed"]),
+            *(f"    differs: {words}" for words in found["differs"])]
 
 
 def _identity_lines(node: Mapping) -> list[str]:
@@ -409,14 +457,13 @@ def _effects(cluster: Mapping) -> str:
 
 def _section_lines(node: Mapping) -> list[str]:
     """The sections read from lighting to the equalizer, in read_device's order."""
-    lines = []
-    for cluster in node.get("lighting", {}).get("clusters", []):
-        lines.append(f"  lighting cluster {cluster['index']}, {cluster['name']} at "
-                     f"{cluster['location']}: {_effects(cluster)}")
-    if node.get("lighting", {}).get("brightness_levels"):
-        light = node["lighting"]
+    light = node.get("lighting", {})
+    lines = [f"  lighting cluster {cluster['index']}, {cluster['name']} at "
+             f"{cluster['location']}: {_effects(cluster)}" for cluster in light.get("clusters", [])]
+    if light.get("brightness_levels"):
+        # As `brightness` and `probe` give the levels.
         lines.append(f"  brightness: {light['brightness']}%, levels "
-                     f"{_words(light['brightness_levels'])}%")
+                     f"{percent_list_words(light['brightness_levels'])}")
     lines += _per_key_lines(node.get("per_key"))
     for zone in node.get("zones", {}).get("zones", []):
         lines.append(f"  zone {zone['index']}, {zone['name']} at {zone['location']}: "
@@ -433,10 +480,10 @@ def _section_lines(node: Mapping) -> list[str]:
     if "battery" in node:
         # level_words has no words for a reading with no percent on battery or in an unknown
         # state, as a 0x1001 or 0x1F20 one with no cell; its voltage is what a cell's curve
-        # is built from. In volts after the level, as status and g432-sidetone give it.
+        # is built from, after the level as every battery line gives it (volts_words).
         reading = node["battery"]
-        volts = f" ({reading['volts']} V)" if "volts" in reading else ""
-        lines.append(f"  battery: {reading_words(reading) or reading['state']}{volts}")
+        lines.append(f"  battery: {reading_words(reading) or reading['state']}"
+                     f"{volts_words(reading)}")
     if "dpi" in node:
         dpi = node["dpi"]
         lines.append(f"  DPI: {dpi['dpi']}, default {dpi['default']}, range "
@@ -451,9 +498,10 @@ def _section_lines(node: Mapping) -> list[str]:
         lines.append(f"  sidetone: {node['sidetone']['level']}")
     if "equalizer" in node:
         eq = node["equalizer"]
+        frequencies = f" at {_words(eq['frequencies'])} Hz" if eq["frequencies"] else ""
         # getEqInfo's bytes as they came: an end of 0 is dbRange's (g432.eq_range).
-        lines.append(f"  equalizer: {counted(eq['bands'], 'band')} at "
-                     f"{_words(eq['frequencies'])} Hz, dB range {eq['db_range']}, minimum "
+        lines.append(f"  equalizer: {counted(eq['bands'], 'band')}{frequencies}, dB range "
+                     f"{eq['db_range']}, minimum "
                      f"{eq['db_min']}, maximum {eq['db_max']}, capabilities "
                      f"0x{eq['capabilities']:02x}; "
                      f"gain bytes saved {_words(eq['saved_gains'])}, active "
@@ -509,11 +557,9 @@ def _per_key_lines(keys: Mapping | None) -> list[str]:
     """0x8081's zones in a line, as runs, and each page the device refused."""
     if keys is None:
         return []
-    runs = ", ".join(str(first) if first == last else f"{first} to {last}"
-                     for first, last in keys["zones"]) or "none"
     refused = "".join(f"; page {page['page']} refused: {page['refused']}"
                       for page in keys["pages"] if "refused" in page)
-    return [f"  per-key zones: {runs}{refused}"]
+    return [f"  per-key zones: {run_words(keys['zones'])}{refused}"]
 
 
 def _words(value: object) -> str:
@@ -532,12 +578,16 @@ DAEMON_MAY_OPEN = ("The daemon opens the devices this build drives while it look
                    "so those it does not hold were not read.")
 #: The steps to a read of every node the daemon kept the report from.
 FULL_READ = f"For the full read: `{STOP}`, run the report again, then `{START}`."
+#: The step to it as root with no invoking user (root_alone): root's `systemctl --user` never
+#: reaches the user's daemon, and a run again as root reads no more.
+ROOT_ALONE_READ = "For the full read: run the report as yourself, or with sudo, run0 or pkexec."
 
 
 def advice(nodes: list[dict], *, block: bool) -> list[str]:
     """Where to paste the block above, where the text form printed one (`block`), and what
     the person who ran the report can do about a node the daemon holds or may open, one on
-    the USB device of a node it holds, and one this account may not open."""
+    the USB device of a node it holds, one where nothing answered behind a receiver, and one
+    this account may not open."""
     paste = f"Paste the block above, both ``` lines included, into a device report: {REPORT_FORM}"
     lines = [paste] if block else []
     held = [node["node"] for node in nodes if node["state"] == HELD]
@@ -553,18 +603,25 @@ def advice(nodes: list[dict], *, block: bool) -> list[str]:
     if any(node["state"] == UNSURE for node in nodes):
         not_read.append(DAEMON_MAY_OPEN)
     if not_read:
-        # The stop and start are said once, after the last line of the devices not read.
-        not_read[-1] += f" {FULL_READ}"
+        # The step to the full read is said once, after the last line of the devices not read.
+        not_read[-1] += f" {ROOT_ALONE_READ if root_alone() else FULL_READ}"
     lines += not_read
+    asleep = [node["node"] for node in nodes if node["state"] == MAY_BE_ASLEEP]
+    if asleep:
+        lines.append(f"Nothing answered on {word_list(asleep, 'and')}: move "
+                     f"{'the device' if len(asleep) == 1 else 'each device'} or press one of "
+                     "its keys to wake it, or switch it on, then run the report again.")
     for node in nodes:
         if node["state"] == NO_PERMISSION:
             # "No permission to open", the words of the daemon, probe and the node's state.
-            lines.append(f"No permission to open {node['node']}. To grant it until the "
-                         f"device is unplugged: `sudo setfacl -m u:$USER:rw /dev/{node['node']}`")
+            lines.append(f"No permission to open {node['node']}.")
+            # The risk comes before the command, so it is read before the command is run.
             if node["descriptor"]["key_reports"]:
                 lines.append(f"{node['node']} carries the device's key reports too: until "
                              "it is unplugged, any program you run could read what is typed "
                              "on it.")
+            lines.append("To grant it until the device is unplugged: "
+                         f"`sudo setfacl -m u:$USER:rw /dev/{node['node']}`")
     return lines
 
 

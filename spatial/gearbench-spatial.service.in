@@ -25,8 +25,9 @@ Environment="PYTHONPATH=@CHECKOUT@"
 # saved in spatial.json and the output it plays to, and runs it, each time
 # that output changes: a change of the head or the headset is a restart. -s
 # keeps user site-packages off sys.path, so the package's gearbench, or the
-# checkout's on PYTHONPATH, renders the chain.
-ExecStart=/usr/bin/python3 -s -P -m gearbench.spatial_unit run %t/gearbench-spatial.conf
+# checkout's on PYTHONPATH, renders the chain. The interpreter is the one
+# install.sh picks, and the package's build writes /usr/bin/python3 there.
+ExecStart=@PYTHON@ -s -P -m gearbench.spatial_unit run %t/gearbench-spatial.conf
 Restart=on-failure
 RestartSec=2
 SyslogIdentifier=gearbench-spatial
@@ -40,4 +41,7 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 
 [Install]
-WantedBy=default.target
+# Wanted by PipeWire, as WirePlumber is, so it starts with each start of the
+# session's PipeWire: default.target is reached once per user manager, which
+# lingering or another session of the account keeps across a logout.
+WantedBy=pipewire.service

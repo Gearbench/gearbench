@@ -15,18 +15,29 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..config import (
+    BALANCE_ACTIONS,
     BINDABLE_KEYS,
     G_KEYS,
+    G_SHIFT,
     HEADSET_ACTIONS,
     HEADSET_DEFAULTS,
     HEADSET_KEYS,
+    NOTHING,
     PROFILE_IDS,
     format_color,
     key_binding,
     own_keys_words,
     validate_binding,
 )
-from ..daemon import BUSY, DOWN, UNKNOWN, failure, socket_path, use_invoking_users_runtime_dir
+from ..daemon import (
+    BUSY,
+    DOWN,
+    UNKNOWN,
+    failure,
+    root_alone,
+    socket_path,
+    use_invoking_users_runtime_dir,
+)
 from ..hidpp import NO_RULE, HidppError, HidppFailure, UnreadableAnswer, open_device
 from ..keyboard import (
     MODEL_OF as KEYBOARDS,
@@ -51,22 +62,23 @@ from ..lighting import (
 )
 from ..mouse_lighting import ZoneLighting
 from ..onboard import F_ONBOARD, MODE_NAMES, read_mode
+from ..pipewire_headsets import FIRST_CONNECTED
 from ..report import untested, untested_note
 from ..settings_files import ConfigError
 from ..uinput import KEY_NAMES, MODIFIERS
 from ..wording import counted, escaped, reason, word_list
 from .output import (
-    CLEAR_WORDS,
-    M_PROFILE_LABELS,
+    CLEAR_HELP,
     PROBE_WAIT,
     STOP,
     FieldWords,
     Subcommands,
-    m_profile_words,
+    cleared_binding,
     on_off,
     percent_list_words,
     percent_words,
     print_json,
+    print_m_profile_reply,
     print_reply,
     send,
     with_unit,
@@ -80,10 +92,16 @@ if TYPE_CHECKING:
 BRIGHTNESS_WORDS: FieldWords = {"requested": percent_words, "applied": percent_words,
                                 "levels": percent_list_words}
 EFFECT_WORDS: FieldWords = {"speed": with_unit("ms")}
+#: bind's reply's binding for a key left unbound (null), which config gives apart from NOTHING.
+UNBOUND = "unbound"
+BIND_WORDS: FieldWords = {"binding": lambda value: UNBOUND if value is None else None}
+#: sync-keyboard's reply's sync_keyboard where none is chosen, as config gives the leader.
+LEADER_WORDS: FieldWords = {"sync_keyboard":
+                            lambda value: FIRST_CONNECTED if value is None else None}
 
 #: `--keyboard`'s words: whole where it is required, on keyboard-follow, and before the
 #: keyboard taken without it where it is not (keyboard_option).
-KEYBOARD_NAMED = "the keyboard it is for, by model name or product id, as G515 TKL or c358"
+KEYBOARD_NAMED = "the keyboard to act on, by model name or product id, as G515 TKL or c358"
 #: The keyboard a lighting command acts on without it: the owner's decision of 2026-10-21,
 #: "The leader, --keyboard for another".
 LEADER = "the one that leads"
@@ -106,11 +124,8 @@ def for_keyboard(args: argparse.Namespace, request: dict) -> dict:
 
 def _daemon_running(state: str) -> int:
     """What probe says when a daemon holds the node it would read."""
-    print(f"error: the daemon {state}, and probe would compete with it for "
-          f"replies. Stop it first:\n"
-          f"    {STOP}\n"
-          f"or pass --force to risk a misread.",
-          file=sys.stderr)
+    print(f"error: the daemon {state}, and probe would compete with it for replies; stop "
+          f"it first with `{STOP}`, or pass --force to risk a misread", file=sys.stderr)
     return 1
 
 
@@ -121,9 +136,9 @@ def _print_probe(found: dict) -> None:
     if found["untested"]:
         print(f"              {untested_note(found['name'])}")
     print(f"capabilities: {', '.join(found['capabilities']) or 'none this build drives'}")
-    if found["onboard_mode"] is not None:
-        print(f"onboard mode: {found['onboard_mode']} "
-              f"(the daemon runs the keyboard in host mode)")
+    if (mode := found["onboard_mode"]) is not None:
+        # A byte MODE_NAMES does not name is in hex, as the rest of the dump gives bytes.
+        print(f"onboard mode: {mode if isinstance(mode, str) else f'0x{mode:02x}'}")
     for cluster in found["clusters"]:
         print(f"cluster {cluster['index']} ({cluster['name']}, "
               f"location 0x{cluster['location']:04x}):")
@@ -141,9 +156,16 @@ def _print_probe(found: dict) -> None:
               f"0x{found['sw_control']:02x} ({state})")
 
 
+#: probe's refusal as root with no invoking user (invoking_uid), as after su - or doas: the
+#: daemon runs as a user's own account, never in root's runtime folder, where this looks.
+PROBE_ROOT_ALONE = ("cannot tell whether the daemon is running as your own account, which root "
+                    "with no invoking user cannot ask; run probe as yourself, or with sudo, run0 "
+                    "or pkexec, or pass --force to risk a misread")
+
+
 def _daemon_beside() -> int | None:
     """probe's exit status where a daemon is running or may be, with the refusal said; None
-    where none is."""
+    where none is. Root with no invoking user cannot ask the user's daemon, so it may be."""
     use_invoking_users_runtime_dir()
     # Only DOWN means no daemon. Any answer shows one, an unreadable one included, and so
     # does BUSY: a daemon is slowest when busy on the device. UNKNOWN says nothing either
@@ -152,15 +174,17 @@ def _daemon_beside() -> int | None:
         send({"command": "status"}, timeout=PROBE_WAIT)
     except (OSError, json.JSONDecodeError) as exc:
         kind = failure(exc)
+        if kind == DOWN and root_alone():
+            print(f"error: {PROBE_ROOT_ALONE}", file=sys.stderr)
+            return 1
         if kind == DOWN:
             return None
         if kind == BUSY:
             return _daemon_running("is running and did not answer in time")
         if kind == UNKNOWN:
             print(f"error: cannot tell whether the daemon is running: {escaped(socket_path())}: "
-                  f"{reason(exc)}. If one is, stop it first:\n"
-                  f"    {STOP}\n"
-                  f"otherwise pass --force.", file=sys.stderr)
+                  f"{reason(exc)}; if one is, stop it first with `{STOP}`, otherwise pass "
+                  f"--force", file=sys.stderr)
             return 1
     return _daemon_running("is running")
 
@@ -169,34 +193,38 @@ def _open_keyboard(wanted: str | None) -> tuple[Path, int, Hidpp, int] | None:
     """The first keyboard plugged in that answers, by attached_keyboards' order, or with
     `wanted`, a model's key, that model's, as (node, product, the node opened, device index),
     or None with the reason said. A node with nothing answering, a receiver's with its
-    keyboard off, gives way to the next."""
+    keyboard off, gives way to the next, and so does one that cannot be opened, whose cause
+    is said where no keyboard answers: the first such node's."""
     attached = attached_keyboards()
     if wanted is not None:
         attached = [found for found in attached if model_key(found[1]) == wanted]
         if not attached:
-            print(f"error: no {key_name(wanted)} found, on a cable or through a receiver. "
-                  f"Check that it is plugged in.", file=sys.stderr)
+            print(f"error: no {key_name(wanted)} found on a cable or through a receiver; "
+                  f"check that it is plugged in", file=sys.stderr)
             return None
     if not attached:
         known = word_list(sorted(set(KEYBOARD_MODELS.values())), "and")
-        print(f"error: no keyboard Gearbench drives found, on a cable or through a receiver; "
-              f"it drives the {known}. Check that one is plugged in.", file=sys.stderr)
+        print(f"error: no keyboard Gearbench drives found on a cable or through a receiver; "
+              f"check that one is plugged in (it drives the {known})", file=sys.stderr)
         return None
+    refused: str | None = None
     for path, product, derived in attached:
         try:
             opened = open_device(path, **opening(product, derived))
         except PermissionError:
-            print(f"error: no permission to open {path}: {NO_RULE}", file=sys.stderr)
-            return None
+            refused = refused or f"no permission to open {path}: {NO_RULE}"
+            continue
         except OSError as exc:
-            print(f"error: cannot open {path}: {reason(exc)}", file=sys.stderr)
-            return None
+            refused = refused or f"cannot open {path}: {reason(exc)}"
+            continue
         if opened is not None:
             return path, product, *opened
+    if refused is not None:
+        print(f"error: {refused}", file=sys.stderr)
+        return None
     nodes = word_list([str(found[0]) for found in attached], "and")
-    print(f"error: a Logitech device is on {nodes} but no keyboard answered. If the "
-          f"keyboard is on a receiver, check that it is switched on.",
-          file=sys.stderr)
+    print(f"error: a Logitech device is on {nodes} but no keyboard answered; if the "
+          f"keyboard is on a receiver, check that it is switched on", file=sys.stderr)
     return None
 
 
@@ -322,29 +350,24 @@ def cmd_keys(args: argparse.Namespace) -> int:
 
 
 def cmd_bind(args: argparse.Namespace) -> int:
-    """Bind a G key to a key spec or to `macro:<name>`, or a headset's to one of its actions
-    too (config.HEADSET_ACTIONS).
-
-    The spec is checked here, so a typo fails without a round trip. A macro name is
-    checked for its form only: the daemon owns the library, and a binding may name a
-    macro not yet written. A headset's key cleared does nothing, as a mouse button's does:
-    unbound, a headset's G1 would run its default.
+    """Bind a G key, on the base layer or with `--g-shift` the G-Shift one, to a binding
+    config.key_binding takes, checked here so a typo fails without a round trip. A headset's
+    key cleared on the base layer does nothing, as a mouse button's does: unbound, a headset's
+    G1 would run its default (output.cleared_binding).
     """
-    spec = None if args.binding.strip().lower() in CLEAR_WORDS else args.binding
-    if spec is None and args.key in HEADSET_KEYS:
-        spec = "none"
+    spec = cleared_binding(args.binding, shift=args.shift, to_nothing=args.key in HEADSET_KEYS)
     if spec is not None:
         try:
             # key_binding reads "" as unbound, as a file holds it; typed, "" is refused,
             # so an empty argument never clears a key.
-            if key_binding(args.key, spec, "binding") is None:
+            if key_binding(args.key, spec, "binding", args.shift) is None:
                 validate_binding(spec, "binding")
         except ConfigError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
     return print_reply(send({
         "command": "bind", "key": args.key, "value": spec, "shift": args.shift,
-    }), args.json)
+    }), args.json, BIND_WORDS)
 
 
 def speed_ranges() -> str:
@@ -375,14 +398,13 @@ def add_lighting_and_bind(sub: Subcommands) -> None:
     # 1.1.0, still works (the owner's decision of 2026-10-22).
     p = sub.add("m-profile", help="switch the M profile, as M1 to M3 do", aliases=("profile",))
     p.add_argument("index", type=int, choices=PROFILE_IDS)
-    p.set_defaults(func=lambda a: print_reply(send({"command": "profile", "value": a.index}),
-                                              a.json, {"profile": m_profile_words},
-                                              M_PROFILE_LABELS))
+    p.set_defaults(func=lambda a: print_m_profile_reply(
+        send({"command": "profile", "value": a.index}), a.json))
 
-    b = keyboard_option(sub.add("brightness", help="set the brightness"))
+    b = keyboard_option(sub.add("brightness", help="set the keyboard's brightness"))
     b.add_argument("level", type=int,
-                   help="0 to 100, floored to a level the device keeps; the G915's are 0, 12, 25, "
-                        "50 and 100")
+                   help="a percent, 0 to 100, rounded down to a level the keyboard keeps; the G915's "
+                        "are 0, 12, 25, 50 and 100")
     b.set_defaults(func=lambda a: print_reply(send(for_keyboard(
         a, {"command": "brightness", "value": a.level})), a.json, BRIGHTNESS_WORDS))
 
@@ -394,14 +416,16 @@ def add_lighting_and_bind(sub: Subcommands) -> None:
     c.set_defaults(func=lambda a: print_reply(send(for_keyboard(
         a, {"command": "color", "value": a.value})), a.json))
 
-    pv = keyboard_option(sub.add("preview", help="repaint without saving, as a color drag does"))
+    pv = keyboard_option(sub.add("preview", help="show the color on the keyboard without saving "
+                                                 "it, as dragging the color picker does"))
     pv.add_argument("value", metavar="#RRGGBB", help="six hex digits like #0080ff")
     pv.set_defaults(func=lambda a: print_reply(send(for_keyboard(
         a, {"command": "preview", "value": a.value})), a.json))
 
     kf = sub.add("keyboard-follow",
-                 help="on (the default): while another keyboard leads, this one shows its "
-                      "lighting at its brightness; off: its own")
+                 help="on (the default): while another keyboard leads, this one shows the "
+                      "leader's lighting at the leader's brightness; off: its own lighting at "
+                      "its own brightness")
     kf.add_argument("state", choices=["on", "off"])
     kf.add_argument("--keyboard", metavar="MODEL|ID", required=True, help=KEYBOARD_NAMED)
     kf.set_defaults(func=lambda a: print_reply(send(
@@ -411,15 +435,15 @@ def add_lighting_and_bind(sub: Subcommands) -> None:
     e = keyboard_option(sub.add("effect", help="set the lighting effect, saved to the loaded "
                                                "game profile or else the M profile"))
     e.add_argument("name", choices=sorted(KEYBOARD_EFFECTS),
-                   help="one the keyboard has, which a refusal names")
+                   help="one the keyboard has; a refusal of one it lacks names those it has")
     e.add_argument("--speed", type=int, metavar="MS",
                    help=f"how long one cycle takes, in milliseconds; lower is faster: "
                         f"{speed_ranges()}")
     # Each with the Direction row's words, so a reader of both sees one choice.
     directions = ", ".join(f"{name} ({words.lower()})" for name, words in DIRECTION_WORDS.items())
     e.add_argument("--direction", choices=list(DIRECTION_WORDS),
-                   help=f"wave only, one the keyboard takes, which a refusal names: {directions}; "
-                        "horizontal until one is chosen")
+                   help=f"wave only: {directions}, one the keyboard takes; a refusal of one it "
+                        "lacks names those it takes; horizontal until one is chosen")
     e.add_argument("--second-color", metavar="#RRGGBB",
                    help=f"{word_list(TWO_COLORED, 'and')} only, the color it runs beside the "
                         f"one `color` sets; {format_color(DEFAULT_SECOND_COLOR)} until one is "
@@ -428,7 +452,7 @@ def add_lighting_and_bind(sub: Subcommands) -> None:
 
     bind = sub.add("bind", help="bind a G key, e.g. `bind G1 ctrl+f15`")
     # One model's name may stand for several ids. Only where it acts: an untested model's
-    # writes are refused, so its unbound G keys do what they do without Gearbench.
+    # writes are refused, so its unbound G keys send what the keyboard sends in its host mode.
     silent = sorted({model.name for model in KEYBOARDS.values()
                      if model.reports_unbound and model.assignments_tested})
     # The headsets' keys that run something unbound, by what they run.
@@ -436,19 +460,24 @@ def add_lighting_and_bind(sub: Subcommands) -> None:
     for key, action in HEADSET_DEFAULTS.items():
         defaults.setdefault(action, []).append(key)
     bind.add_argument("key", type=str.upper, choices=BINDABLE_KEYS, metavar="KEY",
-                      help=f"{G_KEYS[0]} to {G_KEYS[-1]}, which do nothing unbound, or "
-                           f"{own_keys_words('or')}, where an unbound one does what it does "
-                           f"without Gearbench, or nothing on a {word_list(silent)}, but "
+                      help=f"{G_KEYS[0]} to {G_KEYS[-1]}, which do nothing unbound; or a "
+                           f"model's own keys: {own_keys_words()}. Unbound, these send what "
+                           "the keyboard sends for them while Gearbench runs, F13 to F21 on a "
+                           f"G915 X's G keys, but nothing on a {word_list(silent)}, and "
                            + word_list([f"{action} on {word_list(keys, 'and')}"
                                         for action, keys in defaults.items()]))
     bind.add_argument("binding",
                       help="a key spec like ctrl+shift+f5, a modifier alone like shift, "
                            "keys held together like a+b, 'macro:<name>' to run a macro, "
-                           f"or {word_list(CLEAR_WORDS)} to clear; on a headset's key also "
-                           f"{word_list(HEADSET_ACTIONS[1:])}")
-    # --shift, its name in 1.1.0, still works.
-    bind.add_argument("--mr", "--shift", dest="shift", action="store_true",
-                      help="bind on the MR layer")
+                           f"or {CLEAR_HELP}, but on a keyboard's key without --g-shift {NOTHING} "
+                           f"clears it too; {G_SHIFT} to hold G-Shift; "
+                           f"{word_list(BALANCE_ACTIONS)} to move Outputs' balance one stop; "
+                           f"on a headset's key also {word_list(HEADSET_ACTIONS[1:])}")
+    # --shift, its name in 1.1.0, still works, and --mr, its name in 1.2.0.
+    bind.add_argument("--g-shift", "--mr", "--shift", dest="shift", action="store_true",
+                      help="bind on the G-Shift layer, used while MR, or a key or button bound "
+                           "to g-shift, is held; there a cleared key sends its base binding, "
+                           f"but one bound to {NOTHING} does nothing")
     bind.set_defaults(func=cmd_bind)
 
 
@@ -460,10 +489,12 @@ def add_leader(sub: Subcommands) -> None:
     # MODEL|ID, as --keyboard and --mouse show the same kind of argument.
     sk.add_argument("model", metavar="MODEL|ID",
                     help="a keyboard model by name or product id, as G915 or c33e, or first "
-                         "for the keyboard connected first since the daemon started")
+                         "for the one connected first since the daemon started of those still "
+                         "connected")
     sk.set_defaults(func=lambda a: print_reply(send(
         {"command": "sync_keyboard",
-         "value": None if a.model.strip().lower() == "first" else a.model}), a.json))
+         "value": None if a.model.strip().lower() == "first" else a.model}), a.json,
+        LEADER_WORDS))
 
 
 def add_probe_and_keys(sub: Subcommands) -> None:

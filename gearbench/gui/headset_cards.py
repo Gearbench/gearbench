@@ -16,18 +16,18 @@ out (`Writes`), a reply leaves its sliders, or its effect and color, as they are
 from __future__ import annotations
 
 from collections.abc import Callable
-from functools import partial
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from gi.repository import Adw, GObject, Gtk
 
-from ..config import format_color, parse_color
+from ..config import NOTHING, format_color, parse_color
 from ..g432 import HeadsetModel
+from ..headset_lights import FULL_BRIGHTNESS
 from ..keyboard import followed
 from ..wording import hertz, signed
-from .binding_rows import binding_row, binding_words, read_pick, show_binding
-from .color import ColorPicker, SavedColors
-from .dialogs import CaptureDialog
+from .binding_labels import NOTHING_ACTION, SHARED_ACTIONS, SHARED_TIPS
+from .binding_rows import LayerRows, bound_toast, undo_offered
+from .color import RELEASE_HELP, ColorPicker, SavedColors
 from .library_card import HEADSET, LibraryCard
 from .style import (
     CHANGES_WAIT,
@@ -36,6 +36,7 @@ from .style import (
     FOLLOW,
     GEARBENCH_LIGHTING_SHOWN,
     LIGHTS_OWN,
+    NOT_READ,
     OWN_LIGHTING_SHOWN,
     PRESET,
     SYNC_HELP,
@@ -44,6 +45,7 @@ from .style import (
     confirm,
     effect_label,
     effect_tips,
+    no_color_line,
     plain_row,
     preset_label,
     spoken_scale,
@@ -64,12 +66,15 @@ HEADSET_EQ_HELP = "In the headset; a preset picked comes back each time it conne
 FLAT = "Flat"
 #: The one equalizer in the headset, the headphones', as its library's rows know it.
 HEADPHONES = "headphones"
-#: The lights: the Color row's line, and the tooltip of the row that gives the lighting
-#: back to the headset (style.LIGHTS_OWN); and the switch of the effect they show as the
-#: headset switches on, G HUB's name for it.
-LIGHTS_COLOR_HELP = "Sent when you let go"
+#: The lights: the tooltip of the row that gives the lighting back to the headset
+#: (style.LIGHTS_OWN); and the switch of the effect they show as the headset switches on,
+#: G HUB's name for it.
 LIGHTS_OWN_HELP = "The lighting the headset shows without Gearbench"
 STARTUP_EFFECT = "Startup effect"
+#: The Effect row's line where a G key's lighting step turned the lights off or dimmed them,
+#: with the level in percent, as `g432-lights` says it.
+LIGHTS_OFF_BY_KEY = "Turned off by a G key"
+LIGHTS_DIMMED_BY_KEY = "Dimmed to {}% by a G key"
 #: The row that keeps the lighting shown in the headset as its own, its ellipsis for the
 #: question it opens (the HIG's writing style), and its tooltip; the question, since it writes
 #: over the lighting the headset keeps, and its response.
@@ -77,27 +82,31 @@ LIGHTS_STORE = "Save as its own lighting"
 LIGHTS_STORE_OPENER = f"{LIGHTS_STORE}…"
 LIGHTS_STORE_HELP = "The headset keeps it through a power-off"
 LIGHTS_STORE_HEADING = f"{LIGHTS_STORE}?"
-LIGHTS_STORE_BODY = "The headset keeps the lighting shown now in place of its own."
+LIGHTS_STORE_BODY = ("The headset keeps the effect and color at full brightness in place of its "
+                     "own lighting.")
 LIGHTS_STORE_RESPONSE = "Save"
 #: The Lighting group's line where the writes the headset keeps wait for a test: the store's
 #: row is a button row, with no line of its own, and Startup effect says it on its row.
-STORE_WAITS = f"{LIGHTS_STORE} waits {TEST_WAIT}"
-#: A G key's binding to nothing, what a clear sends.
-UNBOUND = "none"
+STORE_WAITS = f"Saving as its own lighting waits {TEST_WAIT}"
 #: A G key row's built-in actions, in config.HEADSET_ACTIONS' order (the owner's answers of
-#: 2026-10-25), and one tooltip line per entry, in the rows' order: these, then
-#: binding_rows.CHOICES.
-G_KEY_CHOICES = [(UNBOUND, "Nothing"), ("brightness-cycle", "Brightness cycle"),
+#: 2026-10-25), then binding_labels.SHARED_ACTIONS; the tooltip line of each by its binding;
+#: and one tooltip line per entry, in the rows' order: these, looked up by binding, so a
+#: reorder keeps each tip on its action and an action added with no tip fails at import,
+#: then binding_rows.CHOICES'.
+G_KEY_CHOICES = [NOTHING_ACTION, ("brightness-cycle", "Brightness cycle"),
                  ("lights-toggle", "Lighting on or off"), ("eq-next", "Next equalizer preset"),
-                 ("sidetone-toggle", "Sidetone on or off")]
-G_KEY_TIPS = ("The key does nothing.",
-              "Steps the lighting down to off, then back to full.",
-              "Turns the lighting off, or back on at full.",
-              "Plays the next preset of the equalizer's library.",
-              "Turns sidetone off, or back on at its level.",
-              "Pick a key or a combination for this key.",
-              "Pick one of your macros for this key.")
-G_KEY_CHANGE_HELP = "Pick another key or macro for this key"
+                 ("sidetone-toggle", "Sidetone on or off"), *SHARED_ACTIONS]
+_ACTION_TIPS = {NOTHING: "The key does nothing.",
+                "brightness-cycle": "Steps the lighting down to off, then back to full.",
+                "lights-toggle": "Turns the lighting off, or back on at full.",
+                "eq-next": ("Plays the next preset of the equalizer's library; does nothing on "
+                            "a G635."),
+                "sidetone-toggle": "Turns sidetone off, or back on at its level.",
+                **SHARED_TIPS}
+G_KEY_TIPS = (*(_ACTION_TIPS[value] for value, _label in G_KEY_CHOICES),
+              "Pick a key or a combination for this G key.",
+              "Pick one of your macros for this G key.")
+G_KEY_CHANGE_HELP = "Pick another key or macro for this G key"
 
 
 def band_row(name: str, low: int, high: int,
@@ -137,10 +146,12 @@ class HeadsetEqCard:
     """The equalizer in the headset: its Preset row, which lists the model's library, Flat
     and Custom, the library's rows (LibraryCard, `saved`), and a row a band, built from the
     reply's bands. `settle_ms` is the page's wait after the last move before a send; `worker`
-    reads and saves the library."""
+    reads and saves the library, and `kept_up` is told of a change of it that failed
+    (Window.kept_up)."""
 
     def __init__(self, worker: DaemonWorker, toast: Callable[..., object],
-                 loading: LoadingGuard, call: Call, answered: Done, settle_ms: int) -> None:
+                 kept_up: Callable[[], None], loading: LoadingGuard, call: Call,
+                 answered: Done, settle_ms: int) -> None:
         self._loading = loading
         self._writes = Writes(call, answered)
         self._settle_ms = settle_ms
@@ -165,8 +176,8 @@ class HeadsetEqCard:
         self.group.add(self.preset_row)
         #: Why the last reply refuses a write, None while none is.
         self._refused: object = None
-        self.saved = LibraryCard(worker, toast, self._saved_changed, HEADSET)
-        self.saved.add_rows(HEADPHONES, self.group, self._shown)
+        self.saved = LibraryCard(worker, toast, kept_up, self._saved_changed, HEADSET)
+        self.saved.add_rows(HEADPHONES, self.group, self._shown, None)
         self.rows: list[Adw.ActionRow] = []
         self.scales: list[Gtk.Scale] = []
 
@@ -187,7 +198,9 @@ class HeadsetEqCard:
         """The group from the reply's `equalizer` of `model`, hidden without one: the rows
         built again for bands or a range of their own, which drops a send still settling,
         each slider at the gain the headset plays, unless a send settles or a write is out,
-        the Preset row and the library's rows for those gains, and every row insensitive with
+        the Preset row and the library's rows for those gains, Save as new keeping the
+        sliders' gains where a send or a write held them and the rows were not built again
+        (LibraryCard.keep), as a move does (on_gain), and every row insensitive with
         CHANGES_WAIT as the group's line while a write is refused."""
         self.group.set_visible(isinstance(eq, dict))
         self.saved.model_shown(model if isinstance(eq, dict) else None)
@@ -195,13 +208,15 @@ class HeadsetEqCard:
             return
         bands = tuple(eq.get("frequencies") or ())
         low, high = eq.get("range") or (0, 0)
-        if (bands, low, high) != self._built:
+        rebuilt = (bands, low, high) != self._built
+        if rebuilt:
             # The new sliders hold no gain the user moved: they start at the range's floor.
             self._send.cancel()
             self._built = (bands, low, high)
             self._build(bands, low, high)
         gains = eq.get("active") or []
-        if not self._send.pending and not self._writes.out and len(gains) == len(bands):
+        held = bool(self._send.pending or self._writes.out)
+        if not held and len(gains) == len(bands):
             self._gains = list(gains)
             for row, scale, gain in zip(self.rows, self.scales, gains, strict=True):
                 self._loading.put_value(scale, gain)
@@ -213,12 +228,14 @@ class HeadsetEqCard:
                   if len(gains) == len(bands) else None)
         self._flat = not any(gains)
         self.saved.show(HEADPHONES, played, not refused)
+        if held and not rebuilt:
+            self.saved.keep(HEADPHONES, self._heard())
         self._saved_changed()
 
     def _saved_changed(self) -> None:
         """The Preset row (_show_presets) and the group's line: CHANGES_WAIT while a write is
-        refused, else why the library takes no change (LibraryCard.said), else
-        HEADSET_EQ_HELP."""
+        refused, else why the library takes no change or no new preset (LibraryCard.said),
+        else HEADSET_EQ_HELP."""
         self.group.set_description(CHANGES_WAIT if self._refused
                                    else self.saved.said() or HEADSET_EQ_HELP)
         self._show_presets()
@@ -274,6 +291,12 @@ class HeadsetEqCard:
         row.set_subtitle(signed(round(scale.get_value())))
         if not self._loading.active:
             self._send.restart(self._settle_ms)
+            self.saved.keep(HEADPHONES, self._heard())
+
+    def _heard(self) -> list[dict]:
+        """The sliders' gains, a band each in the reply's format."""
+        return [{"freq": freq, "gain": round(scale.get_value())}
+                for freq, scale in zip(self._built[0], self.scales, strict=True)]
 
     def _send_gains(self) -> None:
         """The sliders' gains to the headset, unless they are the last reply's or send's."""
@@ -311,9 +334,10 @@ class LightsCard:
         #: The effects the Effect row lists, by name, in its order.
         self._effects: list[str] = []
         #: How many follow switches are out, whose read puts the switch as the daemon has it;
-        #: and the last reply's lights and flash_refused, which a flip of it shows again.
+        #: and the last reply's lights, flash_refused and whether the headset answered, which
+        #: a flip of it shows again.
         self._sync_out = 0
-        self._shown: tuple[dict, object] = ({}, None)
+        self._shown: tuple[dict, object, bool] = ({}, None, True)
         self.group = Adw.PreferencesGroup(title="Lighting", visible=False)
         self.sync_row = Adw.SwitchRow(title=FOLLOW.format(followed(None)), subtitle=SYNC_HELP)
         self.sync_row.connect("notify::active", self.on_sync)
@@ -325,7 +349,7 @@ class LightsCard:
         self.effect_row.connect("notify::selected", self.on_effect)
         self.group.add(self.effect_row)
         self.picker = ColorPicker(lambda _color: None, self._send, toast,
-                                  subtitle=LIGHTS_COLOR_HELP)
+                                  subtitle=RELEASE_HELP)
         #: The Saved colors row under the picker, which Window.rebuild_saved fills.
         self.saved = SavedColors(self.picker, parent)
         self.group.add(self.picker.row)
@@ -334,19 +358,23 @@ class LightsCard:
         self.own_row = Adw.ButtonRow(title=LIGHTS_OWN, tooltip_text=LIGHTS_OWN_HELP)
         self.own_row.connect("activated", self.on_own)
         self.group.add(self.own_row)
+        # The A50's Load preset to headset… icon: a write into the headset, where the save
+        # icons are the presets' on this computer.
         self.store_row = Adw.ButtonRow(title=LIGHTS_STORE_OPENER, tooltip_text=LIGHTS_STORE_HELP,
-                                       start_icon_name="document-save-symbolic")
+                                       start_icon_name="document-send-symbolic")
         self.store_row.connect("activated", self.on_store)
         self.group.add(self.store_row)
         self.startup_row = Adw.SwitchRow(title=STARTUP_EFFECT, visible=False)
         self.startup_row.connect("notify::active", self.on_startup)
         self.group.add(self.startup_row)
 
-    def show(self, lights: object, flash_refused: object = None) -> None:
+    def show(self, lights: object, flash_refused: object = None, answering: bool = True) -> None:
         """The group from the reply's `lights`, hidden without them: the follow switch as the
         reply's `synced` gives it unless one is out, the effects, the one Gearbench last wrote
-        picked unless a write is out, and on the picker, unless a color is being picked or
-        typed, the keyboard's color while the lights follow it, else the color that effect
+        picked unless a write is out, under it, unless a write is out or the switch is on and
+        the lights take the keyboard's color (`follows`), the off or dimmed level a G key set
+        (key_level), and on the picker, unless a color is being picked or
+        typed, the keyboard's color while both hold, else the color that effect
         was written with unless a write is out; every row but the follow switch insensitive
         with CHANGES_WAIT as the group's line while the headset's writes are refused, else
         STORE_WAITS where the reply's `flash_refused` refuses the writes the headset keeps,
@@ -356,15 +384,18 @@ class LightsCard:
         write is out; both insensitive too where `flash_refused` refuses them, Startup effect
         saying WAITS_FOR_TEST on its row. While the lights follow
         the keyboard, the Effect and Color rows, Show its own lighting and Save as its own
-        lighting are insensitive, as the Mouse tab's own color rows are."""
+        lighting are insensitive, as the Mouse tab's own color rows are; else the Color row
+        is under an effect that takes no color (_show_picker). While the headset does not
+        answer (`answering` false), every row but the follow switch is insensitive: the switch
+        is Gearbench's, live while the headset is away, as the Mouse tab's is."""
         self.group.set_visible(isinstance(lights, dict))
         if not isinstance(lights, dict):
             return
-        self._shown = (lights, flash_refused)
+        self._shown = (lights, flash_refused, answering)
         if not self._sync_out:
             self._loading.put_active(self.sync_row, lights.get("synced") is True)
         synced = self.sync_row.get_active()
-        self._show_kept(lights, flash_refused, synced)
+        self._show_kept(lights, flash_refused, synced, answering)
         effects = [name for name in lights.get("effects") or () if isinstance(name, str)]
         if effects != self._effects:
             self._effects = effects
@@ -376,19 +407,38 @@ class LightsCard:
         shown = shown if isinstance(shown, dict) and not self._writes.out else {}
         if shown.get("effect") in effects:
             self._loading.put_selected(self.effect_row, effects.index(shown["effect"]))
-        if synced:
+        follows = synced and lights.get("follows") is True
+        if follows:
             self._take_color(self._kb_base())
         elif isinstance(shown.get("color"), str):
             self._take_color(parse_color(shown["color"], "lights color"))
         refused = lights.get("refused")
+        # Lights sync sends nothing (not_driven) show what a G key left, as g432-lights says.
+        self.effect_row.set_subtitle(
+            "" if not shown or follows else key_level(lights.get("brightness")))
         claimed = lights.get("claimed") is True
         self.group.set_description(
             CHANGES_WAIT if refused else STORE_WAITS if flash_refused
             else GEARBENCH_LIGHTING_SHOWN if claimed else OWN_LIGHTING_SHOWN)
-        own = not refused and not synced
-        for row in (self.effect_row, self.picker.row):
-            row.set_sensitive(own)
+        own = answering and not refused and not synced
+        self.effect_row.set_sensitive(own)
+        self._show_picker()
         self.own_row.set_sensitive(own and claimed)
+
+    def _show_picker(self) -> None:
+        """The picker on while Gearbench writes the lights under an effect that takes a color;
+        under Off or one with no color of its own (mouse.COLORLESS_EFFECTS) grayed out with the
+        Keyboard tab's line saying why (style.no_color_line); while the follow switch is on it
+        is grayed out without that line, showing the keyboard's color where the lights take
+        it (`follows`)."""
+        synced = self.sync_row.get_active()
+        index = self.effect_row.get_selected()
+        effect = self._effects[index] if index < len(self._effects) else None
+        no_color = None if synced else no_color_line(effect)
+        self.picker.row.set_subtitle(no_color or RELEASE_HELP)
+        lights, _flash_refused, answering = self._shown
+        self.picker.row.set_sensitive(no_color is None and not synced and answering
+                                      and not lights.get("refused"))
 
     def _take_color(self, color: int) -> None:
         """`color` on the picker, but not under a drag, a run of keys or a color being typed,
@@ -397,18 +447,15 @@ class LightsCard:
         if not self.picker.dragging and not self.picker.typing(self._parent):
             self.picker.set_color(color)
 
-    def set_usable(self, usable: bool) -> None:
-        """The group on while the headset answers."""
-        self.group.set_sensitive(usable)
-
     def take_leader(self, leader: str | None) -> None:
         """The follow switch named for the keyboard that leads, by its key, as the Mouse
         tab's is."""
         self.sync_row.set_title(FOLLOW.format(followed(leader)))
 
     def follow_keyboard(self) -> None:
-        """While the lights follow the keyboard, its color on the picker (Window.kb_base)."""
-        if self.sync_row.get_active():
+        """While the switch is on and the lights take the keyboard's color (`follows`), that
+        color on the picker (Window.kb_base)."""
+        if self.sync_row.get_active() and self._shown[0].get("follows") is True:
             self._take_color(self._kb_base())
 
     def on_sync(self, row: Adw.SwitchRow, _pspec: GObject.ParamSpec) -> None:
@@ -425,16 +472,20 @@ class LightsCard:
 
         self._call({"command": "headset_sync", "value": row.get_active()}, done)
 
-    def _show_kept(self, lights: dict, flash_refused: object, synced: bool) -> None:
+    def _show_kept(self, lights: dict, flash_refused: object, synced: bool,
+                   answering: bool) -> None:
         """The rows that write what the headset keeps: Save as its own lighting, refused
-        while the lights follow the keyboard (`synced`), and Startup effect."""
-        startup = lights.get("startup")
-        self.startup_row.set_visible(isinstance(startup, bool))
+        while the lights follow the keyboard (`synced`), and Startup effect, both off while
+        the headset does not answer, and Startup effect off with Not read where its read
+        failed."""
+        startup, unread = lights.get("startup"), lights.get("startup_unread") is not None
+        self.startup_row.set_visible(isinstance(startup, bool) or unread)
         if isinstance(startup, bool) and not self._writes.out:
             self._loading.put_active(self.startup_row, startup)
-        usable = not lights.get("refused") and not flash_refused
-        self.startup_row.set_subtitle(WAITS_FOR_TEST if flash_refused else "")
-        self.startup_row.set_sensitive(usable)
+        usable = answering and not lights.get("refused") and not flash_refused
+        self.startup_row.set_subtitle(NOT_READ if unread else WAITS_FOR_TEST if flash_refused
+                                      else "")
+        self.startup_row.set_sensitive(usable and not unread)
         self.store_row.set_sensitive(usable and not synced
                                      and isinstance(lights.get("shown"), dict))
 
@@ -443,6 +494,8 @@ class LightsCard:
             self._writes.send({"command": "g432_lights", "startup": row.get_active()})
 
     def on_effect(self, _row: Adw.ComboRow, _pspec: GObject.ParamSpec) -> None:
+        """Send the effect picked, the picker grayed out or not for it at once."""
+        self._show_picker()
         if not self._loading.active:
             self._send(self.picker.color)
 
@@ -458,19 +511,29 @@ class LightsCard:
 
     def on_store(self, row: Adw.ButtonRow) -> None:
         """The lighting shown kept in the headset as its own once asked: it writes over the
-        lighting the headset keeps, as a write to a mouse's profile 1 asks first."""
+        lighting the headset keeps, with no backup, so Save is destructive, as Restore on the
+        Mouse tab is (the owner's decision of 2026-10-31)."""
         confirm(row, LIGHTS_STORE_HEADING, LIGHTS_STORE_BODY, LIGHTS_STORE_RESPONSE,
-                lambda: self._writes.send({"command": "g432_lights", "store": True}),
-                destructive=False)
+                lambda: self._writes.send({"command": "g432_lights", "store": True}))
 
     def flush(self) -> bool:
         """Send a run of keys on the picker still settling, for the window's close."""
         return self.picker.flush()
 
-    def cancel(self) -> None:
+    def close(self) -> None:
         """Drop a run of keys still settling and take the picker's rules off the display,
         which holds them past the widget."""
         self.picker.destroy()
+
+
+def key_level(brightness: object) -> str:
+    """The Effect row's line for the reply's `brightness`: off or the level a G key's step
+    set, and empty at full brightness or with none given."""
+    if brightness == 0:
+        return LIGHTS_OFF_BY_KEY
+    if isinstance(brightness, int) and brightness < FULL_BRIGHTNESS:
+        return LIGHTS_DIMMED_BY_KEY.format(brightness)
+    return ""
 
 
 def key_label(key: str) -> str:
@@ -479,117 +542,96 @@ def key_label(key: str) -> str:
 
 
 class HeadsetKeysCard:
-    """A headset's G keys, a row each as the Mouse tab's buttons (binding_rows), from the
-    reply's `g_keys`, by the names they bind under: a built-in action, a keystroke or a
+    """A headset's G keys, a row each as the Mouse tab's buttons (binding_rows.LayerRows),
+    from the reply's `g_keys`, by the names they bind under: a built-in action, a keystroke or a
     macro, picked in the capture dialog, bound through `bind` on the layer the window edits,
     as Editing says: an action picked on the one the window's `call` names at the send, a
-    key or a macro captured on the one the window was on when the dialog opened. `parent`
-    is the window, which the capture dialog opens over."""
+    key or a macro captured on the one the window was on when the dialog opened, Base or
+    G-Shift as its Layer row is (the owner's decision 14 of 2026-10-28). `parent` is the
+    window, which the capture dialog opens over."""
 
     def __init__(self, parent: Window, worker: DaemonWorker, loading: LoadingGuard,
                  call: Call, toast: Callable[..., object]) -> None:
         self._parent = parent
         self._worker = worker
-        self._loading = loading
         self._call = call
         self._toast = toast
-        #: What each key does now, as the last reply or bind gave it, and how many binds are
-        #: out: a reply read before one gives what it replaces.
-        self._bindings: dict[str, str] = {}
+        #: The rows: what each key does now, as the last reply or bind gave it, and its
+        #: binding on the G-Shift layer, None where it has none there (the reply's
+        #: `g_keys_shift`). `rows` is its own.
+        self.bindings = LayerRows(loading, G_KEY_CHOICES, G_KEY_TIPS, G_KEY_CHANGE_HELP,
+                                  self._bind, self._capture,
+                                  lambda: self._parent.outputs.balance_unheard)
+        self.rows = self.bindings.rows
+        #: How many binds are out: a reply read before one gives what it replaces.
         self._out = 0
-        self.rows: dict[str, Adw.ComboRow] = {}
-        self.change_buttons: dict[str, Gtk.Button] = {}
         self.group = Adw.PreferencesGroup(title="G keys", visible=False)
-        # Which layer a binding is written to, as the Mouse tab says it. Not markup.
-        self.editing_row = Adw.ActionRow(title="Editing", use_markup=False)
-        self.group.add(self.editing_row)
+        # First in the group, as on the Mouse tab's Buttons; under it, which layer a binding
+        # is written to, as the Mouse tab says it.
+        layer_row, editing_row = self.bindings.layer_rows()
+        self.group.add(layer_row)
+        self.group.add(editing_row)
 
-    def set_editing(self, text: str) -> None:
-        """Say which layer the bindings are written to."""
-        self.editing_row.set_title(text)
+    def set_editing(self, text: str, line: str) -> None:
+        """Say which layer the bindings are written to, and how G-Shift is held, the Layer
+        row's `line` (LayerRows.set_editing)."""
+        self.bindings.set_editing(text, line)
 
-    def show(self, keys: object) -> None:
-        """A row for each key of the reply's `g_keys`, put on what it does now unless a bind
-        is out; the group hidden on a headset with none, and with no headset."""
+    def show(self, keys: object, shifted: object = None) -> None:
+        """A row for each key of the reply's `g_keys`, put on what it does now, or on the
+        G-Shift layer on what `shifted`, the reply's `g_keys_shift`, gives, unless a bind is
+        out; the group hidden on a headset with none, and with no headset."""
         keys = keys if isinstance(keys, dict) else {}
         self.group.set_visible(bool(keys))
         for key in keys:
             if key not in self.rows:
-                row, self.change_buttons[key] = binding_row(
-                    key_label(key), G_KEY_CHOICES, G_KEY_TIPS, G_KEY_CHANGE_HELP,
-                    partial(self.on_change, key))
-                row.connect("notify::selected", self.on_binding, key)
-                self.rows[key] = row
-                self.group.add(row)
+                self.group.add(self.bindings.add(key, key_label(key)))
         for key, row in self.rows.items():
             row.set_visible(key in keys)
         if self._out:
             return
-        self._bindings = {key: str(spec) for key, spec in keys.items()}
-        for key in self._bindings:
-            self._show_held(key)
-
-    def _show_held(self, key: str) -> None:
-        show_binding(self._loading, self.rows[key], self.change_buttons[key],
-                     self._bindings.get(key, UNBOUND), G_KEY_CHOICES)
-
-    def on_binding(self, row: Adw.ComboRow, _pspec: GObject.ParamSpec, key: str) -> None:
-        if self._loading.active:
-            return
-        action, macros = read_pick(row, G_KEY_CHOICES)
-        if action is not None:
-            self._bind(key, action)
-            return
-        self._capture(key, macros=macros)
-
-    def on_change(self, key: str) -> None:
-        """Change… on a row bound to a key or a macro, opened on the macro list for a
-        macro."""
-        self._capture(key, macros=read_pick(self.rows[key], G_KEY_CHOICES)[1])
+        self.bindings.base = {key: str(spec) for key, spec in keys.items()}
+        shifted = shifted if isinstance(shifted, dict) else {}
+        self.bindings.shifted = {key: None if shifted.get(key) is None else str(shifted[key])
+                                 for key in keys}
+        self.bindings.show_all()
 
     def _capture(self, key: str, macros: bool) -> None:
-        """Ask for a keystroke or a macro for `key`, and bind what comes back on the layer the
-        window was on when the dialog opened: the polls go on while it is open, and an M key,
-        the tray or a program can move the window's meanwhile. The dialog has no Unbind:
-        Nothing in the row clears a key. Closed with nothing picked, the row goes back to
-        what the key does."""
-        dialog = CaptureDialog(self._parent, key_label(key), worker=self._worker,
-                               can_unbind=False)
-        picked = False
+        """Ask for a keystroke or a macro for `key` (LayerRows.capture), and bind what comes
+        back on the layer the window was on when the dialog opened."""
         layer = named_layer(self._parent.layer)
+        self.bindings.capture(self._parent, self._worker, key, key_label(key), macros,
+                              lambda spec, shift: self._bind(key, spec, layer, shift),
+                              lambda: None)
 
-        def done(spec: str | None) -> None:
-            nonlocal picked
-            picked = True
-            # Set, a key or a macro picked: with no Unbind, the dialog hands on no None.
-            self._bind(key, cast("str", spec), layer)
-
-        def closed(_dialog: Adw.Dialog) -> None:
-            if not picked:
-                self._show_held(key)
-        dialog.run(done, macros=macros)
-        dialog.connect("closed", closed)
-
-    def _bind(self, key: str, spec: str, layer: dict | None = None) -> None:
+    def _bind(self, key: str, spec: str | None, layer: dict | None = None,
+              shift: bool | None = None) -> None:
         """Bind `key` to `spec` on `layer`, where given, else on the one the window's `call`
-        names at the send; the row takes the reply's binding, or goes back on a refusal, a
-        moved layer's included, now rather than at the next poll, and a toast says it, as the
-        Keyboard and Mouse tabs' do: unbound for a clear, and Undo, on the same layer,
-        whenever the bind replaced or cleared what the key did."""
+        names at the send; on the G-Shift layer for `shift` True, on Base for False, and for
+        None on the one the Layer row is on. On G-Shift, `spec` None (Same as Base) clears the
+        key's binding there and any other is bound there, Nothing and the base binding
+        included; on Base, Nothing binds the key to nothing. The row takes the reply's
+        binding, or goes back on a refusal, a moved layer's included, now rather than at the
+        next poll, and a toast says it as the Mouse tab's does, {key} → {binding}, Nothing
+        included, where the Keyboard tab's Unbind says unbound: G1 unbound steps the lighting
+        (config.HEADSET_DEFAULTS); with Undo on the same layer whenever the bind replaced or
+        cleared a binding, Nothing on Base aside."""
+        shift = self.bindings.shift if shift is None else shift
         self._out += 1
         # The layer an Undo binds on: the one this bind is sent for.
         named = layer if layer is not None else named_layer(self._parent.layer)
 
         def done(reply: dict | None) -> None:
             self._out -= 1
-            if reply is not None:
-                was, bound = self._bindings.get(key), str(reply["binding"])
-                self._bindings[key] = bound
-                label = key_label(key)
-                self._toast(f"{label} unbound" if spec == UNBOUND
-                            else f"{label} → {binding_words(bound, G_KEY_CHOICES)}",
-                            undo=(lambda: self._bind(key, was, named))
-                            if was not in (None, UNBOUND) and was != bound else None)
-            self._show_held(key)
-        request = {"command": "bind", "key": key, "value": spec}
+            if reply is None:
+                self.bindings.show_held(key)
+                return
+            # None where a clear on the G-Shift layer left the key no binding there.
+            bound = None if reply["binding"] is None else str(reply["binding"])
+            was = self.bindings.take(key, shift, bound)
+            self._toast(bound_toast(key_label(key), shift, bound, G_KEY_CHOICES),
+                        undo=(lambda: self._bind(key, was, named, shift))
+                        if undo_offered(was, bound, shift) else None)
+        request = {"command": "bind", "key": key, "value": spec,
+                   **({"shift": True} if shift else {})}
         self._call(request if layer is None else {**request, "layer": layer}, done)

@@ -23,13 +23,13 @@ from ...apps import (
     walk_processes,
     wanted_forms,
 )
-from ...config import layer_binding
+from ...config import NOTHING, layer_binding
 from ...focus import Focus, held_until
 from ...library_files import by_name, file_name, may_hold_it, unread_reason
-from ...mouse import bindings_of
-from ...profiles import GameProfile, Library, layer_in_force
+from ...mouse import bindings_of, shift_bindings_of
+from ...profiles import GameProfile, Library, key_layer_in_force, layer_in_force
 from ...settings_files import FIX_AND_RELOAD, ConfigError
-from ...wording import escaped, quoted
+from ...wording import escaped, quoted, reason
 from ...xfocus import XFocus
 from ..shared import (
     NO_GAME_PROFILE_NAMED,
@@ -53,6 +53,9 @@ PROCESS_SCAN_INTERVAL = 5.0
 #: scan matches with no walk, so the walk serves the other-tools check alone: the owner's
 #: decision of 2026-10-24, "Every 30 s".
 SHELL_WALK_INTERVAL = 30.0
+#: What the journal says as a walk cannot list /proc, once a cause, with why (wording.reason).
+PROC_UNLISTED = ("cannot list /proc: %s; the running programs and other tools stay as "
+                 "the last walk found them")
 
 #: Why a profile let go of the program that loaded or held it (Games.let_go): its file has
 #: gone, a held-off profile took the program in its place, its programs no longer include
@@ -86,6 +89,11 @@ def matched_by(profile: GameProfile, running: set[str]) -> str | None:
     None: no placeholder name, as a program may have any name, "?" included."""
     return next((name for want in profile.processes for name in sorted(running)
                  if names_match(want, name)), None)
+
+
+def waited_on(programs: Collection[str], names: set[str]) -> set[str]:
+    """The names in `names` that one of `programs` matches (names_match)."""
+    return {name for name in names if any(names_match(program, name) for program in programs)}
 
 
 def matching_profile(running: set[str], profiles: list[GameProfile]) -> GameProfile | None:
@@ -127,8 +135,9 @@ class Games:
         self._seen: set[str] = set()
         #: Keep loaded: off at every start.
         self.keep_loaded = False
-        #: Bumped at each change of the loaded game profile, so the mice tell a new load from
-        #: the same profile edited or read again (Dpi.retune).
+        #: Bumped at each new load (_put_overlay): another profile, none after one, or the
+        #: same name read from another file, so the mice tell a new load from the same profile
+        #: edited or read again from its file (Dpi.retune).
         self.loads = 0
         #: What keep loaded last kept out, so the journal says it once.
         self._kept_out: tuple[str, str] | None = None
@@ -137,6 +146,8 @@ class Games:
         #: loop's first pass), and the OTHER_TOOLS it found, with their pids.
         self._last_walk: float | None = None
         self.other_tools: dict[str, list[int]] = {}
+        #: Why the last walk could not list /proc, or None, so the journal says it once a cause.
+        self._walk_failure: str | None = None
         #: The program with focus, from Gearbench's GNOME Shell extension or
         #: Xwayland; started in run(). While `ready`, a profile follows focus
         #: instead of the running programs.
@@ -174,6 +185,16 @@ class Games:
     def is_held(self, name: str) -> bool:
         return any(same_profile(name, held) for held in self._held)
 
+    def _put_overlay(self, profile: GameProfile | None) -> None:
+        """Make `profile` the loaded game profile, adding one to `loads` for a new load:
+        another profile, none after one, or its name read from another file."""
+        was = self.overlay
+        if (was is None) != (profile is None) or (
+                was is not None and profile is not None
+                and (not same_profile(was.name, profile.name) or was.path != profile.path)):
+            self.loads += 1
+        self.overlay = profile
+
     def reread(self) -> dict:
         """`reload`: read the loaded profile again from its file; returns what the reply
         adds. A name edited in the file is followed as a rename; a file that will not load, or
@@ -186,11 +207,13 @@ class Games:
         fresh, why = self.read_for(self.overlay)
         if fresh is not None:
             self.follow_edited_name(fresh)
-            self.overlay = fresh
+            self._put_overlay(fresh)
             return {}
         if why is not None:
             # A profile the library read has its file (GameProfile.load).
-            said = self.overlay.unreadable = unread_reason(cast("Path", path).name, why)
+            file = cast("Path", path).name
+            said = self.overlay.unreadable = unread_reason(file, why)
+            self.overlay.save_over = file in self.library.invalid
             # Escaped: the error can quote the file's keys as they are, and the journal splits
             # a record at each newline (cli.service.JournalFormatter).
             log.info("game profile %r keeps what it held: its file was not read (%s)", name,
@@ -225,15 +248,16 @@ class Games:
         restore = self.found(self._before_auto) if self._before_auto else None
         if not self.overlay_auto:
             self.d.config.active_game_profile = None
-        self.overlay, self.overlay_auto = restore, False
-        self.loads += 1
+        self._put_overlay(restore)
+        self.overlay_auto = False
         self._before_auto = None
 
     def overlay_error(self) -> str | None:
         """What `reload` and `status` say while the loaded profile's file
         was not read at the last reload or at a scan (scan_library), until a
-        reload reads it or `save` writes over it, which fails where the folder could not be
-        listed: the write goes through that folder."""
+        reload reads it or `save` writes over it, which fails where the file could not be
+        opened, since the save reads it first, or the folder could not be listed, since the
+        write goes through that folder (GameProfile.save_over)."""
         overlay = self.overlay
         if overlay is None or overlay.unreadable is None:
             return None
@@ -258,8 +282,8 @@ class Games:
         # taken the one read in its place.
         unread = [escaped(file) for file, _why in self.library.unread()]
         if unread:
-            # A folder that cannot be listed is the one entry, under its own name.
-            why = (f"the {unread[0]} folder cannot be listed" if self.library.unlisted_reason
+            why = (f"the {escaped(self.library.directory.name)} folder cannot be listed"
+                   if self.library.unlisted_reason
                    else may_hold_it(unread))
             log.info("game profile %r stays remembered: %s; it loads at a reload or a later "
                      "start once its file can be read", remembered, why)
@@ -326,8 +350,7 @@ class Games:
             log.info("game profile %r unloaded: config.json does not name it", self.overlay.name)
         if wanted is not None:
             log.info("game profile %r loaded: config.json names it", wanted.name)
-        self.overlay = wanted
-        self.loads += 1
+        self._put_overlay(wanted)
 
     # -- the layer in force --------------------------------------------------
 
@@ -335,11 +358,9 @@ class Games:
         return layer_binding(self.key_layer(False), self.key_layer(True), key, shifted)
 
     def key_layer(self, shift: bool) -> dict[str, str | None]:
-        """The G key bindings in force, MR's layer with `shift`: the loaded game profile's, or
-        the M profile's."""
-        if self.overlay is not None:
-            return self.overlay.shift if shift else self.overlay.bindings
-        return self.d.config.profile.shift if shift else self.d.config.profile.keys
+        """The G key bindings in force, the G-Shift layer's with `shift`: the loaded game
+        profile's, or the M profile's."""
+        return key_layer_in_force(self.overlay, self.d.config.profile, shift)
 
     def mouse_entries(self) -> dict[str, dict[str, str]]:
         """The mouse bindings in force by mouse model: the loaded game profile's, or the M
@@ -351,8 +372,23 @@ class Games:
         the layer in force (mouse.bindings_of)."""
         return bindings_of(self.mouse_entries(), model)
 
-    def active_mouse_binding(self, button: str, model: str) -> str:
-        return self.mouse_bindings(model).get(button, "none")
+    def mouse_shift_entries(self) -> dict[str, dict[str, str]]:
+        """The mouse bindings on the G-Shift layer in force by mouse model, the loaded game
+        profile's or the M profile's, as mouse_entries."""
+        return layer_in_force(self.overlay, self.d.config.profile).mouse_shift
+
+    def mouse_shift_bindings(self, model: str) -> dict[str, str]:
+        """What the buttons of the mouse model named `model` are bound to on the G-Shift layer
+        in force, those its entry there names alone (mouse.shift_bindings_of)."""
+        return shift_bindings_of(self.mouse_shift_entries(), model)
+
+    def active_mouse_binding(self, button: str, model: str, shifted: bool = False) -> str:
+        """What `button` of the mouse model `model` does now: with `shifted`, its binding on
+        the G-Shift layer (mouse_shift_bindings), else, or where it has none there, its base
+        binding (mouse_bindings), as config.layer_binding gives it, G_SHIFT kept on either
+        layer; NOTHING for a button the model lacks."""
+        shift = self.mouse_shift_bindings(model) if shifted else {}
+        return layer_binding(self.mouse_bindings(model), shift, button, shifted) or NOTHING
 
     def apply_layer(self) -> tuple[str | None, str | None]:
         """Show the layer in force on every keyboard (show_on_each) and the mice; its note and
@@ -392,12 +428,14 @@ class Games:
         profile = self.library.get(name)
         if profile is None:
             return {"ok": False, "error": NO_GAME_PROFILE_NAMED.format(quoted(name))}
+        # The loaded profile's own file under a name edited there is the loaded one, as a
+        # reload follows it.
+        self.follow_edited_name(profile)
         same = self.overlay is not None and same_profile(self.overlay.name, profile.name)
         if not same:
             # Loading the loaded one again is no other choice to hold it off for.
             self.suppress_auto()
-            self.loads += 1
-        self.overlay = profile
+        self._put_overlay(profile)
         # The window's Save as loads what it saved: one loaded for its program stays so, and
         # goes when the program does (the owner's decision of 2026-09-28).
         if not (same and self.overlay_auto):
@@ -408,8 +446,9 @@ class Games:
         shown = self.apply_layer()
         self.d.persist()
         log.info("loaded game profile %r over profile %d", profile.name, self.d.config.active)
-        return with_note({"ok": True, "overlay": profile.name,
-                          "mode": self.d.per_keyboard.shown(profile.lighting).mode}, *shown)
+        lighting = self.d.per_keyboard.shown(profile.lighting)
+        return with_note({"ok": True, "overlay": profile.name, "mode": lighting.mode,
+                          "effect": lighting.effect}, *shown)
 
     def suppress_auto(self) -> None:
         """Before a hand choice replaces the overlay, hold it off while its program has focus
@@ -455,9 +494,8 @@ class Games:
         """Unload the game profile for a choice made by hand, held off while its program
         has focus or runs (suppress_auto), and show what is under it; apply_layer's answer."""
         self.suppress_auto()
-        if self.overlay is not None:
-            self.loads += 1
-        self.overlay, self.overlay_auto = None, False
+        self._put_overlay(None)
+        self.overlay_auto = False
         self._before_auto = None
         self.d.keyboards.wake_each()
         return self.apply_layer()
@@ -595,11 +633,15 @@ class Games:
         unread = ({name for name in self._held
                    if not any(same_profile(p.name, name) for p in profiles)}
                   if self.library.unread() else set())
+        # Of its programs only the one it waits on is known meanwhile, and that one loads no
+        # other profile in its place either (the owner's decision of 2026-10-06).
+        waited = [self._held[name] for name in unread]
         if self.focus.ready:
             shown, names = names_of(self.focus.pid) if self.focus.pid else (None, set())
             # A held-off profile first: its hold-off lasts while any of its programs has
             # focus, whichever other profile binds that program too.
-            match = matching_profile(names, held) or matching_profile(names, bound)
+            match = matching_profile(names, held) or (
+                None if waited_on(waited, names) else matching_profile(names, bound))
             self._focus_program, self._seen = shown, names
             self._focus_profile = match.name if match else None
             if match in held:
@@ -619,15 +661,14 @@ class Games:
         # A held-off profile's programs hold it off until none of them runs,
         # whatever else starts, and must not hide another profile's program,
         # nor load another profile that binds one of them too.
-        own = {p.name: {name for name in running
-                        if any(names_match(want, name) for want in p.processes)} for p in held}
+        own = {p.name: waited_on(p.processes, running) for p in held}
         waiting = {name for name, names in own.items() if names}
         for p in held:
             if own[p.name]:
                 # Its own programs alone hold it: one edited out of its list holds it no more.
                 # own names what they match, so matched_by finds one.
                 self.held_by(p.name, cast("str", matched_by(p, running)), own[p.name])
-        others = running.difference(*own.values())
+        others = running.difference(*own.values(), waited_on(waited, running))
         match = matching_profile(others, [p for p in bound if p not in held])
         self.follow_match(match, matched_by(match, others) if match else None,
                           keep=waiting | unread, profiles=profiles)
@@ -646,8 +687,7 @@ class Games:
             return
         log.info("game profile %r is read from %s now; following it", fresh.name,
                  escaped(cast("Path", fresh.path).name))
-        self.overlay = fresh
-        self.loads += 1
+        self._put_overlay(fresh)
         self.apply_layer()
 
     def check_read_file(self) -> None:
@@ -671,7 +711,6 @@ class Games:
             raise ConfigError(f"game profile {quoted(overlay.name)} is in no file now: "
                               f"{escaped(path.name)} holds another profile's name; "
                               "reload to unload it")
-        # A profile the library read has its file (GameProfile.load).
         read_from = cast("Path", read.path).name
         raise ConfigError(f"game profile {quoted(overlay.name)} is read from "
                           f"{escaped(read_from)} now, not {escaped(path.name)};"
@@ -689,17 +728,24 @@ class Games:
             why = self.library.why_unread(file)
             if why is not None:
                 overlay.unreadable = unread_reason(file, why)
+                overlay.save_over = file in self.library.invalid
                 profiles = sorted([*profiles, overlay], key=lambda p: str(p.path))
         return profiles
 
     def walk(self, now: float) -> list[Process] | None:
         """One walk of /proc, and the other tools in it; None when /proc
-        cannot be listed, which leaves what was found as it was."""
+        cannot be listed, which leaves what was found as it was and is said once a cause."""
         self._last_walk = now
         try:
             procs = walk_processes()
-        except OSError:
+        except OSError as exc:
+            if (why := reason(exc)) != self._walk_failure:
+                log.warning(PROC_UNLISTED, why)
+                self._walk_failure = why
             return None
+        if self._walk_failure is not None:
+            log.info("/proc can be listed again")
+            self._walk_failure = None
         found = find_other_tools(procs)
         for comm, tool in OTHER_TOOLS.items():
             if comm in found and comm not in self.other_tools:
@@ -768,7 +814,8 @@ class Games:
         """Load, keep or drop the overlay for `match`, the profile a program binds, or None;
         `program` names it for the journal, `status` and a later hold-off. A profile loaded by
         hand is replaced and given back after, unless keep loaded is on; only an auto-loaded
-        one is dropped here. A hold-off ends when the match is not its profile and `keep` does
+        one is dropped here, as for no match where the match is held off, which loads nothing
+        in its place. A hold-off ends when the match is not its profile and `keep` does
         not name it (one of its programs runs, or its file will not load). let_go says why a
         hold-off ends or an auto-loaded profile is dropped, given `profiles`, the scan's library;
         a dropped profile gone from it has its DPIs forgotten.
@@ -781,16 +828,14 @@ class Games:
 
         if match is None or self.overlay_auto or self.overlay is None:
             self._kept_out = None
-        if match is not None:
+        if match is not None and not self.is_held(match.name):
             self._take_match(match, program)
         elif self.overlay_auto:
             self._drop_auto(program, profiles)
 
     def _take_match(self, match: GameProfile, program: str | None) -> None:
         """Load `match` over the overlay, giving back later a hand choice it replaces, unless it
-        is held off or loaded, or keep loaded keeps a hand choice."""
-        if self.is_held(match.name):
-            return
+        is loaded, or keep loaded keeps a hand choice."""
         if self.overlay is not None and same_profile(self.overlay.name, match.name):
             if self.overlay_auto:
                 self._auto_process = program    # another of its programs
@@ -805,8 +850,8 @@ class Games:
             return
         if not self.overlay_auto:
             self._before_auto = self.overlay.name if self.overlay else None
-        self.overlay, self.overlay_auto = match, True
-        self.loads += 1
+        self._put_overlay(match)
+        self.overlay_auto = True
         self._auto_process = program
         if focus:
             log.info("game profile %r loaded: %s has focus", match.name, escaped(program))
@@ -822,7 +867,7 @@ class Games:
         name, was = cast("GameProfile", self.overlay).name, cast("str", self._auto_process)
         self.unload_gone()
         self._auto_process = None
-        back = escaped(self.overlay.name) if self.overlay else "the M profile default"
+        back = f"game profile {self.overlay.name!r}" if self.overlay else "the M profile default"
         why = self.let_go(name, was, program, profiles)
         if why == GONE:
             self.d.mice.dpi.profile_gone(name)      # as reread and delete_profile do

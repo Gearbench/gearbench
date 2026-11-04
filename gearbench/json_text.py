@@ -49,7 +49,7 @@ def json_value(data: bytes, one_name: bool = True) -> object:
     json.loads tells UTF-8, UTF-16 and UTF-32 apart by the first bytes (Windows PowerShell
     5's `>` writes UTF-16). While `one_name`, an object that names a key twice is refused
     (one_object); without it the last is kept, as json.loads keeps it, for a file another
-    program wrote and Gearbench never writes back.
+    program wrote, or a request, that Gearbench never writes back.
     """
     try:
         return json.loads(data, object_pairs_hook=one_object if one_name else None)

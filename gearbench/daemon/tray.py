@@ -10,15 +10,10 @@ from typing import TYPE_CHECKING
 
 from ..config import PROFILE_IDS, profile_label
 from ..desktop import APP_NAME
-from ..keyboard import (
-    CABLED_IDS as KEYBOARD_CABLED,
-    followed,
-    m_profiles_in_menu,
-    name as keyboard_name,
-)
+from ..keyboard import followed, m_profiles_in_menu
 from ..settings_files import file_stamp
-from ..tray import NOT_AVAILABLE_ICON, Battery, Model, Snapshot, Stages, TrayMenu, build
-from ..wording import NO_REASON, REFUSED_HEADING, capitalized, escaped
+from ..tray import NOT_AVAILABLE_ICON, Model, Snapshot, Stages, TrayMenu, build
+from ..wording import NO_REASON, capitalized, escaped, home_shortened
 from .shared import look_due, switch_value
 
 if TYPE_CHECKING:
@@ -30,7 +25,9 @@ log = logging.getLogger("gearbench")
 #: compares at once (Tray.changed).
 TRAY_REFRESH = 2.0
 
-#: A refused menu choice's notice: REFUSED_HEADING, the refusal as the body, and this icon.
+#: The title of a refused menu choice's notice: the choice's label first, as the DPI notice's
+#: title puts its mouse's name first.
+REFUSED_TITLE = "{}: refused"
 REFUSED_ICON = NOT_AVAILABLE_ICON
 
 
@@ -112,28 +109,15 @@ class Tray:
         return build(self.snapshot(), APP_NAME)
 
     def snapshot(self) -> Snapshot:
-        """What the daemon knows, from its own state. Only each keyboard's battery may be
-        asked for, as `status` asks (Readings.keyboard_battery); each headset's is the loop's
-        last reading, as its controller shows it (tray_battery)."""
-        kb, mice, config = self.d.keyboard, self.d.mice, self.d.config
-        batteries = []
-        # Each keyboard driven, the leader's first, as "keyboard" and the others by model.
-        for keyboard in self.d.keyboards.driven():
-            reading = keyboard.readings.keyboard_battery()
-            reading, read_at = keyboard.readings.kept_battery() or (reading, None)
-            # Asked after the read: one that went unanswered marks it, and one that found the
-            # keyboard gone, or on its cable, dropped it.
-            if keyboard.dev is not None and "battery" in keyboard.keyboard_able:
-                batteries.append(Battery.of(
-                    "keyboard" if keyboard is kb else f"keyboard-{keyboard.model()}",
-                    keyboard_name(keyboard.keyboard_product),
-                    reading,
-                    answering=keyboard.keyboard_answering(),
-                    cabled=keyboard.keyboard_product in KEYBOARD_CABLED,
-                    read_at=read_at))
-        batteries += [Battery.of(f"{m.product:04x}", m.name, m.battery, answering=not m.silent,
-                                 read_at=m.battery_at)
-                      for m in mice.attached if "battery" in m.mouse.capabilities]
+        """What the daemon knows, from its own state, each device's battery line as its
+        controller gives it. Only a keyboard's battery may be asked for, as `status` asks
+        (Keyboard.tray_battery); each mouse's and each headset's is its last reading
+        (MouseBatteries.tray_batteries, tray_battery)."""
+        mice, config = self.d.mice, self.d.config
+        # Each keyboard driven, the leader's first.
+        batteries = [battery for keyboard in self.d.keyboards.driven()
+                     if (battery := keyboard.tray_battery()) is not None]
+        batteries += mice.battery.tray_batteries()
         batteries += [battery for headset in self.d.headsets
                       if (battery := headset.tray_battery()) is not None]
         current = mice.current
@@ -147,6 +131,9 @@ class Tray:
         # after the battery reads, which may drop one.
         pickable = any(m_profiles_in_menu(keyboard.keyboard_able)
                        for keyboard in self.d.keyboards.driven())
+        lit = any(keyboard.lighting is not None for keyboard in self.d.keyboards.driven())
+        # As the Mouse tab's DPI row: a mouse whose DPI the daemon sets, asleep or not.
+        steps = any("dpi" in attached.mouse.capabilities for attached in mice.attached)
         overlay = self.d.games.overlay
         problems = self.d.problems()
         return Snapshot(
@@ -160,13 +147,12 @@ class Tray:
                               for number in PROFILE_IDS) if pickable else ()),
             active=config.active,
             keep_loaded=self.d.games.keep_loaded,
-            lock_lights=config.lights_off_when_locked,
-            dpi_notices=config.dpi_notices,
+            lock_lights=config.lights_off_when_locked if lit else None,
+            dpi_notices=config.dpi_notices if steps else None,
             mouse_sync=config.mouse_sync_color if mice.color.mouse_with_lights() else None,
-            # The window's headset page shows its Follow switch on the same condition: the
-            # `g432` reply's `lights`, which only an attached headset's listed zones give.
-            headset_sync=(config.headset_sync_color if self.d.g432.lights.zones is not None
-                          else None),
+            # As the window's Follow switch: an attached headset that lists lights
+            # (HeadsetLighting.listed).
+            headset_sync=(config.headset_sync_color if self.d.g432.lights.listed() else None),
             leader=followed(self.d.per_keyboard.leader()),
         )
 
@@ -188,19 +174,21 @@ class Tray:
 
     # -- what its menu does --------------------------------------------------
 
-    def act(self, request: dict) -> None:
+    def act(self, request: dict, label: str) -> None:
         """A chosen item's request, run as the control socket runs it. A refusal is posted
-        as a notice, since the menu has nowhere to show it."""
+        as a notice titled with the item's `label`, since the menu has nowhere to show it."""
         reply = self.run(request)
         if reply is not None and not reply.get("ok"):
             error = str(reply.get("error", NO_REASON))
             detail = reply.get("detail")
             # A refusal can quote a file's error, which quotes the file. The notice keeps the
-            # sentence alone; the journal, the menu's only record, has the device's words too.
+            # sentence alone, the home folder written ~ as the window and the menu write it;
+            # the journal, the menu's only record, has the device's words and the whole path.
             log.warning("the tray's %s was refused: %s%s", request["command"], escaped(error),
                         f" ({escaped(detail)})" if detail else "")
-            self.d.session.desktop.notify(REFUSED_HEADING, capitalized(error), REFUSED_ICON,
-                                          transient=True)
+            self.d.session.desktop.notify(REFUSED_TITLE.format(label),
+                                          capitalized(home_shortened(error)),
+                                          REFUSED_ICON, transient=True)
 
     def opening(self) -> None:
         """The menu opens: the selected mouse read as the Mouse tab reads it (`mouse`), so its

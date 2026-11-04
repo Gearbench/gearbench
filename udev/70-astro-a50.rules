@@ -13,7 +13,7 @@
 # Xbox edition (002d) and console mode (002b, which has no HID interface) stay
 # out until read off the hardware.
 #
-# install.sh puts this in /usr/local/lib/udev/rules.d/; the .deb puts it in
+# install.sh puts this in /usr/local/lib/udev/rules.d/; the package puts it in
 # /usr/lib/udev/rules.d/. Either way, reload with:
 #   sudo udevadm control --reload
 #   sudo udevadm trigger --subsystem-match=hidraw --action=add

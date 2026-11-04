@@ -31,7 +31,14 @@ from pathlib import Path
 
 from .config import RATE_CHOICES, REPORT_RATES
 from .hidpp import REQUEST_RETRIES, REQUEST_TIMEOUT, WRITE_ONCE_TIMEOUT, Feature, Hidpp
-from .settings_files import ConfigError, backup_dir, link_to_nothing, missing_behind, replace_synced
+from .settings_files import (
+    ConfigError,
+    backup_dir,
+    link_to_nothing,
+    missing_behind,
+    replace_synced,
+    sync_removal,
+)
 from .wording import counted, escaped, reason
 
 log = logging.getLogger("gearbench")
@@ -80,8 +87,7 @@ OFF_NAME = 0xA0
 NAME_UNITS = 24
 
 #: Suffix of a backup set aside after a write, done or failed, a restore included, left the
-#: sector as it was (set_aside, from Mouse._set_aside_unchanged); newest_backup never picks
-#: one.
+#: sector as it was (set_aside); newest_backup never picks one.
 UNCHANGED = ".unchanged"
 
 #: Report rate byte: the period in milliseconds, for each of config's REPORT_RATES.
@@ -106,6 +112,9 @@ FUNCTION_NAMES = {
     0x0B: "G-Shift", 0x0C: "battery status", 0x0D: "profile select",
     0x0E: "mode switch", 0x0F: "host button", 0x10: "scroll down", 0x11: "scroll up",
 }
+#: The function that has the button do nothing: a row of profile 1's buttons says it as it
+#: says the HID no-op (entry_job).
+FUNCTION_NOTHING = 0x00
 
 
 class OnboardError(RuntimeError):
@@ -123,7 +132,7 @@ def write_mode(dev: Hidpp, feature: Feature, mode: int, *, timeout: float = REQU
                retries: int = REQUEST_RETRIES) -> None:
     """fn 1 setOnboardMode, MODE_ONBOARD or MODE_HOST; another mode is refused unsent."""
     if mode not in MODE_NAMES:
-        raise OnboardError(f"onboard mode must be 0x01 or 0x02, not {mode:#x}")
+        raise OnboardError(f"onboard mode must be 0x01 or 0x02, not {mode:#04x}")
     dev.request(feature.index, FN_SET_MODE, bytes([mode]), long=True, timeout=timeout,
                 retries=retries)
 
@@ -168,7 +177,7 @@ def entry_mouse_button(entry: bytes) -> int | None:
     if len(entry) != ENTRY_SIZE or entry[0] != ENTRY_HID or entry[1] != HID_MOUSE:
         return None
     mask = int.from_bytes(entry[2:4], "big")
-    if mask == 0 or mask & (mask - 1):
+    if mask.bit_count() != 1:
         return None
     return mask.bit_length()
 
@@ -181,7 +190,7 @@ MOUSE_BUTTON_JOBS = {1: "left click", 2: "right click", 3: "middle click", 4: "b
 def entry_job(entry: bytes) -> str:
     """What an entry has the mouse do, in a reader's words, for a row that shows the onboard
     profile's buttons: its job without describe_entry's codes, else describe_entry's words."""
-    if entry == NOOP:
+    if entry == NOOP or (entry[0] == ENTRY_FUNCTION and entry[1] == FUNCTION_NOTHING):
         return "nothing"
     button = entry_mouse_button(entry)
     if button in MOUSE_BUTTON_JOBS:
@@ -195,7 +204,7 @@ def entry_job(entry: bytes) -> str:
     if entry[0] == ENTRY_MACRO:
         return "a macro"
     mask = int.from_bytes(entry[2:4], "big")
-    if entry[0] == ENTRY_HID and entry[1] == HID_MOUSE and mask & (mask - 1):
+    if entry[0] == ENTRY_HID and entry[1] == HID_MOUSE and mask.bit_count() > 1:
         return "several mouse buttons"
     return describe_entry(entry)
 
@@ -231,11 +240,17 @@ def dpi_fits(value: int) -> bool:
     return DPI_LOWEST <= value <= DPI_HIGHEST
 
 
+def stage_position(stages: list[int], index: int) -> int:
+    """Where a default or shift index falls in `stages`, 0 with no stages. An index past
+    them, from a byte naming an unused slot (ProfileImage._stage_position), is taken as the
+    last stage, as the daemon's DPI-shift paddle goes to it."""
+    return min(index, max(len(stages) - 1, 0))
+
+
 def stage_dpi(stages: list[int], index: int) -> int | None:
-    """The DPI of a default or shift index into `stages`, or None with no stages. An index
-    past them, from a byte naming an unused slot (ProfileImage._stage_position), is taken as
-    the last stage, as the daemon's DPI-shift paddle drops to it."""
-    return stages[min(index, len(stages) - 1)] if stages else None
+    """The DPI of a default or shift index into `stages` (stage_position), or None with no
+    stages."""
+    return stages[stage_position(stages, index)] if stages else None
 
 
 def stages_words(stages: list[int], default: int | None, shift: int | None) -> str:
@@ -331,7 +346,7 @@ class ProfileImage:
 
     def _stage_position(self, slot: int) -> int:
         """Where the stage in `slot` is in dpi_stages. A slot without one comes back as it is,
-        past the stages unless the table has a gap; stage_dpi clamps it."""
+        past the stages unless the table has a gap; stage_position clamps it."""
         slots = self.dpi_slots
         return slots.index(slot) if slot in slots else slot
 
@@ -622,11 +637,14 @@ class OnboardProfiles:
     @staticmethod
     def set_aside(path: Path) -> Path | None:
         """Rename a `.bin` backup to `<name>.unchanged` (UNCHANGED), which newest_backup never
-        picks; backup gives no new file the name it had. Returns the new path, or None for a
-        file that is no `.bin`, left as it is: a `.bad-read`, which no restore picks. Raises
-        OSError."""
+        picks, and sync its folder (sync_removal): undone by a power loss, the rename would
+        leave the backup the newest, for every restore to write back. backup gives no new file
+        the name it had. Returns the new path, or None for a file that is no `.bin`, left as it
+        is: a `.bad-read`, which no restore picks. Raises the rename's OSError; a sync that
+        fails is a warning."""
         if path.suffix != ".bin":
             return None
         aside = path.with_name(path.name + UNCHANGED)
         path.rename(aside)
+        sync_removal(path)
         return aside

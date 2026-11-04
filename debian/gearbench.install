@@ -1,5 +1,8 @@
 udev/*.rules                                usr/lib/udev/rules.d
 udev/71-gearbench-mouse-dpi.hwdb            usr/lib/udev/hwdb.d
+systemd/sysusers.d/gearbench.conf           usr/lib/sysusers.d
+packaging/user-daemons                      usr/lib/gearbench
+packaging/checkout-rules                    usr/lib/gearbench
 desktop/io.github.gearbench.Gearbench.desktop     usr/share/applications
 desktop/io.github.gearbench.Gearbench.service     usr/share/dbus-1/services
 desktop/io.github.gearbench.Gearbench.metainfo.xml  usr/share/metainfo

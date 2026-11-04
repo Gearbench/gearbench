@@ -23,7 +23,7 @@ from ...config import (
 )
 from ...keyboard import keep_entry, model_ids as keyboard_ids
 from ...library_files import not_deleted
-from ...lighting import ANIMATIONS, SPEEDS, WAVE_DIRECTIONS
+from ...lighting import ANIMATIONS, OFF, SPEEDS, WAVE_DIRECTIONS, nearest_speed
 from ...mouse import model_ids as mouse_ids
 from ...profiles import GameProfile
 from ...settings_files import ConfigError
@@ -71,6 +71,7 @@ class GameCommands:
         return {
             "save_profile": self._cmd_save_profile,
             "profile_processes": self._cmd_profile_processes,
+            "profile_mouse_color": self._cmd_profile_mouse_color,
             "promote": self._cmd_promote,
             "delete_profile": self._cmd_delete_profile,
             "rename_profile": self._cmd_rename_profile,
@@ -83,8 +84,9 @@ class GameCommands:
         """Save what shows, overlay or M profile, as a game profile (_saved_lighting), with the
         layer's bindings. The lighting is saved for the model of the keyboard `keyboard` names,
         else the leader's (Keyboards.aimed), alone: what it shows, the leader's while it
-        follows; a profile saved over keeps its others. The mouse color is
-        MouseLighting.color_to_save's."""
+        follows; a profile saved over keeps its others. The mouse color is the request's
+        `mouse_color`, a null for none, else the loaded game profile's, none from an M
+        profile."""
         # Text, as a profile's file reads its name: str() would name it "None" for a null.
         name = expect(request["value"], str, "save_profile", "text").strip()
         if not name:
@@ -94,7 +96,8 @@ class GameCommands:
         wanted = request.get("processes")
         if wanted is not None:
             wanted = profiles.check_programs(wanted, "save_profile.processes")
-        mouse_color = self.d.mice.color.color_to_save(request)
+        mouse_color = (profiles.read_mouse_color(request["mouse_color"], "save_profile.mouse_color")
+                       if "mouse_color" in request else self.d.profile_color())
         keyboard = self.d.keyboards.aimed(request)
         saved = self._saved_lighting(keyboard)
         # The loaded profile's own copy, which every overlay edit writes back
@@ -106,9 +109,8 @@ class GameCommands:
         # Before any keyboard, no lighting shows: the profile keeps what it had, if anything.
         if (model := keyboard.model()) is not None:
             keep_entry(profile.lighting, model, saved)
-        profile.bindings = dict(self.games.key_layer(False))
-        profile.shift = dict(self.games.key_layer(True))
-        profile.mouse = copy.deepcopy(self.games.mouse_entries())
+        profile.layers = copy.deepcopy(
+            profiles.layer_in_force(self.games.overlay, self.d.config.profile).layers)
         # An M profile has none: profile 1's are the ones in force under it.
         profile.mouse_tuning = dict(self.games.overlay.mouse_tuning) if self.games.overlay is not None else {}
         profile.mouse_color = mouse_color
@@ -137,7 +139,7 @@ class GameCommands:
         effect_name, settings = layer.effect, layer.settings()
         static, background = layer.color, layer.background
         effect = effect_name if effect_name in ANIMATIONS else "static"
-        if effect_name == "disabled":
+        if effect_name == OFF:
             static = background = 0x000000
         if effect in ANIMATIONS or keyboard.paint.shows_static(effect_name):
             mode = layer.mode
@@ -152,8 +154,7 @@ class GameCommands:
         # A game profile holds only speeds and direction: an M profile's hand-set period, for
         # an animation that takes a speed, and direction go there.
         if effect in SPEEDS and "period" in settings:
-            fastest, slowest = SPEEDS[effect]
-            saved.speeds[effect] = min(max(settings["period"], fastest), slowest)
+            saved.speeds[effect] = nearest_speed(effect, settings["period"])
         if effect == "wave" and saved.direction is None:
             saved.direction = next((word for word, code in WAVE_DIRECTIONS.items()
                                     if code == settings.get("direction")), None)
@@ -167,14 +168,39 @@ class GameCommands:
         profile = self.games.loaded_copy(name)[1]
         if profile is None:
             return {"ok": False, "error": NO_GAME_PROFILE_NAMED.format(quoted(name))}
-        previous = list(profile.processes)
-        profile.processes = wanted
+        previous, profile.processes = profile.processes, wanted
         try:
             profile.save()
         except BaseException:
             profile.processes = previous
             raise
-        return {"ok": True, "profile": profile.name, "processes": list(profile.processes)}
+        return {"ok": True, "profile": profile.name, "processes": wanted}
+
+    def _cmd_profile_mouse_color(self, request: dict) -> dict:
+        """Set the color a synced mouse and a synced headset's lights show while game profile
+        `value` is loaded, or with a null `color` none, so that they show the keyboard's (the
+        owner's decision of 2026-10-23); on the daemon's own copy when it is the loaded one,
+        which is then synced at once (Daemon.sync_to_leader). With `if_none` true, as the
+        pack's fill sends it, a profile that has a color by then keeps it, refused."""
+        name = name_text(request["value"], "profile_mouse_color")
+        color = profiles.read_mouse_color(request["color"], "profile_mouse_color.color")
+        loaded, profile = self.games.loaded_copy(name)
+        if profile is None:
+            return {"ok": False, "error": NO_GAME_PROFILE_NAMED.format(quoted(name))}
+        if request.get("if_none") is True and profile.mouse_color is not None:
+            # Read after the import's 'game profile "X"'s mouse color: ' (import_plan._what).
+            return {"ok": False, "error": "one was set since the import read it; import again "
+                                          "to choose"}
+        previous, profile.mouse_color = profile.mouse_color, color
+        try:
+            profile.save()
+        except BaseException:
+            profile.mouse_color = previous
+            raise
+        if loaded:
+            self.d.sync_to_leader()
+        return {"ok": True, "profile": profile.name,
+                "mouse_color": profiles.mouse_color_json(color)}
 
     def _cmd_promote(self, request: dict) -> dict:
         """Make what shows the active M profile's own, with or without a game
@@ -193,9 +219,7 @@ class GameCommands:
                 # Every keyboard model's: the M profile then shows on each what the game
                 # profile showed.
                 target.lighting = copy.deepcopy(self.games.overlay.lighting)
-                target.keys = dict(self.games.overlay.bindings)
-                target.shift = dict(self.games.overlay.shift)
-                target.mouse = copy.deepcopy(self.games.overlay.mouse)
+                target.layers = copy.deepcopy(self.games.overlay.layers)
                 # Only with a profile loaded: with none, the record may name a hand choice
                 # whose file will not load yet, which a reload or a later start loads
                 # (Games.remembered).
@@ -209,7 +233,8 @@ class GameCommands:
         shown = self.games.unload_by_hand()
         log.info("promoted %s to the default for profile %d", escaped(source),
                  self.d.config.active)
-        return with_note({"ok": True, "promoted_to": self.d.config.active, "from": source}, *shown)
+        return with_note({"ok": True, "promoted_to": self.d.config.active,
+                          "profile_name": self.d.config.profile.name, "from": source}, *shown)
 
     def _cmd_delete_profile(self, request: dict) -> dict:
         name = name_text(request["value"], "delete_profile")
@@ -280,7 +305,7 @@ class GameCommands:
 
     def _cmd_import_profile_lighting(self, request: dict) -> dict:
         """The pack's `import_profile`: a replace writes the name, programs and lighting, and
-        the mouse color where the import has one, and leaves the bindings, MR layer and mouse
+        the mouse color where the import has one, and leaves the bindings, G-Shift layer and mouse
         buttons. Its own command, so a daemon older
         than the pack answers "unknown command" instead of replacing the whole profile (the
         owner's decision of 2026-09-29)."""
@@ -292,8 +317,10 @@ class GameCommands:
         imported = GameProfile.from_json(request.get("profile"), f"{command}.profile")
         loaded, existing = self.games.loaded_copy(imported.name)
         if existing is not None and request.get("replace") is not True:
-            return {"ok": False,
-                    "error": f"a game profile named {quoted(existing.name)} already exists"}
+            # Read after the import's 'game profile "X": ' (import_plan._what): the plan sends
+            # replace for each name it found taken, so this one was saved since.
+            return {"ok": False, "error": "one of that name was saved since the import read "
+                                          "your game profiles; import again to choose"}
         # Only JSON true keeps them, as only true replaces: "false" asks for no keeping.
         keep_processes = request.get("keep_processes") is True
         left: list[str] = []
@@ -302,13 +329,11 @@ class GameCommands:
         profile = existing or imported
         before = copy.deepcopy(profile)
         if existing is not None:
-            fields = ["name"]
+            profile.name = imported.name
             if not keep_processes:
-                fields.append("processes")
+                profile.processes = imported.processes
             if not lighting_only:
-                fields += ["bindings", "shift", "mouse"]
-            for name in fields:
-                setattr(profile, name, getattr(imported, name))
+                profile.layers = imported.layers
             # The keyboard models the import has lighting for; the profile's others stay. So
             # does the profile's mouse color, where the import has none.
             merge_under(profile.lighting, imported.lighting, keyboard_ids)
@@ -353,11 +378,12 @@ class GameCommands:
         return free, left
 
     def _cmd_import_m_profile(self, request: dict) -> dict:
-        """Put a front end's G keys, MR layer, mouse buttons and, with `lighting`, lighting on
-        one M profile (the G HUB import's desktop default); a failed save puts it back. Only
-        the keys `keys` names are written, every one for a null or a request without it
-        (_keys_named); the other keys, and the mouse models and keyboard models the import has
-        nothing for, keep the M profile's."""
+        """Put a front end's G keys and mouse buttons, each on both layers, and, with
+        `lighting`, lighting on one M profile (the G HUB import's desktop default); a failed
+        save puts it back. Only the keys `keys` names are written, every one for a null or a
+        request without it (_keys_named); the other keys, and the mouse models and keyboard
+        models the import has nothing for, keep the M profile's. A mouse model the import has
+        takes both its layers from it, so a G-Shift binding the import leaves out goes."""
         index = whole_number(request["value"], "import_m_profile")
         if index not in PROFILE_IDS:
             return {"ok": False, "error": NOT_AN_M_PROFILE.format(index)}
@@ -368,6 +394,10 @@ class GameCommands:
         for key in keys:
             target.keys[key], target.shift[key] = imported.bindings[key], imported.shift[key]
         merge_under(target.mouse, imported.mouse, mouse_ids)
+        for model in imported.mouse:
+            for name in mouse_ids(model):
+                target.mouse_shift.pop(name, None)
+        merge_under(target.mouse_shift, imported.mouse_shift, mouse_ids)
         if request.get("lighting") is True:
             # The keyboard models the import has lighting for; the M profile's others stay.
             merge_under(target.lighting, imported.lighting, keyboard_ids)

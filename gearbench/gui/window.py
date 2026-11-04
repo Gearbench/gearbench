@@ -1,6 +1,6 @@
 """The window: the state its four tabs read, and the wiring to the daemon.
 
-The daemon holds the 0x8071 claim, so the window never writes to the keyboard. It reads live
+The daemon holds the lighting claim, so the window never writes to the keyboard. It reads live
 state, which the M keys and the CLI also change, from the control socket, and the files for
 what status does not carry, a game profile's per-key map and the M profile's own lighting, on
 the worker thread: a library scan parses every profile file.
@@ -13,18 +13,17 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple, cast
 
-from gi.repository import Adw, Gtk
+from gi.repository import Adw, Gdk, Gtk
 
 from ..battery import kept_at
-from ..config import PER_KEY, PROFILE_IDS, Config, parse_color, unusable
+from ..config import PER_KEY, PROFILE_IDS, Config, parse_color
 from ..daemon import KEYBOARD_REQUESTS, LAYER_EDITS, UNKNOWN, LayerChanged
 from ..desktop import APP_NAME, DESKTOP_ENTRY as APP_ID
-from ..keyboard import shown_brightness
 from ..library_files import by_name, slug
 from ..lighting import ANIMATIONS
 from ..profiles import GameProfile, Library, mouse_color_json, profiles_dir
-from ..settings_files import ConfigError, FileChanged, FileUnreadable
-from ..wording import NO_REASON, REFUSED_HEADING, capitalized
+from ..settings_files import ConfigError
+from ..wording import NO_REASON, REFUSED_HEADING, capitalized, home_shortened
 from .a50x_page import (
     NAMES as A50X_NAMES,
     PAGE as A50X_PAGE,
@@ -33,22 +32,24 @@ from .a50x_page import (
 )
 from .daemon_banner import DaemonBanner
 from .dialogs import track_keys_down
-from .extension_banner import ExtensionBanner, shell_for
+from .extension_banner import ExtensionBanner
 from .g432_page import (
     NAME as G432_NAME,
     NAMES as G432_NAMES,
     PAGE as G432_PAGE,
     G432Page,
 )
-from .headset_page import HeadsetPage
+from .headset_page import HeadsetPage, headset_problems
 from .headset_stack import HeadsetStack
-from .keyboard_page import KeyboardPage, keyboard_problem
+from .keyboard_page import KeyboardPage, confirm_reload, keyboard_problem
 from .lighting_state import BEFORE_STATUS, LightingState, ShownOn, adopt_lighting
 from .macro_banner import MacroBanner
 from .macro_page import MacrosPage
 from .main_menu import MainMenu
 from .mouse_page import MousePage
+from .outputs_group import OutputsGroup
 from .polls import Polls
+from .problem_banners import CONFIG_KINDS, ConfigBanner, ToolsBanner, UinputBanner
 from .profile_manager import ProfileManager
 from .spatial_group import SpatialGroup
 from .style import (
@@ -57,9 +58,11 @@ from .style import (
     KEYBOARD_TAB,
     MOUSE_TAB,
     Styler,
+    add_icons,
     displayable,
     editing_text,
     refusal_line,
+    swatch_sheet,
     take_typing_on_clicks,
 )
 from .worker import (
@@ -74,32 +77,23 @@ from .worker import (
     unreachable,
 )
 
-#: What the uinput banner adds after the daemon's no_virtual_keyboard or no_virtual_mouse
-#: problem, after "; ": a one-line text the window shows ends with no period (the user's
-#: decision of 2026-10-27).
-SEE_GUIDE = "see the user guide"
-#: The uinput banner's problems: with both in a status, it says the first.
-UINPUT_PROBLEMS = ("no_virtual_keyboard", "no_virtual_mouse")
-#: The refusals that are a problem with a file (ConfigError.kind), for the config banner.
-CONFIG_KINDS = (FileChanged.kind, FileUnreadable.kind)
 #: Layer changes sent while held: built from the mouse's own reading, not the window's copy.
 SENT_WHILE_HELD = frozenset(("mouse_dpi_stages", "mouse_rate"))
 #: The window's status read, its poll's and resync's, while the Keyboard tab shows the leader's
 #: keyboard; Window.status_read names another the tab shows.
 STATUS_READ = {"command": "status"}
-#: The config banner's title while the window itself could not read the file.
-NOT_READ_TITLE = ("config.json could not be read ({}), so no binding, keyboard color or "
-                  "keyboard effect change is sent; fix it, then reload it")
-#: The toast for a change held while config.json is unreadable (held), from the Keyboard tab
-#: or the Mouse tab; short, since the config banner says the rest and stays up.
+#: The toast for a change held while config.json is unreadable (held); short, since the
+#: config banner says the rest and stays up.
 ON_DEFAULTS = "Not sent: config.json could not be read; fix it, then reload it"
 #: The same while the loaded game profile's file cannot be read. It names no profile:
-#: held_back always puts it in a toast, and a profile's name has no length limit (TOAST_MAX).
+#: it is always said in a toast (call, KeyboardPage.on_defaults), and a profile's name has
+#: no length limit (TOAST_MAX).
 ON_UNREAD_PROFILE = "Not sent: the game profile's file could not be read; fix it, then reload it"
-#: The config banner's button, the Keyboard tab's Reload from disk.
-RELOAD_LABEL = "Reload…"
 #: The button on a toast whose act can be taken back (toast's `undo`).
 UNDO = "Undo"
+#: The button on a toast with more behind it: raw text or a note too long for it
+#: (toast's `detail` and `full`).
+DETAILS = "Details"
 #: What a close says while it waits for the changes on their way (_on_close).
 CLOSING = "Closing once the last changes are sent"
 
@@ -120,9 +114,8 @@ def _library(directory: Path) -> Library:
 
 
 def read_files() -> tuple[Config | Exception, list[GameProfile], list[tuple[str, str]]]:
-    """config.json, or why it could not be read, the game profiles, and the profile files
-    left out, unreadable or shadowed by another of the same name, as (file name, why). For
-    the worker thread."""
+    """config.json, or why it could not be read, the game profiles, and what the read left
+    out (Library.skipped), as (name, why). For the worker thread."""
     library = _library(profiles_dir())
     profiles = library.all()
     config, error = first_config()
@@ -195,9 +188,9 @@ class Window(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application | None) -> None:
         super().__init__(application=app, title=APP_NAME,
                          default_width=940, default_height=820)
-        #: The keys held in the window, which a dialog opening over it keeps from the dialog
-        #: until they come up (dialogs.swallow_held_at_open).
-        self.keys_down = track_keys_down(self)
+        # Count the keys held in the window, which a dialog opening over it keeps from the
+        # dialog until they come up (dialogs.swallow_held_at_open).
+        track_keys_down(self)
         #: The binding mirror and the M profiles' own lighting, read on the worker after this
         #: first load. While `config_error`, why the last read failed, is set, `config` is the
         #: defaults or the last good read, maybe of a layer no longer in force, and no change
@@ -206,7 +199,10 @@ class Window(Adw.ApplicationWindow):
         self.config, self.config_error = first_config()
         #: Game profiles as they were last read, rebuilt on the worker.
         self.library: list[GameProfile] = []
-        #: The profile files that read left out, as (file name, why).
+        #: The game profiles were read once (reload_files): the empty list before that is not
+        #: an empty library (MacrosPage._uses_unknown).
+        self.library_read = False
+        #: What that read left out (Library.skipped), as (name, why).
         self.skipped_profiles: list[tuple[str, str]] = []
         self.worker = DaemonWorker()
         self._tick_pending = False
@@ -240,13 +236,11 @@ class Window(Adw.ApplicationWindow):
         #: digest, so no poll would read the files again.
         self._mouse_colors_unanswered: list[tuple[str, int | None]] = []
         #: A read is owed: one landed while a lighting change was unanswered, or was due
-        #: mid-drag (resync, absorb, reload_files). It runs once neither holds.
+        #: mid-drag. It runs once neither holds.
         self._read_again = False
 
         #: Live state as the daemon reports it.
         self.active = self.config.active
-        self.brightness = shown_brightness(self.config.brightness, None, None)[0]
-        self.levels: list[int] = [0, 12, 25, 50, 100]
         self.profile_names = {i: p.name for i, p in self.config.profiles.items()}
         self.saved_colors = list(self.config.saved_colors)
         #: The lighting the Keyboard tab shows, and changes as its rows and board are used:
@@ -255,7 +249,7 @@ class Window(Adw.ApplicationWindow):
         self.lighting = LightingState.placeholder()
         self.overlay: str | None = None
         #: The game profile loaded, from `status`, for the focus row: `overlay` has it only
-        #: once the files are read.
+        #: once the files are read, or the reply to the Loaded row's pick names it.
         self.status_overlay: str | None = None
         #: A running program loaded the game profile, rather than a hand.
         self.overlay_auto = False
@@ -301,7 +295,7 @@ class Window(Adw.ApplicationWindow):
         self.headset_tab.stack.connect("notify::visible-child-name", self.polls.on_page)
 
         self._lay_out(header)
-        self.take_config({})
+        self.config_banner.take({}, self.config_error)
 
         # Shown from the file first; the daemon's reply corrects it.
         self.refresh()
@@ -312,8 +306,8 @@ class Window(Adw.ApplicationWindow):
 
     #: The close waits for the changes on their way (_on_close).
     _flushing = False
-    #: A change was refused or held while it waited, or found no daemon or a socket it could
-    #: not use: the window stays up to say so.
+    #: A change was refused, held or failed while the close waited, or found no daemon or a
+    #: socket it could not use: the window stays up to say so.
     _flush_refused = False
     #: The toast that says the close waits, taken down if the window stays.
     _closing_toast: Adw.Toast | None = None
@@ -346,38 +340,36 @@ class Window(Adw.ApplicationWindow):
     def _build_banners(self) -> None:
         """The banners over the tabs, each down when built."""
         self.daemon_banner = DaemonBanner(self.worker, self.resync, self.set_status)
-        # Up while the daemon has no virtual keyboard or mouse. No button: the daemon retries
-        # every 30 s (VIRTUAL_RETRY) and at the next bind, and the fix (the udev rule or the
-        # uinput module) is outside the window.
-        self.uinput_banner = Adw.Banner(use_markup=False)
-        # Up while another program that drives these devices runs (apps.OTHER_TOOLS), a line
-        # each in the daemon's words: no markup. No button: each is quit outside the window.
-        self.tools_banner = Adw.Banner(use_markup=False)
-        # Up while config.json or the loaded game profile's file cannot be read, or one of them
-        # or a macro's was edited on disk: nothing is saved over it until a reload. Not
-        # markup: the title carries the file's path and the error's words.
-        self.config_banner = Adw.Banner(button_label=RELOAD_LABEL, use_markup=False)
-        self.config_banner.connect("button-clicked", lambda _b: self.keyboard.on_reload(None))
-        self.extension_banner = ExtensionBanner(shell_for(self.get_application()))
+        self.uinput_banner = UinputBanner()
+        self.tools_banner = ToolsBanner()
+        self.config_banner = ConfigBanner(lambda: confirm_reload(self))
+        self.extension_banner = ExtensionBanner(self.get_application())
         self.macro_banner = MacroBanner(self.call, self._tick, self.is_suspended)
 
     def _build_pages(self) -> None:
         """The four tabs and the stack that shows one of them."""
         self.mouse = MousePage(self, self.worker, self.call, self.toast,
                                self.set_status, self.kb_base, self.refused)
-        self.spatial = SpatialGroup(self.worker, self.toast)
-        self.headset = HeadsetPage(self, self.worker, self.call, self.toast, self.set_status)
+        self.outputs = OutputsGroup(self.worker, self.toast, self.kept_up)
+        # A Headset pick moves where Outputs plays, which its group reads from spatial.json.
+        self.spatial = SpatialGroup(self.worker, self.toast, self.kept_up,
+                                    picked=self.outputs.refresh)
+        self.headset = HeadsetPage(self, self.worker, self.call, self.toast, self.kept_up,
+                                   self.set_status)
         self.g432 = G432Page(self, self.worker, self.call, self.toast, self.kb_base)
-        self.headset_tab = HeadsetStack(self.headset.widget, self.headset.page,
-                                        self.spatial.widget)
+        #: The groups every headset page shows under the headset pick, in their order there,
+        #: Spatial sound last: it plays into Gearbench Game while Outputs is on.
+        self.headset_groups: tuple[OutputsGroup | SpatialGroup, ...] = (self.outputs, self.spatial)
+        self.headset_tab = HeadsetStack(self.headset.widget, self.headset.shared,
+                                        self.spatial.headset_group,
+                                        *(group.widget for group in self.headset_groups))
         self.headset_tab.add(G432_PAGE, G432_NAME, self.g432.widget, self.g432.page,
                              G432_NAMES, self.g432.refresh, self.g432.tick)
-        self.a50x = A50XPage(self.worker, self.call, self.toast)
+        self.a50x = A50XPage(self.worker, self.call, self.toast, self.kept_up)
         self.headset_tab.add(A50X_PAGE, A50X_TITLE, self.a50x.widget, self.a50x.page,
                              A50X_NAMES, self.a50x.refresh, self.a50x.refresh)
         self.keyboard = KeyboardPage(self)
         self.macros = MacrosPage(self)
-        # After the Keyboard tab, whose stylesheet holds the swatches' rules.
         self.rebuild_saved()
 
         self.stack = Adw.ViewStack()
@@ -404,9 +396,9 @@ class Window(Adw.ApplicationWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         box.append(header)
         box.append(self.daemon_banner.banner)
-        box.append(self.uinput_banner)
-        box.append(self.tools_banner)
-        box.append(self.config_banner)
+        box.append(self.uinput_banner.banner)
+        box.append(self.tools_banner.banner)
+        box.append(self.config_banner.banner)
         box.append(self.extension_banner.banner)
         box.append(self.macro_banner.banner)
         box.append(self.stack)
@@ -433,22 +425,22 @@ class Window(Adw.ApplicationWindow):
         stopped, so a tick left running would latch the polls' pending flags and keep the
         window alive; the display holds the CSS providers likewise.
 
-        Unsaved macro edits are asked about first (MacrosPage.asks_before_close). Settling
-        values (a speed, idle times, a mouse's DPI, a picker key run, a headset setting) are
-        sent now, and the close waits for changes on their way (writing), not for polls,
-        since stopping the
-        worker drops what is queued. A change refused or held meanwhile (held_back) keeps the
-        window up to say so, and a second close closes at once (the owner's decisions of
-        2026-09-28). So does a change that found no daemon or a socket it could not use
-        (set_status), under its banner: it never got there. A read that finds either does not.
-        A dialog opened while the close waits keeps the window up with it (_flushed).
+        Unsaved macro edits are asked about first (MacrosPage.asks_before_close). What still
+        settles on each page is sent now (flush), and the close waits for changes on their
+        way (writing), not for polls, since stopping the worker drops what is queued. A
+        change refused or held meanwhile, or one a page runs itself that failed (kept_up),
+        keeps the window up to say so, and a second close closes at once (the owner's
+        decisions of 2026-09-28). So does a change that found no daemon or a socket it could
+        not use (set_status), under its banner: it never got there. A read that finds either
+        does not. A dialog opened while the close waits keeps the window up with it
+        (_flushed).
         """
         if self.macros.asks_before_close(self.close):
             return True
         if not self._flushing:
-            # Set before the flushes, so a change one of them holds counts as refused (held_back).
+            # Set before the flushes, so a change one of them holds counts as refused (kept_up).
             self._flushing, self._flush_refused = True, False
-            if any([self.keyboard.flush(), self.mouse.flush(),
+            if any([self.keyboard.flush(), self.mouse.flush(), self.outputs.flush(),
                     *(page.flush() for page in self.headset_pages)]) or self.writing:
                 # Up until the close ends or the window stays (_flushed): a mouse write
                 # can take up to 30 s.
@@ -505,10 +497,11 @@ class Window(Adw.ApplicationWindow):
         return (self.headset, self.g432, self.a50x)
 
     @property
-    def headset_parts(self) -> tuple[HeadsetPage | SpatialGroup | G432Page | A50XPage, ...]:
-        """The Headset tab's pages and its Spatial sound group: the close waits for each
-        one's `busy` (writing) and lets go of each."""
-        return (*self.headset_pages, self.spatial)
+    def headset_parts(self) -> tuple[
+            HeadsetPage | OutputsGroup | SpatialGroup | G432Page | A50XPage, ...]:
+        """The Headset tab's pages and the groups every page shows (headset_groups): the close
+        waits for each one's `busy` (writing) and lets go of each."""
+        return (*self.headset_pages, *self.headset_groups)
 
     def manage_profiles(self, expand: str | None = None) -> None:
         """The Game profiles dialog, opened on the profile `expand` names when
@@ -551,7 +544,7 @@ class Window(Adw.ApplicationWindow):
             shown.dismiss()
             shown = None
         if shown is None:
-            label = UNDO if undo is not None else "Details" if detail or full else None
+            label = UNDO if undo is not None else DETAILS if detail or full else None
             shown = Adw.Toast(title=displayable(message), timeout=timeout,
                               use_markup=False, button_label=label)
             # Only its own: one dismissed late must not take its successor's place.
@@ -573,7 +566,7 @@ class Window(Adw.ApplicationWindow):
         the A50's Load preset to headset dialog's, since the window's is under the dialog."""
         if self.profiles_dialog is not None:
             return self.profiles_dialog.toasts
-        presets = self.headset.library.toast_overlay()
+        presets = self.headset.toast_overlay()
         return presets if presets is not None else self.toasts
 
     def explain(self, message: str, detail: str | None = None,
@@ -589,33 +582,33 @@ class Window(Adw.ApplicationWindow):
             dialog.set_extra_child(Gtk.Label(label=displayable(detail), wrap=True,
                                              selectable=True, xalign=0,
                                              css_classes=["dimmed", "monospace"]))
-        dialog.add_response("close", "OK")
+        dialog.add_response("close", "Close")
         dialog.connect("closed", lambda _d: self._explaining.discard(message))
         self._explaining.add(message)
         dialog.present(self)
 
-    def held_back(self, why: str) -> None:
-        """Say why a change was not sent (held). One held while the close
-        waits counts as refused: the window stays up to say so."""
+    def kept_up(self) -> None:
+        """A change refused (refused) or held (held), or one a page runs itself on this
+        computer that failed, its reason said by the caller: one while the close waits counts
+        as refused, and the window stays up to say so."""
         if self._flushing:
             self._flush_refused = True
-        self.toast(why)
 
     def refused(self, reply: dict) -> None:
         """Say a refused command where it can be read in full: a file the daemon will not write
         over on the config banner, and over the Game profiles dialog as well while it is open,
         since the dialog sits over the banner; anything else in a toast, whole up to
-        TOAST_MAX, else its first clause, or REFUSED_HEADING when that is too long too, with
-        the whole behind Details, the daemon's raw text under it (the owner's decision of
-        2026-10-22). A layer_changed refusal also reads status and the files again, to take
-        the layer its sentence names."""
-        message = capitalized(str(reply.get("error") or NO_REASON))
+        TOAST_MAX, else its first clause, or REFUSED_HEADING when that is too long too or is
+        cut inside a quoted name (refusal_line), with the whole behind Details, the daemon's
+        raw text under it (the owner's decision of 2026-10-22). The sentence writes the home
+        folder as ~, as the window names a path. A layer_changed refusal also reads status
+        and the files again, to take the layer its sentence names."""
+        message = capitalized(home_shortened(str(reply.get("error") or NO_REASON)))
         detail = str(reply["detail"]) if reply.get("detail") else None
-        if self._flushing:
-            self._flush_refused = True
+        self.kept_up()
         kind = reply.get("kind")
         if kind in CONFIG_KINDS:
-            self.show_config_problem(message)
+            self.config_banner.show(message)
         if kind not in CONFIG_KINDS or self.profiles_dialog is not None:
             # A layer_changed sentence too: the profile names in it have no length limit.
             line = refusal_line(message, REFUSED_HEADING)
@@ -626,30 +619,11 @@ class Window(Adw.ApplicationWindow):
         if kind == LayerChanged.kind:
             self.resync()
 
-    def show_config_problem(self, text: str) -> None:
-        """The config banner up with `text`, capitalized, lone surrogates made displayable: a
-        key or a link's target in an error can hold one."""
-        self.config_banner.set_title(displayable(capitalized(text)))
-        self.config_banner.set_revealed(True)
-
-    def take_config(self, status: dict) -> None:
-        """The config banner: the window's own failed read of config.json
-        first, then what the daemon's `problems` say of config.json, the
-        loaded game profile's file or a macro's, and down when nothing does."""
-        if self.config_error is not None:
-            self.show_config_problem(NOT_READ_TITLE.format(unusable(self.config_error)))
-            return
-        problem = next((p for p in status.get("problems") or () if p["code"] in CONFIG_KINDS), None)
-        if problem is None:
-            self.config_banner.set_revealed(False)
-        else:
-            self.show_config_problem(problem["message"])
-
     def set_status(self, reachable: bool, error: Exception | None = None, *,
                    poll: bool = False) -> None:
         """The daemon banner: shown at a failure, titled for what `failure` makes of `error`,
-        and hidden at a good status; each tab says whether its device is there. Every failure
-        also marks the files to be read again at the next good status.
+        and hidden at a good status. Whether a device is there is for its tab to say. Every
+        failure also marks the files to be read again at the next good status.
 
         `poll` marks a read, which carries no change: one that finds no daemon or a socket it
         cannot use does not keep a closing window up, since a Spatial sound action, which does
@@ -683,7 +657,8 @@ class Window(Adw.ApplicationWindow):
         command = request.get("command")
         if (command in LAYER_EDITS and command not in SENT_WHILE_HELD
                 and (why := self.held(command)) is not None):
-            self.held_back(why)
+            self.kept_up()
+            self.toast(why)
             if callback is not None:
                 callback(None)
             return
@@ -776,9 +751,11 @@ class Window(Adw.ApplicationWindow):
         change since the last status is in it too and was never read.
 
         A change refused or held (call) is taken back to `_known` and drawn once no other is
-        out, since the read after it takes nothing while a file does not parse. One that timed
-        out may have been made, and is left to that read. Either way it is read back (resync),
-        or what the daemon refused would stay drawn as if saved.
+        out, since the read after it takes nothing while a file does not parse. During a drag
+        outside Per-key the release's reply or the read owed after it takes it back instead.
+        One whose round trip raised is left to that read, since one that timed out may have
+        been made. Either way it is read back (resync), or what the daemon refused would stay
+        drawn as if saved.
         """
         self._lighting_unanswered += 1
         sent = self.lighting.copy()
@@ -792,8 +769,14 @@ class Window(Adw.ApplicationWindow):
                         and reply.get("was") == self._seen.lighting):
                     self._seen = self._seen._replace(lighting=digest)
             elif refused and not self._lighting_unanswered and self._known is not None:
-                self.lighting.take(self._known)
-                self.refresh()
+                if self.dragging and self.lighting.mode != PER_KEY:
+                    # A drag outside Per-key shows each color on the keyboard; taken back to
+                    # Per-key mid-drag, its release would send nothing and leave the last frame
+                    # there. The release's own reply takes it back, or the read owed after it.
+                    self._read_again = True
+                else:
+                    self.lighting.take(self._known)
+                    self.refresh()
             if reply is None or (self._read_again and not self._lighting_unanswered):
                 self.resync()
         self.call(request, done, lambda _error: done(None, refused=False))
@@ -855,9 +838,10 @@ class Window(Adw.ApplicationWindow):
         (Daemon.synced_color): the loaded game profile's mouse color, in the window's copy of
         the library, where it has one. Else on the leader's own page it is the window's copy,
         which a change there moves at once: the whole-board color in static mode and under an
-        animation, the background under the keys in per-key. While the copy is of another keyboard (lighting_of), it is
-        the last status's (sync_base), since the daemon cuts the leader's lighting to the
-        leader; the copy's again with a daemon that gives none."""
+        animation, the background under the keys in per-key. While the copy is of another
+        keyboard or of none, as before the first read (lighting_of), it is the last status's
+        (sync_base), since the daemon cuts the leader's lighting to the leader; the copy's
+        again with a daemon that gives none."""
         if (own := self.loaded_mouse_color()) is not None:
             return own
         if self.sync_base is not None and not self.copy_is_leaders():
@@ -871,11 +855,20 @@ class Window(Adw.ApplicationWindow):
         self.mouse.follow_keyboard()
         self.g432.follow_keyboard()
 
+    def show_editing(self) -> None:
+        """Tell the Mouse tab and the Headset tab's G keys group which layer an edit lands in
+        (editing), with G-Shift's line for the mice and headsets, which any keyboard's MR
+        shifts."""
+        text, line = self.editing(), self.keyboard.layer_line(every=True)
+        self.mouse.set_editing(text, line)
+        self.g432.set_editing(text, line)
+
     def copy_is_leaders(self) -> bool:
         """Whether the window's copy of the lighting is of the keyboard that leads, the one a
-        synced mouse follows (Keyboard.sync_devices): true too before a status names either."""
+        synced mouse follows (Keyboard.sync_devices): true too before a status names a leader,
+        false while the copy is of no keyboard's (lighting_of), as before a read took one."""
         leader = self.shown_on.leader
-        return leader is None or self.lighting_of in (None, leader)
+        return leader is None or self.lighting_of == leader
 
     def game_profile(self, name: str | None) -> GameProfile | None:
         """A game profile from the cached library, by name."""
@@ -974,9 +967,9 @@ class Window(Adw.ApplicationWindow):
             self.macros.reread()
         self.set_status(True)
         self.polls.take_away(status)
-        self.take_virtual(status)
-        self.take_tools(status)
-        self.take_config(status)
+        self.uinput_banner.take(status)
+        self.tools_banner.take(status)
+        self.config_banner.take(status, self.config_error)
         self.macro_banner.take(status)
         self.extension_banner.take(status)
         self.take_macros(status)
@@ -986,7 +979,7 @@ class Window(Adw.ApplicationWindow):
             self.active = status["profile"]
         self.take_names(status)
         self.take_saved(status)
-        self.take_brightness(status)
+        self.keyboard.light.take_brightness(status)
         self.take_layer(status)
         self.take_lock(status)
         self.keyboard.light.take_idle(status)
@@ -1012,6 +1005,7 @@ class Window(Adw.ApplicationWindow):
         # plugged in and fine.
         self.keyboard.daemon_gone(unreachable(error))
         self.mouse.show_problems([])
+        self.headset_tab.show_problems([])
         self.headset.show_problem(None)
         self.headset.daemon_gone(error)
 
@@ -1024,13 +1018,10 @@ class Window(Adw.ApplicationWindow):
         # Every mouse problem to the Mouse tab, which picks what its banner says
         # (MousePage.show_problems).
         self.mouse.show_problems([p for p in problems if p["code"].startswith("mouse_")])
-        # The A50 Gen 4's first, then another family's while no headset is attached, when the
-        # A50's page shows for all (HeadsetStack.take): an attached A50's Status row says the
-        # problem it is given (HeadsetPage.show_state).
-        self.headset.show_problem(
-            next((p for p in problems if p["code"].startswith("headset_")), None)
-            or (None if status.get("headsets") else next(
-                (p for p in problems if p["code"].startswith(("a50x_", "g432_"))), None)))
+        attached = bool(status.get("headsets"))
+        own, banner = headset_problems(problems, attached, self.headset.view.seen)
+        self.headset.show_problem(own, none_attached=not attached)
+        self.headset_tab.show_problems(banner)
         self.headset_tab.take(status)
         problem = keyboard_problem(status, self.shown_on.model)
         self.keyboard.take_status(bool(status.get("connected")),
@@ -1038,7 +1029,8 @@ class Window(Adw.ApplicationWindow):
                                   answering=bool(status.get("answering")),
                                   problem=problem, name=status.get("name"),
                                   product=status.get("product"),
-                                  battery_at=kept_at(status))
+                                  battery_at=kept_at(status),
+                                  preset=status.get("battery_notices"))
         if status.get("connected"):
             # Only while one is connected, answering or not: a daemon that has not found the
             # keyboard (asleep when the daemon started, say) sends no capabilities, and taking
@@ -1077,25 +1069,6 @@ class Window(Adw.ApplicationWindow):
         self._seen, self._files_seen = seen, files
         return changed
 
-    def take_virtual(self, status: dict) -> None:
-        """Raise the uinput banner while the daemon lacks a virtual device, in its problem's
-        words: the virtual keyboard's while both are missing."""
-        found = {p["code"]: p["message"] for p in status.get("problems") or ()
-                 if p["code"] in UINPUT_PROBLEMS}
-        message = next((found[code] for code in UINPUT_PROBLEMS if code in found), None)
-        if message is not None:
-            self.uinput_banner.set_title(f"{capitalized(message)}; {SEE_GUIDE}")
-        self.uinput_banner.set_revealed(message is not None)
-
-    def take_tools(self, status: dict) -> None:
-        """The other-tools banner, from the `other_hid_tool` problems: a
-        line each, and down when there are none."""
-        found = [p["message"] for p in status.get("problems") or ()
-                 if p["code"] == "other_hid_tool"]
-        if found:
-            self.tools_banner.set_title("\n".join(found))
-        self.tools_banner.set_revealed(bool(found))
-
     def take_macros(self, status: dict) -> None:
         """Reread the Macros tab when the `macros` digest moved, so a hand edit the
         daemon reloaded is not saved over with the tab's old steps."""
@@ -1125,8 +1098,7 @@ class Window(Adw.ApplicationWindow):
             self.focus = (focus["source"], str(program) if program else None,
                           str(profile) if profile else None)
         self.keyboard.show_layer()
-        self.mouse.set_editing(self.editing())
-        self.g432.set_editing(self.editing())
+        self.show_editing()
 
     def take_lock(self, status: dict) -> None:
         """Lights off when locked and why it is unavailable, for the Keyboard tab's switch."""
@@ -1160,8 +1132,9 @@ class Window(Adw.ApplicationWindow):
         self.rebuild_saved()
 
     def rebuild_saved(self) -> None:
-        """Every picker's Saved colors row, the Keyboard tab's first: it loads the swatches'
-        rules the others draw with. The Game profiles dialog's among them while it is open."""
+        """Load the saved colors' swatch rules beside the fixed ones (BASE_SHEET), then build
+        every picker's Saved colors row again, the Game profiles dialog's while it is open."""
+        self.styler.update(BASE_SHEET + swatch_sheet(self.saved_colors))
         self.keyboard.light.show_saved()
         for saved in (self.mouse.saved, self.g432.saved):
             saved.rebuild()
@@ -1175,13 +1148,6 @@ class Window(Adw.ApplicationWindow):
             return
         self.take_saved(reply)
 
-    def take_brightness(self, status: dict) -> None:
-        if status.get("brightness_levels"):
-            self.levels = status["brightness_levels"]
-        if isinstance(status.get("brightness"), int):
-            self.brightness = status["brightness"]
-        self.keyboard.light.refresh_brightness()
-
     def reload_files(self, status: dict) -> None:
         """Read config.json and the game profile library on the worker: parsing every
         file on the main thread stalls the window, at every M key press."""
@@ -1189,24 +1155,25 @@ class Window(Adw.ApplicationWindow):
                                  list[tuple[str, str]]] | Exception) -> None:
             if isinstance(result, Exception):
                 # The kept copy may be of a layer the daemon has left: changes built on
-                # it are held until a read works.
+                # it are held until a read works, and the board row says so.
                 self.config_error = result
-                self.take_config(status)
+                self.config_banner.take(status, self.config_error)
+                self.keyboard.update_board()
                 return
             config, library, skipped = result
             if isinstance(config, Exception):
                 # Held from here, as above, a release mid-drag included.
                 self.config_error = config
-                self.take_config(status)
+                self.config_banner.take(status, self.config_error)
             if self.dragging:
                 # Started before the press: taking it changes the copy and layer the
                 # release is built on. Owed, as resync's is.
                 self._read_again = True
                 return
             self.library, self.skipped_profiles = library, skipped
+            self.library_read = True
             for name, processes in self._processes_unanswered:
-                profile = self.game_profile(name)
-                if profile is not None:
+                if (profile := self.game_profile(name)) is not None:
                     profile.processes = list(processes)
             for name, color in self._mouse_colors_unanswered:
                 if (profile := self.game_profile(name)) is not None:
@@ -1220,7 +1187,7 @@ class Window(Adw.ApplicationWindow):
                 return
             self.config = config
             self.config_error = None
-            self.take_config(status)
+            self.config_banner.take(status, self.config_error)
             # A color or paint still unanswered is not in this read: taking the read's
             # lighting drops that key from the copy the next click saves whole. Read again
             # once they are answered.
@@ -1254,8 +1221,7 @@ class Window(Adw.ApplicationWindow):
         """Put the window's state on the rows. Memory only: no disk, no daemon."""
         self.keyboard.sync()
         self.follow_keyboard()
-        self.mouse.set_editing(self.editing())
-        self.g432.set_editing(self.editing())
+        self.show_editing()
         self.macros.refresh_uses()
         if self.profiles_dialog is not None:
             self.profiles_dialog.refresh()
@@ -1264,6 +1230,11 @@ class Window(Adw.ApplicationWindow):
 class Application(Adw.Application):
     def __init__(self) -> None:
         super().__init__(application_id=APP_ID)
+
+    def do_startup(self) -> None:
+        Adw.Application.do_startup(self)
+        # Once a run, on the display the startup opened, which every window is on.
+        add_icons(Gtk.IconTheme.get_for_display(cast("Gdk.Display", Gdk.Display.get_default())))
 
     def do_activate(self) -> None:
         (self.props.active_window or Window(self)).present()

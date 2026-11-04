@@ -16,7 +16,7 @@ import time
 from typing import TYPE_CHECKING, cast
 
 from ...hidpp import DeviceGone, HidppError, HidppFailure
-from ...keyboard import MODEL_OF as KEYBOARDS
+from ...keyboard import NO_IDLE_TIMES
 from ...lighting import (
     DARK,
     DIM,
@@ -27,8 +27,8 @@ from ...lighting import (
     WAKE_NOTICE,
     Lighting,
 )
-from ..shared import darker, unanswered
-from .notes import LIGHTS_DOWN_NOTE, NO_LIGHTING, named_words
+from ..shared import NO_LIGHTING, darker, unanswered
+from .notes import LIGHTS_DOWN_NOTE, named_words
 
 if TYPE_CHECKING:
     from .. import Daemon
@@ -49,14 +49,14 @@ KEYBOARD_AWAY_NOTE = "saved; the {} is not attached, and gets the new times when
 
 #: The same for a keyboard that did not answer: owed (times_owed), or given at its cable's
 #: claim when the look for the cable dropped the receiver route (Keyboard.keyboard_unanswered).
-KEYBOARD_SILENT_NOTE = "saved; the {} is not answering, and gets the new times once it answers"
+KEYBOARD_SILENT_NOTE = "saved; the {} is not answering, and gets the new times when it is back"
 
 #: What `idle` says for a keyboard attached without the lighting (0x8071) the times go to.
-NO_LIGHTING_TIMES_NOTE = f"saved; {NO_LIGHTING}, so the keyboard does not get the new times"
+NO_LIGHTING_TIMES_NOTE = f"saved; {NO_LIGHTING}, so it does not get the new times"
 
 #: The same for a keyboard lit through 0x8070's zones, which keeps no idle times and sends no
 #: idle notice (keyboard_zones), by its model's name.
-NO_IDLE_TIMES_NOTE = "saved; the {} has no idle times, so it does not dim while idle"
+NO_IDLE_TIMES_NOTE = f"saved; {NO_IDLE_TIMES}, so it does not dim while idle"
 
 # Each idle or wake notice (0x8071's IDLE_WAKE_EVENT) comes as a train of eight over about 4 s until
 # answered. A notice of the same kind within this of the previous copy taken, answered or left
@@ -71,14 +71,15 @@ EVENT_TRAIN_GAP = 3.0
 STALE_IDLE_MARGIN = 2.0
 
 #: A lighting change rewrites the idle times (fn 7) to restart the idle count, as G HUB does, at
-#: most once this often, so a color drag does not send fn 7 each frame. A skipped write lets the
-#: keyboard dim up to 2 s early, a fifth of IDLE_RANGE's 10 s minimum. An idle-dimmed keyboard
-#: has its first change written unless a change's write failed under 2 s before: a write the
-#: keyboard took that recent would make its notice stale.
+#: most once this often, and not this soon after a write the keyboard took, so a color drag does
+#: not send fn 7 each frame. A skipped write lets the keyboard dim up to 2 s early, a fifth of
+#: IDLE_RANGE's 10 s minimum. An idle-dimmed keyboard has its first change written unless a
+#: change's write failed under 2 s before, or it took a write that recent, which woke it.
 IDLE_RESTART_INTERVAL = 2.0
 #: After a lighting change wakes the keyboard from idleness, the wake its times write brings ends
 #: after the notice and on the G915 loses a per-key paint sent before then: a repaint at the
-#: notice stayed dark, one 0.4 s later showed (measured 2026-09-26).
+#: notice stayed dark, one 0.4 s later showed (measured 2026-09-26). A key's wake after a dim held
+#: back is painted again after the same delay.
 WAKE_REPAINT_DELAY = 0.5
 
 #: How long after a claim a wake notice is taken for the claim's own, left unanswered
@@ -118,7 +119,8 @@ class Idle:
         #: (fn 5 `03`) would turn the idle notice off again.
         self._train_put_back = False
         #: The keyboard's last answered notice was an idle one (fn 5 `03`), so once it is idle a
-        #: times write wakes it, lit or not: under never dim, or after a stale notice left answered.
+        #: times write wakes it, lit or not: while it never dims, or after a stale notice left
+        #: answered.
         self._idle_answered = False
         #: The last notice answered since the claim, its answer taken or refused (answer_notice),
         #: was an idle one not put back (stale_idle_notice), whether it moved the level or not:
@@ -146,7 +148,8 @@ class Idle:
         #: within CLAIM_WAKE_WINDOW of the claim. The first idle or wake notice ends it.
         self._claim_wake_owed = False
         #: Its last idle notice dimmed nothing, for another keyboard in use (keyboard_went_idle),
-        #: and its answer turned the notice off until a key: dimmed once none is (tend_idle).
+        #: and its answer turned the notice off until a key: dimmed once none is (tend_idle);
+        #: a key's wake has the board painted again (keyboard_woke).
         self._dim_held = False
         #: Set up, or heard again after it was marked not answering: once the pass's reports
         #: are read, each other keyboard below lit is lit with it unless it went idle since
@@ -189,7 +192,7 @@ class Idle:
         """Take the wake notice a claim just made brings within 1.5 s for one already answered:
         it moves no level, and it is left unanswered (take_notice). The claim's 07 brings it,
         and the claim's own writes after, its 05 and fn 8 `01 01`, are its answer, as G HUB's
-        claim answers it, before its paint (G HUB on the wired G515 TKL, capture A2). Answered
+        claim answers it, before its paint (G HUB on the wired G515 TKL, 2026-10-21). Answered
         again after the connect's paint, it took that paint back on the G915 X LIGHTSPEED on
         its cable, and the board showed its own lighting (2026-10-23)."""
         self._last_rgb_event, self._last_rgb_kind = time.monotonic(), WAKE_NOTICE
@@ -219,12 +222,14 @@ class Idle:
         count, so the next, queued meanwhile, can still be the first. A notice of the other kind
         starts its own train. The claim's own wake notice is left unanswered
         (expect_claim_wake), and so are the later copies of an idle train whose first was put
-        back (stale_idle_notice), whose answer would take the put-back back.
+        back (stale_idle_notice), whose answer would take the put-back back, while they are
+        stale: a copy past the stale time starts a train of its own.
         """
         kind = data[0]
         if kind not in (IDLE_NOTICE, WAKE_NOTICE):
-            log.info("0x8071 event addr 0x%02x data %s: neither idle nor wake; left alone",
-                     IDLE_WAKE_EVENT, data[:4].hex(" "))
+            log.info("%s", self.journal_words(
+                f"0x8071 event addr 0x{IDLE_WAKE_EVENT:02x} data {data[:4].hex(' ')}: neither idle "
+                "nor wake; left alone"))
             return
         now = time.monotonic()
         claim_wake, self._claim_wake_owed = self._claim_wake_owed, False
@@ -234,11 +239,14 @@ class Idle:
                       "answered it")
             self._last_rgb_event = now
             return
-        if (kind == IDLE_NOTICE and self._train_put_back and self._last_rgb_kind == kind
-                and now - self._last_rgb_event < EVENT_TRAIN_GAP):
-            log.debug("a later copy of the idle notice put back left unanswered")
-            self._last_rgb_event = now
-            return
+        if kind == IDLE_NOTICE and self._train_put_back and self._last_rgb_kind == kind:
+            if now - self._last_rgb_event < EVENT_TRAIN_GAP and self._stale_age(now) is not None:
+                log.debug("a later copy of the idle notice put back left unanswered")
+                self._last_rgb_event = now
+                return
+            # Not a later copy: one past the stale time was sent after the put-back landed,
+            # so it starts a train of its own however soon after the last copy put back.
+            self._last_rgb_kind = None
         self._train_put_back = False
         if not self.answer_notice(kind):
             return
@@ -283,14 +291,15 @@ class Idle:
 
     def keyboard_went_idle(self) -> None:
         """The first answered copy of an idle notice: dim now and dark idle_off_after later
-        (idle_deadline), unless never dim is on. Only from lit, so a repeat notice does not put
-        the dark off. With another keyboard driven and typed on since its own idle notice
-        (Keyboards.in_use), nothing dims yet, and the dim is held back for tend_idle, since the
-        answer turned the notice off until a key; once none is, every keyboard dims together
-        (dim_together)."""
+        (idle_deadline), unless it never dims now (Daemon.never_dims). Only from lit, so a
+        repeat notice does not put the dark off. With another keyboard driven and typed on
+        since its own idle notice (Keyboards.in_use), nothing dims yet, and the dim is held
+        back for tend_idle, since the answer turned the notice off until a key; once none is,
+        every keyboard dims together (dim_together). A key on it before then has its board
+        painted again once the wake is over (keyboard_woke)."""
         why = self.journal_words("the keyboard is idle")
-        if self.d.config.never_dim:
-            log.info("%s; answered, not dimmed: never dim is on", why)
+        if (held := self.d.never_dims()) is not None:
+            log.info("%s; answered, not dimmed: %s", why, held)
             return
         if self.stale_idle_notice():
             return
@@ -319,8 +328,12 @@ class Idle:
         back; `quiet` says it at debug, for each keyboard dimmed with another (dim_together)."""
         self._idle_since, self._dim_held = time.monotonic(), False
         if not self.set_lights(DIM, why, quiet=quiet):
-            log.log(logging.DEBUG if quiet else logging.INFO, "%s; answered, the lights stay %s",
-                    why, LEVEL_WORDS[self.keyboard.lights])
+            # Dimmed with another, `why` is the other keyboard's: this line names this one.
+            if quiet:
+                log.debug("%s; the %s's lights stay %s", why, self.keyboard.model_name(),
+                          LEVEL_WORDS[self.keyboard.lights])
+            else:
+                log.info("%s; answered, the lights stay %s", why, LEVEL_WORDS[self.keyboard.lights])
 
     def idle_now(self) -> bool:
         """Whether the keyboard has not been typed on since its idle time ran out
@@ -339,7 +352,13 @@ class Idle:
         IDLE_RESTART_INTERVAL old, as the `idle` command's to each keyboard, woke it already
         and is not repeated. The write counts as a lighting change's (wake_for_change), so a
         change waking every keyboard writes it once. Said at debug: a keyboard that woke for a
-        key or a change says it itself."""
+        key or a change says it itself.
+
+        Nothing while it never dims: a keyboard below lit then is one a game profile just loaded
+        holds off dimming for, which the load lights with its one paint (Keyboards.apply_each),
+        where this write would wake it once more and paint it after."""
+        if self.d.never_dims() is not None:
+            return
         now = time.monotonic()
         written, self._change_times_at = self._times_written_at, now
         if written is None or now - written >= IDLE_RESTART_INTERVAL:
@@ -357,14 +376,12 @@ class Idle:
         left answered, for the next wake notice's answer to put back. The later copies of the
         train put back are left unanswered (take_notice, _train_put_back).
         """
-        if self._times_written_at is None:
+        age = self._stale_age(time.monotonic())
+        if age is None:
             return False
-        age = time.monotonic() - self._times_written_at
-        if age >= self._dim_written - STALE_IDLE_MARGIN:
-            return False
-        said = (f"the keyboard's idle notice came {age:.1f} s after its idle times were "
-                f"written, sooner than {self._dim_written} s can run out: answered, "
-                f"not dimmed")
+        said = self.journal_words(
+            f"the keyboard's idle notice came {age:.1f} s after its idle times were written, "
+            f"sooner than {self._dim_written} s can run out: answered, not dimmed")
         if self._stale_put_back:
             log.info("%s; its idle notice left off until its next wake notice", said)
             return True
@@ -387,23 +404,37 @@ class Idle:
         log.info("%s, and its idle notice put back on", said)
         return True
 
+    def _stale_age(self, now: float) -> float | None:
+        """How long after the idle times were last written an idle notice read at `now` came,
+        where that is sooner than the idle time the write carried less STALE_IDLE_MARGIN, so
+        the notice was sent before the write; None otherwise, and with no write taken."""
+        if self._times_written_at is None:
+            return None
+        age = now - self._times_written_at
+        return age if age < self._dim_written - STALE_IDLE_MARGIN else None
+
     def keyboard_woke(self) -> None:
         """The first answered copy of a wake notice: a key pressed on a keyboard whose idle
         notice was answered, or the idle times written again, which brings it about 70 ms later.
         Lit, with a full apply when that changes what the board shows; the lock's level stands.
-        After a lighting change or new idle times woke the keyboard, the board is painted again
-        once the wake is over (_repaint_due). A dim held back is dropped: the keyboard was typed
-        on, or took idle times, since its idle notice."""
-        self._dim_held = False
+        After a lighting change or new idle times woke the keyboard, or it woke after its idle
+        notice dimmed nothing for another keyboard in use (_dim_held), the board is painted
+        again once the wake is over (_repaint_due): at that wake the G915 X LIGHTSPEED shows its
+        own lighting, though its lights never dimmed. The dim held back is dropped:
+        the keyboard was typed on, or took idle times, since its idle notice."""
+        held, self._dim_held = self._dim_held, False
         written = self._times_written_at
         for_times = written is not None and time.monotonic() - written < EVENT_TRAIN_GAP
-        repaint, self._paint_at_wake = self._paint_at_wake and for_times, False
+        repaint, self._paint_at_wake = (self._paint_at_wake and for_times) or held, False
         why = self.journal_words("the keyboard woke for its idle times" if for_times
                                  else "a key woke the keyboard")
         changed = self.set_lights(LIT, why)
         if repaint:
-            log.info("%s; painting again in %.1f s, once the wake is over", why, WAKE_REPAINT_DELAY)
+            # Due under the lock's dark too, which paints nothing: an unlock before then lights
+            # the board, which the repaint shows.
             self._repaint_due = time.monotonic() + WAKE_REPAINT_DELAY
+        if repaint and self.keyboard.lights != DARK:
+            log.info("%s; painting again in %.1f s, once the wake is over", why, WAKE_REPAINT_DELAY)
         elif not changed:
             log.info("%s; answered, the lights stay %s", why, LEVEL_WORDS[self.keyboard.lights])
         self.d.keyboards.wake_others(self.keyboard, why)
@@ -436,7 +467,7 @@ class Idle:
     def _dim_held_back(self) -> None:
         """A dim held back for another keyboard in use (_dim_held), once none is."""
         keyboard = self.keyboard
-        if (self._dim_held and not self.d.config.never_dim and keyboard.idle_level_known()
+        if (self._dim_held and self.d.never_dims() is None and keyboard.idle_level_known()
                 and self.d.keyboards.in_use(keyboard) is None):
             # Its idle notice is off until a key (answer_idle), so it sends no other to dim it.
             self.dim_together(self.journal_words("the keyboard is idle, and no other is in use "
@@ -504,8 +535,7 @@ class Idle:
         self.times_owed = False
         if keyboard.lighting is None and keyboard.dev is not None:
             return NO_LIGHTING_TIMES_NOTE.format(keyboard.model_name())
-        product = keyboard.keyboard_product
-        if product is not None and KEYBOARDS[product].zone_lighting:
+        if keyboard.zone_lit():
             return NO_IDLE_TIMES_NOTE.format(keyboard.model_name())
         if not keyboard.keyboard_answering():
             self.times_owed = keyboard.dev is not None
@@ -539,7 +569,8 @@ class Idle:
 
         Called by each command that paints, after its checks and right before its paint, so a
         refused command writes nothing. This keyboard's write comes at most once per
-        IDLE_RESTART_INTERVAL, and none under never dim, or to a keyboard away or not
+        IDLE_RESTART_INTERVAL, none that soon after a write it took, which stands in for it,
+        and none while it never dims (Daemon.never_dims), or to a keyboard away or not
         answering. A write the keyboard did not take moves no level and never fails the change.
 
         A write it took on a keyboard below lit sets the idle level lit, painted here with
@@ -560,41 +591,46 @@ class Idle:
     def _wake_own_for_change(self, paint: bool) -> bool:
         """wake_for_change on this keyboard alone, with its answer."""
         keyboard = self.keyboard
-        if (self.d.config.never_dim or keyboard.lighting is None
+        if (self.d.never_dims() is not None or keyboard.lighting is None
                 or not keyboard.keyboard_answering()):
             return False
         now = time.monotonic()
         if now - self._change_times_at < IDLE_RESTART_INTERVAL:
             return False
-        self._change_times_at = now
-        if self.write_idle_times() is not None:
+        written, self._change_times_at = self._times_written_at, now
+        # A write it took that recent restarted the count and woke it already, as in
+        # wake_with_another.
+        recent = written is not None and now - written < IDLE_RESTART_INTERVAL
+        if not recent and self.write_idle_times() is not None:
             return False
         if keyboard.idle_lights == LIT:
-            log.debug("a lighting change: the idle times written again, which restarts "
-                      "the keyboard's idle count")
+            if not recent:
+                log.debug("a lighting change: the idle times written again, which restarts "
+                          "the keyboard's idle count")
             return False
         if self.set_lights(LIT, CHANGE_WAKE, paint=paint):
             return not paint
-        log.info("%s; the lights stay %s", CHANGE_WAKE, LEVEL_WORDS[keyboard.lights])
+        log.info("%s; the lights stay %s", self.journal_words(CHANGE_WAKE),
+                 LEVEL_WORDS[keyboard.lights])
         return False
 
     def idle_settings(self) -> tuple[int, int, bool]:
-        """(idle_dim_after, idle_off_after, never_dim), to tell a change by."""
-        return self.d.config.idle_dim_after, self.d.config.idle_off_after, self.d.config.never_dim
+        """(idle_dim_after, idle_off_after, whether it never dims now: Daemon.never_dims), to
+        tell a change by."""
+        return (self.d.config.idle_dim_after, self.d.config.idle_off_after,
+                self.d.never_dims() is not None)
 
     def idle_changed(self, before: tuple[int, int, bool], paint: bool) -> str | None:
         """Act on idle settings changed from `before` on this keyboard: new times go to it,
-        waking one that is idle, repainted after the wake (keyboard_woke); never dim turned on
-        lights it, painted unless `paint` is False; never dim turned off waits for the next idle
-        notice. The answer is write_idle_times' note, or None."""
-        note = None
-        if before[:2] != self.idle_settings()[:2]:
-            note = self.write_idle_times()
-        if self.d.config.never_dim and not before[2] and self.keyboard.idle_lights != LIT:
-            if paint:
-                self.set_lights(LIT, "never dim turned on")
-            else:
-                self.keyboard_awake()
+        waking one that is idle, repainted after the wake (keyboard_woke); never dimming now,
+        by never dim turned on or a game profile loaded with its switch on, lights it, painted
+        unless `paint` is False; dimming again waits for the next idle notice. The answer is
+        write_idle_times' note, or None."""
+        now = self.idle_settings()
+        note = self.write_idle_times() if before[:2] != now[:2] else None
+        if now[2] and not before[2] and self.keyboard.idle_lights != LIT:
+            self.set_lights(LIT, "never dim turned on" if self.d.config.never_dim
+                            else cast("str", self.d.never_dims()), paint=paint)
         return note
 
     # -- the light level -----------------------------------------------------
@@ -660,8 +696,9 @@ class Idle:
             return "keyboard lights off"
         if failed is None:
             return NO_LIGHTING.format(keyboard.model_name())
-        # apply_profile answers in a reply's words ("the change is saved"), untrue at a suspend.
+        # apply_profile answers in a reply's words ("the change is saved", "refused that"),
+        # untrue at a suspend; a refusal's own words are in not_shown's warning.
         why = ("the keyboard is away" if keyboard.dev is None
                else "the keyboard is not answering" if not keyboard.keyboard_answering()
-               else failed)
+               else "the keyboard refused it")
         return f"keyboard lights not turned off ({why})"

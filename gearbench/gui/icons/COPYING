@@ -1,0 +1,26 @@
+The icons under hicolor/ and tray/ are the GNOME Project's (https://www.gnome.org),
+from the symbolic icons of its Adwaita icon theme, adwaita-icon-theme 50.0
+(https://gitlab.gnome.org/GNOME/adwaita-icon-theme). Those under hicolor/ are copied
+unchanged and sit in hicolor's folder for their context, and
+list-drag-handle-symbolic.svg, from Adwaita's ui folder, in actions, since hicolor
+has no ui folder. Those under tray/ are Adwaita's status/dialog-warning-symbolic.svg
+and status/dialog-error-symbolic.svg, renamed gearbench-warning-symbolic.svg and
+gearbench-error-symbolic.svg and changed by Gearbench: each has KDE's
+current-color-scheme style, and its path the ColorScheme-Text class and
+fill="currentColor" in place of fill="#2e3436", so KDE Plasma draws it in its text
+color. Their shapes are Adwaita's.
+
+The theme's license, as it states it:
+
+  This work is licenced under the terms of either the GNU LGPL v3 or
+  Creative Commons Attribution-Share Alike 3.0 United States License.
+
+  To view a copy of the CC-BY-SA licence, visit
+  https://creativecommons.org/licenses/by-sa/3.0/ or send a letter to Creative
+  Commons, 171 Second Street, Suite 300, San Francisco, California 94105, USA.
+
+  When attributing the artwork, using "GNOME Project" is enough.
+  Please link to https://www.gnome.org where available.
+
+The GNU LGPL v3 is in LGPL-3, beside this file. The GNU GPL v3, whose terms it
+adds to, is Gearbench's own license.

@@ -1,9 +1,7 @@
 """The window's macro banner: which macro runs or counts down, and its Stop.
 
 This part owns the banner, what it shows and the one-second watch that counts it down and
-asks whether the macro still runs. Its window builds it, places the banner, hands it each
-`status` reply and removes the watch at the close; the Macros tab hands it Run's
-`macro_run` reply.
+asks whether the macro still runs.
 """
 
 from __future__ import annotations
@@ -15,13 +13,13 @@ from typing import TYPE_CHECKING
 
 from gi.repository import Adw, GLib
 
-from ..macros import MACRO_RUNNING as RUNNING, MACRO_STARTS, REPEAT_WORDS, countdown_seconds
-from ..wording import number
+from ..macros import MACRO_RUNNING as RUNNING, MACRO_STARTS, REPEAT_WORDS
+from ..wording import countdown_seconds, number
 
 if TYPE_CHECKING:                       # pragma: no cover
     from .worker import Call
 
-#: The macro banner, up while a macro runs or counts down. Stop sends `macro_stop`.
+#: The banner's title while a macro runs: its name, then its repeat mode.
 MACRO_RUNNING = f"{RUNNING} ({{mode}})"
 STOP_LABEL = "Stop"
 #: How often the banner counts down and asks whether the macro still runs.

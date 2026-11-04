@@ -19,12 +19,12 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import cast
+from typing import Self, cast
 
 from . import eq_presets, settings_files
 from .eq_presets import EVERYDAY, GAMING, MEDIA
 from .g432 import BAND_FREQS, EQ_BANDS_MAX, GAIN_MAX, GAIN_MIN, HeadsetModel
-from .wording import given_count, hertz, whole, word_list, written
+from .wording import given_count, hertz, whole_in, word_list, written
 
 #: A library file's version.
 LIBRARY_VERSION = 1
@@ -67,8 +67,15 @@ class Library(eq_presets.Saved[Preset]):
     def playing(self, bands: tuple[Band, ...]) -> int | None:
         """The number of the first preset whose bands are `bands`, those the headset plays;
         None for none."""
-        return next((number for number, preset in zip(self.numbers, self.presets, strict=True)
+        return next((number for number, preset in enumerate(self.presets, 1)
                      if preset.bands == bands), None)
+
+    def added(self, preset: Preset) -> Self:
+        """These presets with `preset` after the last (eq_presets.Saved.added); ValueError,
+        eq_presets.ALREADY_SAVED, where a preset has its bands (playing)."""
+        if (held := self.playing(preset.bands)) is not None:
+            raise ValueError(eq_presets.ALREADY_SAVED.format(held, self.get(held).name))
+        return super().added(preset)
 
 
 def bands_of(frequencies: Sequence[int], gains: Sequence[int]) -> tuple[Band, ...]:
@@ -128,14 +135,8 @@ def band_of(saved: object) -> Band:
     if not isinstance(saved, dict):
         why = f"a band is an object of its freq and gain, not {written(saved)}"
         raise ValueError(why)  # noqa: TRY004 -- refused in words, as every value of a request is
-    freq, gain = saved.get("freq"), saved.get("gain")
-    if not whole(freq) or not 1 <= freq <= FREQ_MAX:
-        raise ValueError(f"a band's frequency is a whole number of Hz from 1 to {FREQ_MAX}, "
-                         f"not {written(freq)}")
-    if not whole(gain) or not GAIN_MIN <= gain <= GAIN_MAX:
-        raise ValueError(f"a band's gain is a whole number of dB from {GAIN_MIN} to "
-                         f"{GAIN_MAX}, not {written(gain)}")
-    return Band(freq, gain)
+    return Band(whole_in(saved.get("freq"), 1, FREQ_MAX, "a band's frequency", " of Hz"),
+                whole_in(saved.get("gain"), GAIN_MIN, GAIN_MAX, "a band's gain", " of dB"))
 
 
 def bands_from(saved: object) -> tuple[Band, ...]:
@@ -164,7 +165,7 @@ def load_library(model: HeadsetModel) -> Library:
     """`model`'s library, its STARTERS with no file. eq_presets.LibraryUnread for a file that
     does not read."""
     return eq_presets.load_library(library_path(model), library_of,
-                                   Library(STARTERS.get(model.key, ())))
+                                   Library(STARTERS[model.key]))
 
 
 def save_library(library: Library, model: HeadsetModel) -> None:
@@ -177,16 +178,20 @@ def save_library(library: Library, model: HeadsetModel) -> None:
 def edit(change: Callable[[Library], Library], model: HeadsetModel) -> Library:
     """Save what `change` makes of `model`'s library, and answer it. eq_presets'
     LibraryUnread for a file that does not read and LibraryPartial for one read in part
-    (Library.whole), each left as it is."""
-    library = change(load_library(model).whole())
-    save_library(library, model)
-    return library
+    (Library.whole), each left as it is. The load and the save run under eq_presets.held."""
+    return eq_presets.edit(library_path(model), lambda: load_library(model), change,
+                           lambda library: save_library(library, model))
+
+
+def fits(preset: Preset, frequencies: tuple[int, ...]) -> bool:
+    """Whether `preset`'s bands are `frequencies`, the bands a headset plays, in its order."""
+    return tuple(band.freq for band in preset.bands) == frequencies
 
 
 def gains_for(preset: Preset, frequencies: tuple[int, ...], short: str) -> list[int]:
     """`preset`'s gains for the headset `short` names, in the order of `frequencies`, the bands
     it plays: ValueError, OTHER_BANDS, where they are not the preset's bands'."""
-    if tuple(band.freq for band in preset.bands) != frequencies:
+    if not fits(preset, frequencies):
         played = word_list([hertz(freq) for freq in frequencies], "and") if frequencies \
             else "no band"
         raise ValueError(OTHER_BANDS.format(short, played))
@@ -201,8 +206,9 @@ def picked_path(model: HeadsetModel) -> Path:
 def load_picked(model: HeadsetModel) -> Preset | None:
     """The preset picked for `model`, None with no file. settings_files.ConfigError naming the
     file, cut to its two ends as settings_files.from_file cuts a refusal, for a file that does
-    not read, is of another version or holds a preset preset_of does not take, and OSError for
-    a read that fails."""
+    not read, is of another version or holds a preset preset_of does not take, and for one
+    behind a link to nothing, the file's or a folder's above it (settings_files.link_to_nothing),
+    whose pick is somewhere; OSError for a read that fails."""
 
     def picked(data: object) -> Preset:
         # entries' check of an object at the version, as for a library's file; it holds no
@@ -211,10 +217,13 @@ def load_picked(model: HeadsetModel) -> Preset | None:
             raise ValueError(eq_presets.unread_why(data, PICKED_VERSION))
         return preset_of(cast("dict", data))
 
+    path = picked_path(model)
     try:
-        return settings_files.from_file(picked_path(model), picked)
+        return settings_files.from_file(path, picked)
     except FileNotFoundError:
-        return None
+        if (place := settings_files.link_to_nothing(path)) is None:
+            return None
+        raise settings_files.ConfigError(settings_files.missing_behind(path, place)) from None
 
 
 def save_picked(preset: Preset, model: HeadsetModel) -> None:
@@ -228,11 +237,14 @@ def save_picked(preset: Preset, model: HeadsetModel) -> None:
 
 def drop_picked(model: HeadsetModel) -> bool:
     """No preset picked for `model` any more: its file removed, if there is one. Whether it
-    was there; raises OSError for a removal that fails."""
+    was there; raises OSError for a removal that fails, and for a folder above it that is a
+    link to nothing (settings_files.link_to_nothing), whose pick is somewhere."""
     path = picked_path(model)
     try:
         path.unlink()
     except FileNotFoundError:
+        if (place := settings_files.link_to_nothing(path.parent)) is not None:
+            raise OSError(settings_files.link_gone(place)) from None
         return False
     settings_files.sync_removal(path)
     return True

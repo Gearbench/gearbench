@@ -30,22 +30,23 @@ MODIFIERS_EVENT = 0x00
 
 
 class Modifiers:
-    """A keyboard's 0x8051, and whether FN is held by the last report it sent."""
+    """A keyboard's 0x8051, and whether FN is held (fn_held)."""
 
     def __init__(self, dev: Hidpp) -> None:
         self.dev = dev
         self._feature = dev.require(F_MODIFIERS, "LOGI_MODIFIERS")
-        #: Whether FN is held, by the last report; False until one says it is.
+        #: Whether FN is held: as the last report said, or False at the start and after
+        #: report or let_go took it as let go.
         self.fn_held = False
 
     def report(self) -> None:
         """fn 3 `03 ff`: the keyboard reports its modifiers, FN among them, until it is
         switched off, as unplugging a keyboard with no battery does: the G915 X LIGHTSPEED, on
         its battery, kept reporting through a replug of its cable and stopped when switched off
-        (Windows captures G4b and G5c, 2026-10-23). FN is taken as let go, as a keyboard set up
-        again after a power cycle has it."""
-        self.dev.request(self._feature.index, SET_REPORTED, REPORTED.to_bytes(2, "big"))
+        (on Windows, 2026-10-23). FN is taken as let go first, the write refused or not, as a
+        keyboard set up again after a power cycle has it."""
         self.fn_held = False
+        self.dev.request(self._feature.index, SET_REPORTED, REPORTED.to_bytes(2, "big"))
 
     def handles(self, event: Event) -> bool:
         return event.feature_index == self._feature.index and event.address == MODIFIERS_EVENT

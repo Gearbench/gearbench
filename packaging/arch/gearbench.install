@@ -1,0 +1,77 @@
+# The Arch package's scripts: the steps the .deb's postinst, prerm and postrm
+# run, whose comments hold their reasons, but those for dpkg's own states and
+# for versions 1.2.1 and earlier, of which no Arch package exists, such as the
+# notice to plug a receiver in again after an upgrade. pacman's own hooks for
+# sysusers.d, the hwdb, the udev rules and the user units run at the end of the
+# transaction, after these functions.
+
+# Made before pacman puts the files in place, so udev never reads 70-g502x.rules,
+# which grants the G502 X PLUS's event nodes to this group, while the group is
+# missing: it drops a rule line that names a group not yet there. So, unlike the
+# .deb's postinst, it touches no rule to make udev read it again, a file pacman
+# -Qkk would then count as altered. The sysusers.d file is not on disk yet, so its
+# line comes on stdin in that file's place (systemd-sysusers(8), --replace). The
+# package adds no account, since it cannot know who uses the mouse.
+make_group() {
+    getent group gearbench >/dev/null && return 0
+    echo 'g gearbench -' | systemd-sysusers --replace=/usr/lib/sysusers.d/gearbench.conf -
+    echo "gearbench: with host mode off, the G502 X PLUS's G4 to G9 need your account" \
+        "in the gearbench group: run sudo usermod -aG gearbench <you>, then log out of" \
+        "every session and back in, or, with lingering on, restart the machine" >&2
+}
+
+hwdb_update() {
+    command -v systemd-hwdb >/dev/null 2>&1 || return 0
+    if [ -e /etc/udev/hwdb.bin ]; then
+        systemd-hwdb update || true
+    else
+        systemd-hwdb --usr update || true
+    fi
+}
+
+udev_reload() {
+    [ -d /run/udev ] || return 0
+    udevadm control --reload || true
+    udevadm trigger --subsystem-match=hidraw --action=add || true
+    udevadm trigger --subsystem-match=input --action=add || true
+    udevadm trigger --subsystem-match=misc --sysname-match=uinput --action=add || true
+}
+
+pre_install() {
+    make_group
+}
+
+pre_upgrade() {
+    make_group
+}
+
+post_install() {
+    hwdb_update
+    udev_reload
+    /usr/lib/gearbench/checkout-rules /usr/local/lib/udev/rules.d
+    systemctl --global enable gearbench.service || true
+    if [ -d /run/systemd/system ]; then
+        /usr/lib/gearbench/user-daemons start
+    fi
+}
+
+post_upgrade() {
+    hwdb_update
+    udev_reload
+    /usr/lib/gearbench/checkout-rules /usr/local/lib/udev/rules.d
+    if [ -d /run/systemd/system ]; then
+        /usr/lib/gearbench/user-daemons restart
+    fi
+}
+
+pre_remove() {
+    if [ -d /run/systemd/system ]; then
+        /usr/lib/gearbench/user-daemons stop
+    fi
+    systemctl --global disable gearbench.service || true
+}
+
+post_remove() {
+    hwdb_update
+    udev_reload
+}

@@ -15,7 +15,6 @@ from functools import partial
 
 from .. import a50_library, astro, astroeq, eq_presets
 from ..battery import kept_at
-from ..g432 import AUTO_OFF_LABEL
 from ..wording import (
     NOT_READ as UNREAD,
     clock_shown,
@@ -30,7 +29,6 @@ from ..wording import (
     word_list,
 )
 from .output import (
-    READINGS_FROM,
     Subcommands,
     battery_words,
     continued,
@@ -57,6 +55,14 @@ SAVE_HINT = "Save to the base station with `gearbench-ctl headset-save`"
 #: Why a command that needs the active slot cannot go on, with the option that names a slot.
 UNKNOWN_ACTIVE = "the base station has not said which slot is active; give {}"
 NO_ACTIVE = UNKNOWN_ACTIVE.format("--slot")
+NO_ACTIVE_FROM = UNKNOWN_ACTIVE.format("--from-slot SLOT")
+#: The end of the `headset:` line while the base station is silent, {} the clock_shown of
+#: read_at: the last full read, which the poll's balance, preset and battery can postdate.
+READ_IN_FULL_AT = "its settings were last read in full at {}"
+#: The refusal of `headset-library --save-as` with an option that changes or sends a
+#: preset: it saves a new one, from --from-slot's slot or the active one.
+SAVE_ALONE = ("--save-as takes no number, --name, --gains, --band, --delete or --write: it "
+              "saves a new preset alone")
 #: Why a slot cannot be taken: the daemon holds none of it, its read refused or not done.
 NOT_READ = "{} has not been read whole from the base station"
 #: What reads the slot, where --read can: it asks nothing while the base station is not
@@ -69,22 +75,49 @@ NAMED_PARTS = "name, gain or band"
 SOUND_PARTS = "gain or band"
 
 
+#: The command line's word for a setting whose socket word it is not, from the window's name
+#: for it (astro.SETTING_NAMES): the stream mix's voice channel is stream-voice, for Stream
+#: voice, and auto_off auto-shut-off, for Auto shut-off.
+RENAMED = {"stream_chat": "stream-voice", "auto_off": "auto-shut-off"}
+#: The words `headset-set` takes and lists after each setting's own and "preset", with the
+#: setting each names: auto-off, auto-shut-off's short form and its only word through
+#: Gearbench 1.2.1.
+SHORT_WORDS = {"auto-off": "auto_off"}
+#: The words `headset-set` takes beside each setting's own, with the word each stands for:
+#: stream-chat, its name through Gearbench 1.2.1.
+OLD_WORDS = {"stream-chat": "stream-voice"}
+
+
 def _setting_word(setting: str) -> str:
-    """A socket setting as the command line spells it: mic_level is mic-level."""
-    return setting.replace("_", "-")
+    """A socket setting as the command line spells it: mic_level is mic-level, and RENAMED's
+    by their own word."""
+    return RENAMED.get(setting) or setting.replace("_", "-")
 
 
-#: What `headset-set` takes: every setting, and the active equalizer preset.
-HEADSET_SETTINGS = (*map(_setting_word, astro.SETTINGS), "preset")
+def _current_word(word: str) -> str:
+    """`headset-set`'s setting as typed, an old word (OLD_WORDS) as the one it stands for,
+    before argparse checks it against the choices, which leave the old words out."""
+    return OLD_WORDS.get(word, word)
+
+
+#: The choices of `headset-set`: each setting's word, "preset" for the active equalizer
+#: preset, and SHORT_WORDS, with the setting each names.
+SETTING_KEYS = {**{_setting_word(s): s for s in astro.SETTINGS}, "preset": "preset",
+                **SHORT_WORDS}
+#: Auto shut-off's label in the reports: the window's row name for it, lowered.
+AUTO_OFF_LABEL = astro.SETTING_SUBJECTS["auto_off"]
 #: The label column of the A50 Gen 4's reports, which print over several functions: from
 #: every label they print, each setting's word among them.
 HEADSET_LABELS = label_column((
-    *HEADSET_SETTINGS, AUTO_OFF_LABEL, "device", "headset", "firmware", "battery", "balance",
+    *SETTING_KEYS, AUTO_OFF_LABEL, "device", "headset", "firmware", "battery", "balance",
     "unsaved", "save", f"slot {astro.PRESETS[-1]}", f"{LIBRARY_LABEL} {eq_presets.PRESETS_MAX}"))
 #: A line of a report in that column, and one under the line before it.
 _line, _more = partial(labeled, HEADSET_LABELS), partial(continued, HEADSET_LABELS)
 #: The bands that take a width, as a list in words.
 PEAK_BANDS = word_list([str(b) for b in astro.BANDS if b not in astro.SHELVES], "and")
+#: The characters of a band line's frequency, the longest one in range takes: 14.999 kHz,
+#: so that the gains under it line up.
+FREQ_COLUMN = len(hertz(astro.FREQ_RANGE[1] - 1))
 
 
 def _headset_ranges() -> str:
@@ -93,13 +126,14 @@ def _headset_ranges() -> str:
     levels = [_setting_word(s) for s, span in astro.SETTING_RANGES.items()
               if span == astro.LEVEL_RANGE]
     level, balance = astro.LEVEL_RANGE, astro.SETTING_RANGES["default_balance"]
+    auto_off = [word for word, setting in SETTING_KEYS.items() if setting == "auto_off"]
     return "; ".join((
-        f"{word_list(levels, 'and')} {level[0]} to {level[1]}%%",
-        *(f"{_setting_word(name)} {word_list(words)}"
+        f"{word_list(levels, 'and')}: {level[0]} to {level[1]}%%",
+        *(f"{_setting_word(name)}: {word_list(words)}"
           for name, words in astro.SETTING_WORDS.items()),
-        f"default-balance {balance[0]} (all Voice) to {balance[1]} (all Game)",
-        f"auto-off {word_list([str(m) for m in astro.AUTO_OFF_MINUTES])} minutes",
-        f"preset {word_list([str(p) for p in astro.PRESETS])}",
+        f"default-balance: {balance[0]} (all Voice) to {balance[1]} (all Game)",
+        f"{word_list(auto_off)}: {word_list([str(m) for m in astro.AUTO_OFF_MINUTES])} minutes",
+        f"preset: {word_list([str(p) for p in astro.PRESETS])}",
     ))
 
 
@@ -129,15 +163,16 @@ def _headset_value(setting: str, text: str) -> int | str:
 
 
 def _balance_words(value: int) -> str:
-    """A Game/Voice mix, 0 all Voice to 255 all Game, as the two shares."""
-    return shares_words(astro.game_share(value))
+    """A Game/Voice mix, 0 all Voice to 255 all Game, as `audio` gives the A50 X's: the number
+    on its scale, then the two shares."""
+    return f"{value} of {astro.BALANCE_RANGE[1]}, {shares_words(value, astro.BALANCE_RANGE[1])}"
 
 
 def _headset_value_words(setting: str, value: object) -> str:
     if setting == "auto_off":
         return f"{value} minutes"
     if setting == "default_balance" and isinstance(value, int):
-        return f"{value}, {_balance_words(value)}"
+        return _balance_words(value)
     # A level of 0 to 100, a percent, as the window gives it.
     if astro.SETTING_RANGES.get(setting) == astro.LEVEL_RANGE:
         return f"{value}%"
@@ -153,10 +188,11 @@ def _saved_words(entry: dict, words: Callable[[object], str] = str) -> str:
 
 
 def _band_words(gain: int, band: dict) -> str:
-    """One EQ band: gain, frequency in every view's words (wording.hertz), and width or
-    "shelf" for a band with none; --band takes the frequency in Hz."""
+    """One EQ band in the order every view gives it: frequency in every view's words
+    (wording.hertz), gain, and width or "shelf" for a band with none; --band takes the
+    frequency in Hz."""
     width = band["width"]
-    return (signed(gain).rjust(5) + f"  {hertz(band['freq']):>8}  "
+    return (f"{hertz(band['freq']):>{FREQ_COLUMN}}  {signed(gain):>5}  "
             + ("shelf" if width is None else f"width {width:.1f}"))
 
 
@@ -200,7 +236,7 @@ def _headset_state_words(reply: dict) -> str:
         read = reply["read_at"]
         return f"{astro.BASE_SILENT}; " + (
             "the settings have not all been read yet" if read is None
-            else READINGS_FROM.format(clock_shown(read)))
+            else READ_IN_FULL_AT.format(clock_shown(read)))
     docked = reply["docked"]
     if reply["linked"]:
         return "on, docked" if docked else "on"
@@ -259,42 +295,49 @@ def cmd_headset(args: argparse.Namespace) -> int:
 
 def _print_state(reply: dict) -> None:
     """The head of `gearbench-ctl headset`: the device, the headset on or off, the
-    firmware versions, the battery and the Game/Voice balance."""
+    battery, the firmware versions and the Game/Voice balance."""
     # The route in the window's words, as on every device line.
     _line("device", device_words(reply["device"], reply["name"], route("base station")))
     _line("headset", _headset_state_words(reply))
-    versions = reply["versions"]
-    # Each part by its whole name, as the window's Firmware row gives it; the reply's key for
-    # the base station is "base".
-    _line("firmware", ", ".join(f"{what} {versions[part]}"
-                                for what, part in (("base station", "base"),
-                                                   ("headset", "headset"))
-                                if part in versions))
     battery = reply["battery"]
     if battery is not None:
         # A silent base's reading was taken at battery_at, not read_at.
         _line("battery", battery_words(battery, kept_at(reply)))
+    versions = reply["versions"]
+    # Each part by its whole name, as the window's Firmware row gives it; the reply's key for
+    # the base station is "base".
+    if firmware := ", ".join(f"{what} {versions[part]}"
+                             for what, part in (("base station", "base"), ("headset", "headset"))
+                             if part in versions):
+        _line("firmware", firmware)
     if reply["balance"] is not None:
         _line("balance", _balance_words(reply["balance"]))
 
 
 def _print_settings(reply: dict) -> None:
-    """The settings of `gearbench-ctl headset`, each with flash's value where that
-    differs, one not given "not read" until the base station's first full read and left
-    out after it, then the active equalizer preset and every preset."""
+    """The settings of `gearbench-ctl headset` in the window's groups' order: the
+    microphone's, the active equalizer preset and every preset, the stream mix's, then the
+    base station's. Each setting with flash's value where that differs, one not given "not
+    read" until the base station's first full read and left out after it."""
+    _print_setting_lines(reply, astro.MIC_SETTINGS)
+    active = _active_preset_words(reply)
+    if active:
+        _line("preset", active)
+    for preset in reply["presets"]:
+        _print_preset(f"slot {preset['preset']}", _preset_lines(preset))
+    _print_setting_lines(reply, astro.STREAM_SETTINGS)
+    _print_setting_lines(reply, astro.BASE_SETTINGS)
+
+
+def _print_setting_lines(reply: dict, names: tuple[str, ...]) -> None:
     settings = reply["settings"]
-    for setting in astro.SETTINGS:
+    for setting in names:
         # auto_off by the window's row name, every other setting by headset-set's key.
         label = AUTO_OFF_LABEL if setting == "auto_off" else _setting_word(setting)
         if setting in settings:
             _line(label, _saved_words(settings[setting], partial(_headset_value_words, setting)))
         elif reply["read_at"] is None:
             _line(label, UNREAD)
-    active = _active_preset_words(reply)
-    if active:
-        _line("preset", active)
-    for preset in reply["presets"]:
-        _print_preset(f"slot {preset['preset']}", _preset_lines(preset))
 
 
 def _print_unsaved(reply: dict) -> None:
@@ -309,7 +352,7 @@ def _print_unsaved(reply: dict) -> None:
 
 
 def cmd_headset_set(args: argparse.Namespace) -> int:
-    setting = args.setting.replace("-", "_")
+    setting = SETTING_KEYS[args.setting]
     try:
         value = _headset_value(setting, args.value)
     except ValueError as exc:
@@ -333,8 +376,8 @@ def _gains(text: str) -> list[int]:
     try:
         gains = [int(g) for g in text.replace(" ", "").split(",")]
     except ValueError:
-        raise ValueError(f"--gains is {len(astro.BANDS)} whole numbers, comma separated, "
-                         f"like 0,2,0,-1,3; not {text!r}") from None
+        raise ValueError(f"--gains is {len(astro.BANDS)} whole numbers of dB split by "
+                         f"commas, like 0,2,0,-1,3, not {text!r}") from None
     astro.preset_gains(gains)
     return gains
 
@@ -376,12 +419,12 @@ def _send_eq(args: argparse.Namespace, request: dict, slot: int | None) -> int:
     return 0
 
 
-def _print_slot(reply: dict, number: int | None) -> None:
+def _print_slot(reply: dict, number: int) -> None:
     """Slot `number` of the `headset` reply as the base station read it back, and the hint
-    to save it."""
+    to save it; for a slot it did not read back, that it changed and what reads it."""
     preset = next((p for p in reply["presets"] if p["preset"] == number), None)
     if preset is None:
-        print("ok")
+        print(f"slot {number} changed, but the base station did not read it back; {READ_HINT}")
         return
     _print_preset(f"slot {number}", _preset_lines(preset))
     _save_hint(reply, f"preset_{number}")
@@ -448,7 +491,7 @@ def cmd_headset_eq(args: argparse.Namespace) -> int:
     return _save_slot_as(args, reply, name, changed, slot)
 
 
-def _over_default(default: astro.EqPreset, request: dict) -> dict:
+def _over_default(default: a50_library.EqPreset, request: dict) -> dict:
     """`--reset`'s headset_eq: the slot's default, its name, gains and all five bands, with
     the name, the gains and each band `request` gives over it."""
     reset = default.request()
@@ -467,7 +510,7 @@ def _save_slot_as(args: argparse.Namespace, reply: dict, name: str | None,
     # prints it with the library, or alone when the save does not go through.
     if changed and not args.json:
         _print_slot(reply, number)
-    library = _saved_as(reply, number, name)
+    library = _saved_as(reply, number, name, NO_ACTIVE)
     if library is None:
         if changed and args.json:
             print_json(reply)
@@ -479,11 +522,13 @@ def _save_slot_as(args: argparse.Namespace, reply: dict, name: str | None,
     return 0
 
 
-def _saved_as(reply: dict, number: int | None, name: str | None) -> a50_library.Library | None:
+def _saved_as(reply: dict, number: int | None, name: str | None,
+              unknown: str) -> a50_library.Library | None:
     """The library with slot `number` of `reply` added under `name`, or its own name for
-    None; None for a slot it cannot take or a save that failed, each said on stderr."""
+    None; None for a slot it cannot take or a save that failed, each said on stderr, a
+    `number` of None, no active slot known, as `unknown`."""
     # A name given replaces the slot's, so the slot's own is checked only when none is given.
-    if (preset := _reply_slot(reply, number, name is None, NO_ACTIVE)) is None:
+    if (preset := _reply_slot(reply, number, name is None, unknown)) is None:
         return None
     if name is not None:
         preset = replace(preset, name=name)
@@ -500,7 +545,7 @@ def _library_entries(library: a50_library.Library) -> list[dict]:
             for number in library.numbers]
 
 
-def _library_lines(preset: astro.EqPreset) -> list[str]:
+def _library_lines(preset: a50_library.EqPreset) -> list[str]:
     """A library preset: its name, then a line for each band, as `headset` gives a slot's."""
     return [preset.name, *(f"band {number}  {_band_words(gain, asdict(band))}"
                            for number, gain, band in zip(astro.BANDS, preset.gains,
@@ -511,20 +556,23 @@ def _print_library(library: a50_library.Library, shown: int | None) -> None:
     """The library's presets, or preset `shown` alone, each as `headset` prints a slot."""
     if not library.presets:
         _line(LIBRARY_LABEL,
-              LIBRARY_EMPTY.format("headset-eq --save-as saves the active one into it"))
+              LIBRARY_EMPTY.format("`gearbench-ctl headset-library --save-as` saves the active "
+                                   "slot into it"))
         return
     for number in library.numbers if shown is None else (shown,):
         _print_preset(f"{LIBRARY_LABEL} {number}", _library_lines(library.get(number)))
 
 
-def loaded_astroeq(file: str) -> astro.EqPreset | None:
+def loaded_astroeq(file: str) -> a50_library.EqPreset | None:
     """The .astroeq file `file` as typed; None once why it does not read is said on stderr."""
     # The errors escape the name: whoever shared the file chose it, and a glob passes it on.
     try:
         # As typed: Path("") is ".", the folder the command runs in.
         return astroeq.load_astroeq(file)
     except OSError as exc:
-        print(f"error: {_escaped(file)} could not be read ({reason(exc)})", file=sys.stderr)
+        # An empty name, as an empty shell variable passes it, would leave no subject.
+        print(f"error: {_escaped(file) or "''"} could not be read ({reason(exc)})",
+              file=sys.stderr)
     except ValueError as exc:
         print(f"error: {_escaped(file)}: {exc}", file=sys.stderr)
     return None
@@ -556,7 +604,7 @@ def _library_report(as_json: bool, library: a50_library.Library, shown: int | No
 
 
 def _library_change(args: argparse.Namespace
-                    ) -> Callable[[a50_library.Library, astro.EqPreset | None],
+                    ) -> Callable[[a50_library.Library, a50_library.EqPreset | None],
                                   a50_library.Library]:
     """What `headset-library`'s options make of the library, on its preset NUMBER: the
     gains and bands of the slot --from-slot took first, then --gains, each --band and
@@ -566,7 +614,7 @@ def _library_change(args: argparse.Namespace
     gains = None if args.gains is None else _gains(args.gains)
     bands = _band_list(args.band)
 
-    def change(library: a50_library.Library, slot: astro.EqPreset | None
+    def change(library: a50_library.Library, slot: a50_library.EqPreset | None
                ) -> a50_library.Library:
         preset = library.get(library.number(args.number))
         if slot is not None:
@@ -575,7 +623,7 @@ def _library_change(args: argparse.Namespace
         # Five bands and five gains, as they were: a band changes one.
         for band in bands:
             shown[band["band"] - 1] = astro.Band(band["freq"], band["width"])
-        return library.put(args.number, astro.EqPreset.of_bands(
+        return library.put(args.number, a50_library.EqPreset.of_bands(
             preset.name if name is None else name,
             preset.gains if gains is None else gains, shown))
     return change
@@ -591,7 +639,7 @@ def _not_taken(reply: dict, number: int, named: bool) -> str:
 
 
 def _reply_slot(reply: dict, number: int | None, named: bool, unknown: str
-                ) -> astro.EqPreset | None:
+                ) -> a50_library.EqPreset | None:
     """Slot `number` of a `headset` reply, from what the base station runs; None once why it
     cannot be taken is said on stderr: a slot not read whole, one a preset refuses, its name
     only when `named`, or None, no active one known, said as `unknown`."""
@@ -603,7 +651,7 @@ def _reply_slot(reply: dict, number: int | None, named: bool, unknown: str
     return preset
 
 
-def _from_slot(args: argparse.Namespace) -> astro.EqPreset | None:
+def _from_slot(args: argparse.Namespace) -> a50_library.EqPreset | None:
     """The slot --from-slot names, the active one for none, as the base station runs it;
     None once the daemon's refusal, or why the slot cannot be taken, is said."""
     reply = send({"command": "headset"})
@@ -612,13 +660,41 @@ def _from_slot(args: argparse.Namespace) -> astro.EqPreset | None:
         return None
     # The library preset keeps its own name, so the slot's is not checked.
     return _reply_slot(reply, args.from_slot or reply["preset"], named=False,
-                       unknown=UNKNOWN_ACTIVE.format("--from-slot SLOT"))
+                       unknown=NO_ACTIVE_FROM)
+
+
+def _library_save_as(args: argparse.Namespace) -> int:
+    """`headset-library --save-as`: the slot --from-slot names, the active one for none, as
+    the daemon last read it, saved into the library as NAME, or under its own name when
+    none is typed, and the preset it made shown; as `headset-eq --save-as` alone does,
+    with everything checked, the library's room among it, before the daemon is asked."""
+    if (args.number is not None or args.name is not None or args.gains is not None
+            or args.band or args.delete or args.write is not None):
+        print(f"error: {SAVE_ALONE}", file=sys.stderr)
+        return 1
+    try:
+        # A bare --save-as, its const True, takes the slot's own name.
+        name = typed_name(args.save_as) if isinstance(args.save_as, str) else None
+        a50_library.load_library().whole().has_room()
+    except ValueError as exc:
+        print(f"error: {_escaped(exc)}", file=sys.stderr)
+        return 1
+    reply = send({"command": "headset"})
+    if not reply.get("ok"):
+        return print_reply(reply, args.json)
+    library = _saved_as(reply, args.from_slot or reply["preset"], name, NO_ACTIVE_FROM)
+    if library is None:
+        return 1
+    return _library_report(args.json, library, len(library.presets))
 
 
 def cmd_headset_library(args: argparse.Namespace) -> int:
     """The A50's preset library: preset NUMBER changed by the options and shown alone, or
     every preset, with no NUMBER, after --delete or with --json; with --write, NUMBER written
-    to a slot of the base station after the changes, and the slot shown in its place."""
+    to a slot of the base station after the changes, and the slot shown in its place; with
+    --save-as, a slot saved into it (_library_save_as)."""
+    if args.save_as is not None:
+        return _library_save_as(args)
     changes = (args.name is not None or args.gains is not None or bool(args.band)
                or args.from_slot is not None)
     if (refusal := number_refusal("headset-library", args.number, changes=changes,
@@ -632,7 +708,7 @@ def cmd_headset_library(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"error: {_escaped(exc)}", file=sys.stderr)
         return 1
-    slot: astro.EqPreset | None = None
+    slot: a50_library.EqPreset | None = None
     if args.from_slot is not None and (slot := _from_slot(args)) is None:
         return 1
     if changes or args.delete:
@@ -671,7 +747,7 @@ def cmd_headset_revert(args: argparse.Namespace) -> int:
     if reply.get("note"):
         print(f"note: {_escaped(reply['note'])}")
     if left:
-        print("error: still differs from the base station's flash: "
+        print("error: still not what the base station's flash holds: "
               + _escaped(_unsaved_words(left)), file=sys.stderr)
     elif missed:
         print(f"error: not reverted: {_escaped(', '.join(missed))}", file=sys.stderr)
@@ -688,19 +764,23 @@ def add_headset(sub: Subcommands) -> None:
 
     hst = sub.add("headset-set", help="change a setting of the A50 Gen 4's base station, or "
                                       "its active preset; headset-save keeps it")
-    hst.add_argument("setting", choices=HEADSET_SETTINGS)
+    hst.add_argument("setting", type=_current_word, choices=SETTING_KEYS)
     hst.add_argument("value", help=_headset_ranges())
     hst.set_defaults(func=cmd_headset_set)
 
     freq, width = astro.FREQ_RANGE, astro.WIDTH_RANGE
     gains_help = f"the five bands' gains, {gain_range(*astro.GAIN_RANGE)}"
     shelves = [str(b) for b in astro.SHELVES]
-    heq = sub.add("headset-eq", help="change an equalizer preset's name, gains or bands; "
-                                     "headset-save keeps it")
-    # --preset, its name in 1.1.0, still works.
-    heq.add_argument("--slot", "--preset", dest="slot", type=int, choices=astro.PRESETS,
+    heq = sub.add("headset-eq", help="change an A50 Gen 4 equalizer preset's name, gains "
+                                     "or bands; headset-save keeps it")
+    heq.add_argument("--slot", type=int, choices=astro.PRESETS,
                      help="the slot to change; the active one when left out")
-    heq.add_argument("--name", help=f"{astro.NAME_BYTES[0]} to {astro.NAME_BYTES[1]} bytes")
+    # --preset, its name in 1.1.0, still works, left out of the help: on g432-eq
+    # --preset picks a library preset.
+    heq.add_argument("--preset", dest="slot", type=int, choices=astro.PRESETS,
+                     help=argparse.SUPPRESS)
+    heq.add_argument("--name", help=f"the preset's name, {astro.NAME_BYTES[0]} to "
+                                    f"{astro.NAME_BYTES[1]} bytes")
     heq.add_argument("--gains", metavar="G1,G2,G3,G4,G5", help=gains_help)
     heq.add_argument("--band", action="append", default=[], metavar="BAND:FREQ[:WIDTH]",
                      help=f"a band's frequency in Hz, {freq[0]} to {freq[1]}, and for bands "
@@ -708,7 +788,7 @@ def add_headset(sub: Subcommands) -> None:
                           f"{width[1]:.1f}; bands {word_list(shelves, 'and')} are shelves with "
                           f"no width; repeatable")
     heq.add_argument("--reset", action="store_true",
-                     help="first put the preset's default back, its name, gains and all five "
+                     help="first put the slot's default back, its name, gains and all five "
                           "bands: " + "; ".join(numbered(number, preset.name) for number, preset
                                                 in zip(astro.PRESETS, a50_library.DEFAULT_SLOTS,
                                                        strict=True))
@@ -720,12 +800,14 @@ def add_headset(sub: Subcommands) -> None:
     heq.set_defaults(func=cmd_headset_eq)
 
     him = sub.add("headset-import", help="load an Astro Command Center .astroeq file into an "
-                                         "equalizer preset, or into the library")
+                                         "A50 Gen 4 equalizer preset, or into the library")
     him.add_argument("file", help="the .astroeq file")
     into = him.add_mutually_exclusive_group()
-    # --preset, its name in 1.1.0, still works.
-    into.add_argument("--slot", "--preset", dest="slot", type=int, choices=astro.PRESETS,
+    into.add_argument("--slot", type=int, choices=astro.PRESETS,
                       help="the slot to load it into; the active one when left out")
+    # As headset-eq's.
+    into.add_argument("--preset", dest="slot", type=int, choices=astro.PRESETS,
+                      help=argparse.SUPPRESS)
     into.add_argument("--library", action="store_true",
                       help="add it to the library Gearbench keeps, sending the base station "
                            "nothing")
@@ -733,8 +815,8 @@ def add_headset(sub: Subcommands) -> None:
 
     hlb = sub.add("headset-library",
                   help="show or change the A50 Gen 4's preset library, which Gearbench keeps "
-                       "apart from the base station's three, or write one of its presets to "
-                       "a slot")
+                       "apart from the base station's three slots, or write one of its presets "
+                       "to a slot")
     library_number(hlb)
     hlb.add_argument("--from-slot", nargs="?", type=int, const=0, choices=astro.PRESETS,
                      metavar="SLOT",
@@ -746,10 +828,16 @@ def add_headset(sub: Subcommands) -> None:
     hlb.add_argument("--name", help=f"rename it, {astro.NAME_BYTES[0]} to "
                                     f"{astro.NAME_BYTES[1]} bytes")
     hlb.add_argument("--delete", action="store_true",
-                     help="delete it from the library, alone; those after it move up a number")
+                     help="delete it from the library, taking no other option but --json; "
+                          "those after it go a number lower")
     hlb.add_argument("--write", type=int, choices=astro.PRESETS, metavar="SLOT",
                      help="after the other options, write it to slot SLOT, 1, 2 or 3, of the "
                           "base station's memory; headset-save keeps it")
+    hlb.add_argument("--save-as", nargs="?", const=True, metavar="NAME",
+                     help="save the slot --from-slot names, else the active one, as the "
+                          "base station runs it, as a new preset named NAME, or under its "
+                          "own name when left out, taking no number or other change; at "
+                          f"most {eq_presets.PRESETS_MAX} presets in all")
     hlb.set_defaults(func=cmd_headset_library)
 
     sub.add("headset-save", help="save the A50 Gen 4's settings and equalizer presets to the "

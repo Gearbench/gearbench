@@ -9,11 +9,11 @@ import argparse
 import sys
 from pathlib import Path
 
-from .. import ghub, ghub_plan, import_plan, pack
+from .. import ghub, ghub_file, ghub_plan, import_plan, pack
 from ..apps import launcher_warning
 from ..config import MACRO_PREFIX, MODE_WORDS
-from ..ghub import MAX_DOCUMENT_BYTES
-from ..lighting import ANIMATIONS
+from ..ghub_file import MAX_DOCUMENT_BYTES
+from ..lighting import ANIMATIONS, OFF
 from ..macros import (
     MACRO_RUNNING,
     MACRO_STARTS,
@@ -21,12 +21,18 @@ from ..macros import (
     PLAY_DELAY,
     REPEAT_SUMMARIES,
     TOGGLE,
-    countdown_seconds,
     macros_dir,
 )
 from ..profiles import profiles_dir
-from ..wording import counted, escaped as _escaped
-from .output import GAME_PROFILE_LABELS, Subcommands, print_json, print_reply, send
+from ..wording import countdown_seconds, counted, escaped as _escaped
+from .output import (
+    GAME_PROFILE_LABELS,
+    Subcommands,
+    print_json,
+    print_m_profile_reply,
+    print_reply,
+    send,
+)
 
 #: import-ghub --all on a file whose profiles are all desktop defaults, which --all leaves out.
 ALL_FINDS_NONE = ("The file holds no game profile for --all, which leaves out the desktop "
@@ -47,8 +53,8 @@ def cmd_apps(args: argparse.Namespace) -> int:
         return 0
     for app in apps:
         print(f"  {_escaped(app['label']):<24} {_escaped(app['process'])}")
-    print("\nSet a profile's programs with `gearbench-ctl profile-programs <name> "
-          "<process>...`", file=sys.stderr)
+    print("\nSet a game profile's programs with `gearbench-ctl profile-programs <name> "
+          "<program>...`", file=sys.stderr)
     return 0
 
 
@@ -62,7 +68,6 @@ def _warn_launchers(programs: list[str]) -> None:
 
 
 def cmd_profile_programs(args: argparse.Namespace) -> int:
-    """Set which programs load a game profile."""
     _warn_launchers(args.programs)
     return print_reply(send({"command": "profile_processes", "value": args.name,
                               "processes": args.programs}), args.json,
@@ -76,8 +81,6 @@ def mouse_color_sent(text: str) -> str | None:
 
 
 def cmd_save_profile(args: argparse.Namespace) -> int:
-    """Save what shows as a game profile; --process names the programs that load it, and
-    --mouse-color the color a synced mouse shows while it is loaded, NO_MOUSE_COLOR for none."""
     _warn_launchers(args.process or [])
     request = {"command": "save_profile", "value": args.name, "processes": args.process}
     if args.mouse_color is not None:
@@ -92,10 +95,26 @@ def cmd_profile_mouse_color(args: argparse.Namespace) -> int:
                        labels=GAME_PROFILE_LABELS)
 
 
-def _mode_words(mode: object) -> str | None:
-    """A lighting mode of a reply in the CLI's words (MODE_WORDS); None for a value no mode
-    has, which prints as it came. Looked up by str, since a reply's value can be any JSON."""
-    return MODE_WORDS.get(str(mode))
+def _lighting_shown(effect: object, mode: object) -> str:
+    """What a game profile's lighting shows, as `profiles` and `load` name it: an animation,
+    or disabled, in place of the mode it keeps; else the mode in the CLI's words
+    (MODE_WORDS), or as it came. Looked up by str, since a reply's value can be any JSON."""
+    if effect in ANIMATIONS or effect == OFF:
+        return str(effect)
+    return MODE_WORDS.get(str(mode)) or str(mode)
+
+
+def cmd_load(args: argparse.Namespace) -> int:
+    """Load a game profile. The text output gives an effect line in the mode's place, as
+    `profiles` names it; --json gives the reply's mode and effect as they came."""
+    reply = send({"command": "load", "value": args.name})
+    if args.json:
+        return print_reply(reply, as_json=True)
+    effect = reply.get("effect")
+    said = {("effect" if key == "mode" else key):
+            (_lighting_shown(effect, value) if key == "mode" else value)
+            for key, value in reply.items() if key != "effect"}
+    return print_reply(said, as_json=False)
 
 
 def cmd_profiles(args: argparse.Namespace) -> int:
@@ -112,15 +131,15 @@ def cmd_profiles(args: argparse.Namespace) -> int:
         print(f"\nno game profiles yet in {_escaped(profiles_dir())}")
         return 0
     print()
-    for entry in entries:
+    rows = [(entry, _escaped(_lighting_shown(entry.get("effect"), entry["mode"])))
+            for entry in entries]
+    # At least disabled's 8; an animation's name can be longer and widens the column.
+    width = max(8, *(len(shows) for _entry, shows in rows))
+    for entry, shows in rows:
         marker = "*" if entry["name"] == overlay else " "
         procs = ", ".join(entry["processes"]) or "loads by hand"
-        # An animation, or disabled, shows in place of the mode, which it keeps.
-        effect = entry.get("effect")
-        shows = (effect if effect in ANIMATIONS or effect == "disabled"
-                 else _mode_words(entry["mode"]) or entry["mode"])
         keys = "key " if entry["keys"] == 1 else "keys"    # padded: the programs line up
-        print(f"{marker} {_escaped(entry['name']):<20} {_escaped(shows):<8} "
+        print(f"{marker} {_escaped(entry['name']):<20} {shows:<{width}} "
               f"{_escaped(entry['keys']):>3} {keys}   {_escaped(procs)}")
     return 0
 
@@ -130,10 +149,10 @@ def cmd_macros(args: argparse.Namespace) -> int:
     if args.json or not reply.get("ok"):
         return print_reply(reply, args.json)
     macros = reply.get("macros") or []
-    if not macros:
-        print(f"no macros yet in {_escaped(macros_dir())}")
-        return 0
     running, starts_in = reply.get("running"), reply.get("macro_starts_in")
+    if not macros:
+        # The window's Run plays an unsaved macro, so one can run with none saved.
+        print(f"no macros yet in {_escaped(macros_dir())}")
     for macro in macros:
         marker = "*" if macro["name"] == running and not starts_in else " "
         steps = "step " if macro["steps"] == 1 else "steps"    # padded: the repeat lines up
@@ -145,7 +164,9 @@ def cmd_macros(args: argparse.Namespace) -> int:
     elif running:
         # A toggled macro runs with nothing held, so say it is running.
         print(f"\n* {MACRO_RUNNING.format(name=_escaped(running))}.")
-    print(f"\nBind one with `gearbench-ctl bind G1 '{MACRO_PREFIX}<name>'`", file=sys.stderr)
+    if macros:
+        print(f"\nBind one with `gearbench-ctl bind G1 '{MACRO_PREFIX}<name>'`",
+              file=sys.stderr)
     return 0
 
 
@@ -192,40 +213,52 @@ def cmd_let_load(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_ghub_found(found: ghub.Found, with_programs: bool) -> None:
-    """import-ghub's listing of what the file holds; --json prints its own.
+def not_listed(count: int) -> str:
+    """The line after a listing that left out its last `count` profiles."""
+    return (f"{counted(count, 'profile')} not listed: the listing's names are over "
+            f"{MAX_DOCUMENT_BYTES // 1_000_000} million characters")
 
-    Each profile lists again the names and steps of the macros it binds, so a crafted file
-    can make many times its own size of them: once the sections' lines pass
-    MAX_DOCUMENT_BYTES characters as they print, as ghub's Not imported text does, the
-    profile that passed it and each after it are listed by name alone, and the sections of
-    each after it are not made."""
+
+def _print_ghub_found(found: ghub.Found, with_programs: bool) -> None:
+    """import-ghub's listing of what the file holds, under ghub_plan.capped's cap, which
+    lists a profile by name alone or leaves it out; --json prints its own."""
     m_names = import_plan.existing_from_disk().m_names
-    left, by_name = MAX_DOCUMENT_BYTES, 0
-    for profile in found.profiles:
+
+    # Counted escaped, as they print: a character escaped() writes out takes up to 10.
+    def named(profile: ghub.GhubProfile) -> tuple[list[str], int]:
         where = " (the desktop default: onto M1, M2 and M3)" if profile.desktop else ""
-        print(f"{_escaped(profile.name)}{where}")
+        lines = [f"{_escaped(profile.name)}{where}"]
         if profile.ghub_name:
-            print(f'    G HUB calls it "{_escaped(profile.ghub_name)}"')
-        # Counted escaped: a character escaped() writes out takes up to 10.
-        sections = [] if left < 0 else [
-            (_escaped(heading), [_escaped(line) for line in lines])
-            for heading, lines in ghub_plan.details(profile, found, m_names, with_programs)]
-        left -= sum(len(line) for _heading, lines in sections for line in lines)
-        if left < 0:
+            lines.append(f'    G HUB calls it "{_escaped(profile.ghub_name)}"')
+        return lines, sum(map(len, lines))
+
+    def detailed(profile: ghub.GhubProfile) -> tuple[list[tuple[str, list[str]]], int]:
+        sections = [(_escaped(heading), [_escaped(line) for line in lines])
+                    for heading, lines in ghub_plan.details(profile, found, m_names,
+                                                            with_programs)]
+        return sections, sum(len(line) for _heading, lines in sections for line in lines)
+
+    listed = by_name = 0
+    for lines, sections in ghub_plan.capped(found.profiles, named, detailed):
+        listed += 1
+        for line in lines:
+            print(line)
+        if sections is None:
             by_name += 1
             continue
-        for heading, lines in sections:
+        for heading, section in sections:
             print(f"    {heading}:")
-            for line in lines:
+            for line in section:
                 print(f"        {line}")
+    unlisted = len(found.profiles) - listed
     if by_name:
         print(f"{counted(by_name, 'profile')} listed by name alone: the listing is over "
               f"{MAX_DOCUMENT_BYTES // 1_000_000} million characters. --profile NAME "
               "--dry-run says what importing one would write.")
+    if unlisted:
+        print(not_listed(unlisted))
     if found.other_devices:
-        print("Other devices in the file, not imported: "
-              + _escaped(ghub_plan.other_devices_text(found)))
+        print(ghub_plan.OTHER_DEVICES + _escaped(ghub_plan.other_devices_text(found)))
 
 
 def cmd_import_ghub(args: argparse.Namespace) -> int:
@@ -236,22 +269,26 @@ def cmd_import_ghub(args: argparse.Namespace) -> int:
     """
     try:
         path = Path(args.file)
-        found = ghub.parse(ghub.read_settings(path), path.name)
+        found = ghub.parse(ghub_file.read_settings(path), path.name)
         chosen = ghub_plan.chosen_names(found, args.profile, args.all)
-    except ghub.GhubError as exc:
+    except ghub_file.GhubError as exc:
         # SQLite's error text can hold a schema name from the file.
         print(f"error: {_escaped(exc)}", file=sys.stderr)
         return 1
     if args.list or not (chosen or args.all):
         if args.json:
-            print_json(ghub_plan.found_as_json(found, args.with_programs))
+            entries = ghub_plan.found_as_json(found, args.with_programs)
+            print_json(entries)
+            if unlisted := len(found.profiles) - len(entries):
+                print(not_listed(unlisted), file=sys.stderr)
             return 0
         _print_ghub_found(found, args.with_programs)
         if not args.list:
-            print("\nImport with --profile NAME (repeatable) or --all, which leaves out the "
-                  "desktop default: its bindings replace those of your M1, M2 and M3, and "
-                  "the G915's lighting if it has any. Each loads by hand unless "
-                  "--with-programs; one that replaces yours keeps your programs.",
+            print("\nImport with --profile NAME (repeatable) or --all. --all leaves out the "
+                  "desktop default, which --profile NAME imports: its bindings replace those "
+                  "of your M1, M2 and M3, and the G915's per-key lighting if it has any. Each "
+                  "game profile you import loads by hand unless --with-programs; one that "
+                  "replaces yours keeps your programs.",
                   file=sys.stderr)
         return 0
     if not chosen:
@@ -289,9 +326,11 @@ def _import_plan(plan: import_plan.Plan, args: argparse.Namespace) -> int:
             print(_escaped(line))
         return 0
     sent: list[tuple[dict, dict]] = []
+    save_failures: dict[str, bool] = {}
     try:
         for request in requests:
-            sent.append((request, import_plan.held_back(request, sent) or send(request)))
+            sent.append((request, import_plan.held_back(request, save_failures) or send(request)))
+            save_failures |= import_plan.failed_saves(sent[-1:])
     finally:
         # Said even when the daemon goes away part way: what it wrote stays.
         done, failed = import_plan.reply_lines(sent)
@@ -345,9 +384,9 @@ def add_lists_and_macros(sub: Subcommands) -> None:
     sub.add("profiles", help="list game profiles").set_defaults(func=cmd_profiles)
     sub.add("macros", help="list macros; edit them in the window's Macros tab").set_defaults(
         func=cmd_macros)
-    mrun = sub.add("macro-run", help="run a macro after a countdown to click into its window; "
-                                     "Toggle repeats until macro-stop; Once and While held "
-                                     "run once")
+    mrun = sub.add("macro-run", help="run a macro after a countdown, time to click into the "
+                                     "window the macro is for; Toggle repeats until "
+                                     "macro-stop; Once and While held run once")
     mrun.add_argument("name")
     mrun.add_argument("--delay", type=float, default=PLAY_DELAY, metavar="SECONDS",
                       help=f"seconds before the first step, 0 to {MAX_PLAY_DELAY} "
@@ -362,8 +401,7 @@ def add_lists_and_macros(sub: Subcommands) -> None:
 def add_game_profiles_and_imports(sub: Subcommands) -> None:
     ld = sub.add("load", help="load a game profile over the active M profile")
     ld.add_argument("name")
-    ld.set_defaults(func=lambda a: print_reply(send({"command": "load", "value": a.name}), a.json,
-                                               {"mode": _mode_words}))
+    ld.set_defaults(func=cmd_load)
 
     sub.add("unload", help="unload the game profile, back to the M profile").set_defaults(
         func=lambda a: print_reply(send({"command": "unload"}), a.json))
@@ -380,9 +418,10 @@ def add_game_profiles_and_imports(sub: Subcommands) -> None:
     sp.add_argument("--process", action="append", default=None,
                     help="a program that loads it, as `apps` lists it; repeatable")
     sp.add_argument("--mouse-color", metavar="#RRGGBB",
-                    help="the color a mouse that follows the keyboard shows while it is "
-                         f"loaded, six hex digits like #0080ff, or {NO_MOUSE_COLOR} for the "
-                         "keyboard's; without it, the loaded game profile's")
+                    help="six hex digits like #0080ff: the color a mouse and a headset's lights "
+                         "that follow the keyboard show while it is loaded; "
+                         f"{NO_MOUSE_COLOR} for the keyboard's color; left out, the loaded "
+                         "game profile's")
     sp.set_defaults(func=cmd_save_profile)
 
     pp = sub.add("profile-programs",
@@ -395,8 +434,9 @@ def add_game_profiles_and_imports(sub: Subcommands) -> None:
     pp.set_defaults(func=cmd_profile_programs)
 
     pm = sub.add("profile-mouse-color",
-                 help="set the color a mouse that follows the keyboard shows while a game "
-                      "profile is loaded, and nothing else of it")
+                 help="set a game profile's mouse color and nothing else of it: the color a "
+                      "mouse and a headset's lights that follow the keyboard show while it is "
+                      "loaded")
     pm.add_argument("name")
     pm.add_argument("color", metavar="#RRGGBB",
                     help=f"six hex digits like #0080ff, or {NO_MOUSE_COLOR} for the keyboard's")
@@ -404,7 +444,8 @@ def add_game_profiles_and_imports(sub: Subcommands) -> None:
 
     sub.add("promote", help="save what shows to the active M profile and unload the game "
                             "profile").set_defaults(
-        func=lambda a: print_reply(send({"command": "promote"}), a.json))
+        func=lambda a: print_m_profile_reply(send({"command": "promote"}), a.json,
+                                             "promoted_to"))
 
     rp = sub.add("rename-profile", help="rename a game profile; loaded or held off, it "
                                        "stays so")
@@ -420,13 +461,13 @@ def add_game_profiles_and_imports(sub: Subcommands) -> None:
     ig = sub.add("import-ghub",
                  help="import profiles, bindings, lighting and macros from G HUB's settings.db")
     ig.add_argument("file",
-                    help="settings.db, with its -wal beside it if it has one, or the JSON pulled "
-                         "out of it")
+                    help="settings.db, with settings.db-wal beside it if there is one, or the "
+                         "JSON pulled out of it")
     ig.add_argument("--list", action="store_true", help="show what the file holds; write nothing")
     ig.add_argument("--profile", action="append", default=[], metavar="NAME",
                     help="import this profile, as --list names it; repeatable. The desktop "
                          "default's bindings replace those of M1, M2 and M3, and the "
-                         "G915's lighting if it has any")
+                         "G915's per-key lighting if it has any")
     ig.add_argument("--all", action="store_true",
                     help="import every game profile; not the desktop default")
     ig.add_argument("--dry-run", action="store_true",
@@ -451,9 +492,10 @@ def add_game_profiles_and_imports(sub: Subcommands) -> None:
     ip.add_argument("--dry-run", action="store_true",
                     help="say what would be written, and write nothing")
     ip.add_argument("--replace", action="append", default=[], metavar="NAME",
-                    help="take the pack's game profile or macro of that name over yours, "
-                         "which is kept otherwise; with names given, it must be one of "
-                         "them; repeatable")
+                    help="take the pack's lighting, mouse color and programs, or its "
+                         "macro, of that name over yours, which is kept otherwise, and keep "
+                         "your bindings; with names given, it must be one of them; "
+                         "repeatable")
     ip.add_argument("--without-programs", action="store_true",
                     help="take none of the pack's programs: a new game profile loads by "
                          "hand, and one --replace names keeps your programs")

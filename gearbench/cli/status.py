@@ -1,6 +1,6 @@
 """The subcommands for the daemon's own state: `status` and its report, `save` and
-`reload`, the switches `lock-lights` and `tray`, `idle`, and `config`, which reads the
-configuration on disk and needs no daemon.
+`reload`, the switches `lock-lights` and `tray`, `idle`, `battery-notices`, and `config`,
+which reads the configuration on disk and needs no daemon.
 """
 
 from __future__ import annotations
@@ -11,20 +11,27 @@ import sys
 from collections.abc import Callable, Mapping
 from functools import partial
 
+from .. import pipewire_headsets
 from ..battery import kept_at
 from ..config import (
+    AT_10_AND_5,
+    AT_30_AND_15,
+    BATTERY_PRESETS,
     BINDABLE_KEYS,
+    DEFAULT_BATTERY_NOTICES,
     DEFAULT_BRIGHTNESS,
     F_ROW_KEYS,
     G_KEYS,
-    HEADSET_KEYS,
     IDLE_DIM_AFTER,
     IDLE_OFF_AFTER,
     IDLE_RANGE,
     MODE_WORDS,
+    NO_NOTICES,
     PER_KEY,
+    URGENT,
     Config,
     Lighting,
+    Profile,
     config_path,
     direction_shown,
     format_color,
@@ -37,6 +44,7 @@ from ..focus import FOLLOWED, SHELL, held_until
 from ..keyboard import (
     CABLED_IDS as KEYBOARD_CABLED,
     MODEL_OF as KEYBOARDS,
+    NO_IDLE_TIMES,
     followed as leader_shown,
     key_name as model_shown,
     model_ids as keyboard_ids,
@@ -44,8 +52,8 @@ from ..keyboard import (
     untested_assignment_words,
 )
 from ..keycontrol import GAME_MODE_NOT_KNOWN, GAME_MODE_UNKNOWN, SHORTCUT_TURNS
-from ..lighting import ANIMATIONS, COLORLESS, DARK, DIM, LEVEL_WORDS, SPEEDS, TWO_COLORED
-from ..macros import REPEAT_WORDS, countdown_seconds
+from ..lighting import ANIMATIONS, COLORLESS, DARK, DIM, LEVEL_WORDS, OFF, SPEEDS, TWO_COLORED
+from ..macros import REPEAT_WORDS
 from ..mouse import (
     key_name as mouse_shown,
     lighting_shown_words,
@@ -54,17 +62,28 @@ from ..mouse import (
 )
 from ..report import untested_note
 from ..settings_files import ConfigError
-from ..wording import NO_REASON, counted, escaped as _escaped, reason, route_of, word_list
+from ..wording import (
+    NO_REASON,
+    NOT_ANSWERING_WORDS,
+    countdown_seconds,
+    counted,
+    escaped as _escaped,
+    reason,
+    route,
+    route_of,
+    word_list,
+)
 from ..xfocus import BY_RUNNING_PROGRAMS
 from .output import (
     ASLEEP_OR_OFF,
-    M_PROFILE_LABELS,
     Subcommands,
     battery_words,
     device_words,
+    listed_words,
     on_off,
     print_block,
     print_json,
+    print_m_profile_reply,
     print_reply,
     send,
     silent_note,
@@ -149,13 +168,16 @@ def _lock_words(reply: dict) -> str:
 
 
 def _idle_words(dim_after: object, off_after: object, never_dim: bool,
-                level: object = None) -> str:
-    """The idle line: the settings, then "idle now" where `level`, a reply's `idle_lights`, is
-    dim or dark."""
+                level: object = None, *, with_game_profile: bool) -> str:
+    """The idle line: the settings, with `with_game_profile` that a game profile loaded holds
+    the dimming off, then "idle now" where `level`, a reply's `idle_lights`, is dim or
+    dark."""
     if never_dim:
         said = "never dims (never-dim on)"
     else:
         said = f"dims after {dim_after} s without a keypress, lights off {off_after} s after that"
+        if with_game_profile:
+            said += ", but not while a game profile is loaded"
     if level in (DIM, DARK):
         said += f"; idle now, {'dimmed' if level == DIM else 'lights off'}"
     return said
@@ -163,11 +185,12 @@ def _idle_words(dim_after: object, off_after: object, never_dim: bool,
 
 def _reply_idle_words(reply: dict) -> str:
     """The idle line of a daemon reply, `idle`'s or `status`'s: the settings, or on a keyboard
-    that never dims (`dims` false, one lit through 0x8070's zones) that alone."""
+    without idle times (`dims` false, one lit through 0x8070's zones) that alone."""
     if reply.get("dims") is False:
-        return f"never dims on the {reply.get('name') or 'keyboard'}"
+        return NO_IDLE_TIMES.format(reply.get("name") or "keyboard")
     return _idle_words(reply.get("idle_dim_after"), reply.get("idle_off_after"),
-                       bool(reply.get("never_dim")), reply.get("idle_lights"))
+                       bool(reply.get("never_dim")), reply.get("idle_lights"),
+                       with_game_profile=bool(reply.get("never_dim_with_game_profile")))
 
 
 def cmd_idle(args: argparse.Namespace) -> int:
@@ -177,14 +200,55 @@ def cmd_idle(args: argparse.Namespace) -> int:
         request["dim_after"] = args.dim_after
     if args.off_after is not None:
         request["off_after"] = args.off_after
-    if args.never_dim is not None:
-        request["never_dim"] = args.never_dim == "on"
+    for name in ("never_dim", "never_dim_with_game_profile"):
+        if (value := getattr(args, name)) is not None:
+            request[name] = value == "on"
     reply = send(request)
     if args.json or not reply.get("ok"):
         return print_reply(reply, args.json)
-    print(f"idle: {_escaped(_reply_idle_words(reply))}")
-    if reply.get("note"):
-        print(f"note: {_escaped(reply['note'])}")
+    note = reply.get("note")
+    # Where nothing dims, a set's note says why after "saved", which the idle line repeats.
+    if not (note and reply.get("dims") is False):
+        print(f"idle: {_escaped(_reply_idle_words(reply))}")
+    if note:
+        print(f"note: {_escaped(note)}")
+    return 0
+
+
+def _notices_line(entry: dict) -> str:
+    """A device's line of `battery-notices`: its name and model, not attached where it is
+    not, its preset, and the desktop that warns of its battery too, where one does."""
+    away = "" if entry.get("attached") else ", not attached"
+    said = f"{entry.get('name')} ({entry.get('model')}){away}: {entry.get('preset')}"
+    warns = entry.get("desktop_warns")
+    return f"{said}; {warns} also warns" if isinstance(warns, str) else said
+
+
+#: battery-notices' refusal of levels without a device, or a device without levels: it names
+#: the levels it takes, since "preset" is the equalizers' word on the same command line.
+LEVELS_WITH_DEVICE = (f"give {word_list(BATTERY_PRESETS)} with --keyboard, --mouse or "
+                      "--headset to set that device's notices, or neither to list each "
+                      "device's")
+
+
+def cmd_battery_notices(args: argparse.Namespace) -> int:
+    """Each device's preset, or with a preset and a device, that device's set."""
+    named = {field: value for field, value in (
+        ("keyboard", args.keyboard), ("device", args.mouse), ("headset", args.headset))
+        if value is not None}
+    if (args.preset is None) != (not named):
+        args.usage_error(LEVELS_WITH_DEVICE)
+    request: dict = {"command": "battery_notices", **named}
+    if args.preset is not None:
+        request["value"] = args.preset
+    reply = send(request)
+    if args.json or not reply.get("ok"):
+        return print_reply(reply, args.json)
+    for entry in reply["devices"] if args.preset is None else [reply]:
+        print(_escaped(_notices_line(entry)))
+    if args.preset is None and not reply["devices"]:
+        print("no device with a battery is attached; each takes the default, "
+              f"{DEFAULT_BATTERY_NOTICES}")
     return 0
 
 
@@ -213,7 +277,7 @@ def _game_profile_words(reply: dict, followed: bool) -> str:
         shown = "none"
     elif reply.get("overlay_auto"):
         program = reply.get("auto_process") or "its program"
-        shown = (f"{overlay}, {program} has focus" if followed
+        shown = (f"{overlay}, loaded while {program} has focus" if followed
                  else f"{overlay}, loaded for {program}")
     else:
         shown = overlay + (", kept loaded" if reply.get("keep_loaded") is True else "")
@@ -242,8 +306,8 @@ def _m_lighting_words(reply: dict) -> str:
     """The M profile's lighting in `status`: disabled, an animation, or else static or
     per-key, each with the color where it shows one, and Pulsar Point's two."""
     effect, color = reply.get("effect"), reply["color"]
-    if effect == "disabled":
-        return "disabled"
+    if effect == OFF:
+        return OFF
     if effect in TWO_COLORED:
         # A daemon that runs it gives its second color.
         return f"{effect} {color} and {reply['second_color']}"
@@ -258,7 +322,12 @@ def _keyboard_notes(reply: dict, name: str) -> list[str]:
     """The lines under `status`'s `keyboard:` line for the keyboard named `name`: the note
     on a model not yet run on, then whether it is not answering (silent_note)."""
     return ([untested_note(name)] if reply.get("untested") else []) + (
-        [] if reply.get("answering") else [silent_note(reply)])
+        [] if reply.get("answering") else [silent_note(reply, _on_cable(reply))])
+
+
+def _on_cable(keyboard: Mapping) -> bool:
+    """Whether the keyboard of a status entry, by its `product`, is on its cable."""
+    return route_of(keyboard.get("product"), KEYBOARD_CABLED) == route("cable")
 
 
 def _other_keyboards(reply: dict) -> list[str]:
@@ -269,20 +338,27 @@ def _other_keyboards(reply: dict) -> list[str]:
     leader = str(driven[0].get("name")) if driven else ""
     return [f"{each.get('name')} driven too, "
             + (f"showing the {leader}'s lighting" if each.get("follows") else "its own lighting")
-            + ("" if each.get("answering") else f"; {ASLEEP_OR_OFF}")
+            + ("" if each.get("answering")
+               else f"; {NOT_ANSWERING_WORDS if _on_cable(each) else ASLEEP_OR_OFF}")
             for each in driven[1:]]
 
 
-def _mouse_notes(reply: dict, name: str) -> list[str]:
-    """The notes under `status`'s line of the mouse named `name`: the note on a model not yet
-    run on, that its lighting is not yet tested, then whose lighting it shows while it waits to
-    claim, its own or Gearbench's."""
+def _mouse_notes(reply: dict, entry: Mapping) -> list[str]:
+    """The notes under `status`'s line of the mouse `entry` gives: the note on a model not yet
+    run on, that its lighting is not yet tested, both by its model's name, then whose lighting
+    it shows while it waits to claim, its own or Gearbench's, by its node, since two mice of
+    one model share a name."""
+    name = str(entry.get("name"))
     return ([untested_note(name)] if name in (reply.get("mouse_untested") or ()) else []) + (
         [lighting_under_test(name)] if name in (reply.get("mouse_lighting_untested") or ())
         else []) + [lighting_shown_words(name, str(each["shown"]))
                     for each in reply.get("mouse_lighting_shown") or ()
-                    if each.get("name") == name]
+                    if each.get("device") == entry.get("device")]
 
+
+#: The `mouse follows` and `headset follows` value of `status` and `config` with the sync
+#: switch off.
+NOT_FOLLOWING = "off, its own color"
 
 #: A line of `status`, (label, value), as print_block takes it: a label of None for a line
 #: under the one before.
@@ -293,31 +369,81 @@ def _add(lines: list[StatusLine], label: str | None, value: object) -> None:
     lines.append((label, value))
 
 
+def _battery_warned(lines: list[StatusLine], device: Mapping) -> None:
+    """The line under a device's battery, the keyboard's reply or a mouse's or headset's
+    entry, that a notice was posted below its `battery_warned` level; none once the notices
+    are armed again (BatteryNotices.battery_rearmed)."""
+    if device.get("battery_warned"):
+        _add(lines, None, f"below {device['battery_warned']}%: a notice was posted")
+
+
 def _attached(lines: list[StatusLine], label: str, entries: list | None,
-              notes: Callable[[str], list[str]]) -> None:
+              notes: Callable[[Mapping], list[str]]) -> None:
     """`status`'s lines of each mouse or headset `entries` gives (shared.attached_entry),
     as the keyboard's: its device line under `label`, its `notes` and whether it is not
-    answering under it, then its battery where it lists one; not attached for none."""
+    answering under it, then its battery where it lists one and the notice posted of it, and
+    its firmware version where it gives one, as a mouse does; not attached for none."""
     listed = [each for each in entries or () if isinstance(each, dict)]
     if not listed:
         _add(lines, label, "not attached")
     for entry in listed:
         name = str(entry.get("name"))
         _add(lines, label, device_words(entry.get("device"), name, entry.get("route")))
-        for note in (*notes(name),
+        for note in (*notes(entry),
                      *([silent_note(entry)] if entry.get("answering") is False else [])):
             _add(lines, None, note)
         if entry.get("battery_found"):
             # A device that does not answer gives its last reading, dated.
             _add(lines, "battery", battery_words(entry.get("battery"), kept_at(entry)))
+        _battery_warned(lines, entry)
+        if entry.get("firmware"):
+            _add(lines, "firmware", entry["firmware"])
 
 
-def _listed(lines: list[StatusLine], label: str, values: list[str], none: str) -> None:
-    """A `status` line that lists `values`: the first on the label's line and each other
-    under it, or `none` for none."""
-    _add(lines, label, values[0] if values else none)
-    for value in values[1:]:
-        _add(lines, None, value)
+def _keyboard_lines(lines: list[StatusLine], reply: dict, name: str) -> None:
+    """`status`'s lines of the keyboard that leads, before the game profile's: its device line
+    and the notes under it, the problems, its battery and the notice posted of it, its
+    firmware, and the M profile."""
+    if reply.get("connected"):
+        _add(lines, "keyboard", device_words(reply.get("device"), name,
+                                             route_of(reply.get("product"), KEYBOARD_CABLED)))
+        for note in (*_keyboard_notes(reply, name), *_other_keyboards(reply)):
+            _add(lines, None, note)
+    else:
+        # Not attached, as the mouse and headset lines say it.
+        _add(lines, "keyboard", "not attached")
+    # The problems first after the keyboard, as the tray's menu and the window put them.
+    problems = [p["message"] for p in reply.get("problems") or ()]
+    _add(lines, "problems", problems[0] if problems else "none")
+    for problem in problems[1:]:
+        _add(lines, None, problem)
+    battery = reply.get("battery")
+    if isinstance(battery, dict):
+        # A keyboard that does not answer gives its last reading, dated as the window has it.
+        _add(lines, "battery", battery_words(battery, kept_at(reply)))
+        # Under its battery alone: the notices keep their level after the keyboard goes, and
+        # without a battery line it would read as one of the problems.
+        _battery_warned(lines, reply)
+    if reply.get("firmware"):
+        _add(lines, "firmware", reply["firmware"])
+    if reply.get("profile") is not None:
+        shown = f", {_m_lighting_words(reply)}" if reply.get("effect") else ""
+        _add(lines, "M profile",
+             profile_label(reply["profile"], reply.get("profile_name", "")) + shown
+             + (", G-Shift held" if reply.get("shifted") else ""))
+
+
+def _uinput_words(reply: dict) -> str:
+    """The `uinput:` line of `status`: which of the daemon's virtual keyboard and virtual mouse
+    are ready."""
+    typing, pointing = reply.get("virtual_keyboard"), reply.get("virtual_mouse")
+    if typing and pointing:
+        return "virtual keyboard and mouse ready"
+    if typing:
+        return "virtual keyboard ready, no virtual mouse"
+    if pointing:
+        return "virtual mouse ready, no virtual keyboard"
+    return "none ready"
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -327,32 +453,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     if args.json or not reply.get("ok"):
         return print_reply(reply, args.json)
     lines: list[StatusLine] = []
-    line, more = partial(_add, lines), partial(_add, lines, None)
+    line = partial(_add, lines)
     name = reply.get("name") or "keyboard"
-    if reply.get("connected"):
-        line("keyboard", device_words(reply.get("device"), name,
-                                      route_of(reply.get("product"), KEYBOARD_CABLED)))
-        for note in (*_keyboard_notes(reply, name), *_other_keyboards(reply)):
-            more(note)
-    else:
-        # Not attached, as the mouse and headset lines say it.
-        line("keyboard", "not attached")
-    # The problems first after the keyboard, as the tray's menu and the window put them.
-    _listed(lines, "problems", [p["message"] for p in reply.get("problems") or ()], "none")
-    battery = reply.get("battery")
-    if isinstance(battery, dict):
-        # The voltage too: the percentage comes off a curve.
-        volts = f" ({battery['volts']} V)" if battery.get("volts") is not None else ""
-        # A keyboard that does not answer gives its last reading, dated as the window has it.
-        line("battery", battery_words(battery, kept_at(reply)) + volts)
-    if reply.get("battery_warned"):
-        # Not shown once the notices are armed again (BatteryNotices.battery_rearmed).
-        more(f"below {reply['battery_warned']}%: a notice was posted")
-    if reply.get("profile") is not None:
-        shown = f", {_m_lighting_words(reply)}" if reply.get("effect") else ""
-        line("M profile", profile_label(reply["profile"], reply.get("profile_name", ""))
-             + shown
-                          + (", MR held" if reply.get("shifted") else ""))
+    _keyboard_lines(lines, reply, name)
     focus = reply.get("focus") or {}
     line("game profile", _game_profile_words(reply, focus.get("source") in FOLLOWED))
     line("focus", _focus_words(focus))
@@ -377,72 +480,65 @@ def cmd_status(args: argparse.Namespace) -> int:
     # effects that have a name.
     effects = reply.get("effects")
     if isinstance(effects, list) and effects:
-        line("effects", word_list([str(name) for name in effects], "and"))
+        line("effects", listed_words(effects))
     if reply.get("last_apply_error"):
         line("last apply", reply["last_apply_error"])
-    typing, pointing = reply.get("virtual_keyboard"), reply.get("virtual_mouse")
-    line("uinput", "virtual keyboard and mouse ready" if typing and pointing
-         else "virtual keyboard ready, no virtual mouse" if typing
-         else "virtual mouse ready, no virtual keyboard" if pointing
-         else "none ready")
+    line("uinput", _uinput_words(reply))
     # Each device as the keyboard is given, in the tray's order.
     _attached(lines, "mouse", reply.get("mice_attached"), partial(_mouse_notes, reply))
-    # A mouse without lighting, such as the G305, has no color to say.
+    # A mouse without lighting, such as the G305, has no color to say. "mouse follows", as
+    # the tray says it: "mouse color" is a game profile's Mouse color.
     if not reply.get("mouse") or reply.get("mouse_lights"):
-        line("mouse color", f"follows the {leader_shown(reply.get('sync_leader'))}"
-             if reply.get("mouse_sync_color") else "its own color")
-    _attached(lines, "headset", reply.get("headsets_attached"), lambda _name: [])
+        line("mouse follows", f"the {leader_shown(reply.get('sync_leader'))}"
+             if reply.get("mouse_sync_color") else NOT_FOLLOWING)
+    _attached(lines, "headset", reply.get("headsets_attached"), lambda _entry: [])
     line("macro", _macro_words(reply))
     line("daemon", f"pid {reply.get('pid')}")
     print_block(lines)
     return 0
 
 
-def cmd_reload(args: argparse.Namespace) -> int:
-    """Re-read the files; the M profile then in force as status gives it, "M profile: M2 ·
-    Desk", in place of the reply's `profile` and `profile_name`, which --json keeps."""
-    reply = send({"command": "reload"})
-    if args.json or not reply.get("ok") or "profile" not in reply:
-        return print_reply(reply, args.json)
-    shown = {**reply, "profile": profile_label(reply["profile"],
-                                               str(reply.get("profile_name") or ""))}
-    return print_reply(shown, False, labels=M_PROFILE_LABELS,
-                       hidden=frozenset({"profile_name"}))
-
-
-#: What _say_daemon_state prints for a daemon it could not ask, by `failure`'s kind; for
+#: What _say_daemon_state notes of a daemon it could not ask, by `failure`'s kind; for
 #: UNKNOWN it names the cause. A BUSY daemon, mid flash write say, still has live state.
-#: DOWN and BUSY in the window's words for each state (NOT_RUNNING, worker.NOT_IN_TIME).
+#: DOWN in the client's words, as the window says it (NOT_RUNNING); BUSY in its own, since
+#: what may differ is the live state.
 LIVE_STATE = {
-    DOWN: f"        ({NOT_RUNNING}, so this is the whole picture)",
-    BUSY: "        (the daemon did not answer in time, so its live state may differ from this)",
-    UNREAD: f"        ({REPLY_UNREAD}, so its live state may differ from this)",
+    DOWN: f"{NOT_RUNNING}, so this is the whole picture",
+    BUSY: "the daemon did not answer in time, so its live state may differ from this",
+    UNREAD: f"{REPLY_UNREAD}, so its live state may differ from this",
 }
 
 
 def _say_daemon_state(active: int) -> None:
-    """Print, under config's source line, whether a running daemon's state may differ from
-    the file's, whose M profile is `active`; nothing where the daemon is on that profile."""
+    """Print, under config's source line, a `note:` line where a running daemon's state may
+    differ from the file's, whose M profile is `active`, as the other commands print a note;
+    nothing where the daemon is on that profile and runs on what it read of the file."""
     try:
         live = send({"command": "status"})
     except (OSError, json.JSONDecodeError) as exc:
-        print(LIVE_STATE.get(failure(exc))
-              or f"        ({NOT_REACHED}: {reason(exc)}; if one is "
-                 f"running, its live state may differ from this)")
+        said = (LIVE_STATE.get(failure(exc))
+                or f"{NOT_REACHED}: {reason(exc)}; if one is running, its live state may "
+                   f"differ from this")
     else:
         if not live.get("ok"):
-            print(f"        (the daemon did not give its state: "
-                  f"{_escaped(live.get('error', NO_REASON))}; its live state may "
-                  f"differ from this)")
+            said = (f"the daemon did not give its state: "
+                    f"{_escaped(live.get('error', NO_REASON))}; its live state may differ "
+                    f"from this")
         elif "profile" in live and live["profile"] != active:
             # config.json unreadable at the daemon's start: its save refuses to write over
             # the file (Daemon.save_refused), so only reload is named.
             save = ("" if live.get("save_refused")
                     else "; `gearbench-ctl save` writes the daemon's over it")
-            print(
-                f"        note: the daemon is on M{_escaped(live['profile'])} and this "
-                f"file says M{active}. `gearbench-ctl reload` takes the file's{save}."
-            )
+            said = (f"the daemon is on M{_escaped(live['profile'])} and this file says "
+                    f"M{active}; `gearbench-ctl reload` takes the file's{save}")
+        elif live.get("save_refused"):
+            # On the file's M profile, but with the defaults alone: the file was unreadable at
+            # the daemon's start and no reload has read it since.
+            said = ("the daemon runs on its defaults, since it could not read this file when it "
+                    "started; `gearbench-ctl reload` takes the file's")
+        else:
+            return
+    print(f"note: {said}")
 
 
 def _entry_model(entries: Mapping[str, object], key: str,
@@ -486,6 +582,39 @@ def lighting_words(light: Lighting) -> str:
             f"mode {MODE_WORDS[light.mode]}, {counted(len(light.keys), 'key')}{background}")
 
 
+def _say_profile(index: int, profile: Profile, *, active: bool) -> None:
+    """One M profile's lighting and bindings, as `config` lists each."""
+    marker = "*" if active else " "
+    print(f"\n{marker} {_escaped(profile_label(index, profile.name))}")
+    for model, light in sorted(profile.lighting.items()):
+        print(f"    lighting on the {_keyboard_entry(profile.lighting, model)}: "
+              f"{lighting_words(light)}")
+    if not profile.lighting:
+        print("    lighting: none saved")
+    # A model's own keys (OWN_KEYS) run to dozens, each a `-` line while unbound: only a
+    # bound one is listed.
+    listed = [k for k in BINDABLE_KEYS if k in G_KEYS or profile.keys[k] or profile.shift[k]]
+    # At least F12's width, so a file that binds no key with a longer name lines up as
+    # it did before those were bindable.
+    width = max(len(key) for key in [*listed, F_ROW_KEYS[-1]])
+    for key in listed:
+        base = _escaped(profile.keys[key] or "-")
+        shift = _escaped(profile.shift[key] or "-")
+        print(f"    {key:<{width}} {base:<18} G-Shift: {shift}")
+    # Each mouse model's own; one with none takes its factory bindings.
+    for model, entry in sorted(profile.mouse.items()):
+        print(f"    mouse on the {_mouse_entry(profile.mouse, model)}: "
+              + "  ".join(f"{b.upper()}={_escaped(spec)}" for b, spec in entry.items()))
+    if not profile.mouse:
+        print("    mouse: each model's factory bindings")
+    # The G-Shift layer's, sparse: a button it leaves out sends its binding above. An entry
+    # a hand edit's nulls left empty binds nothing there, so it has no line.
+    for model, entry in sorted(profile.mouse_shift.items()):
+        if entry:
+            print(f"    mouse G-Shift on the {_mouse_entry(profile.mouse_shift, model)}: "
+                  + "  ".join(f"{b.upper()}={_escaped(spec)}" for b, spec in entry.items()))
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     try:
         config = Config.load()
@@ -520,48 +649,24 @@ def cmd_config(args: argparse.Namespace) -> int:
         ("brightness", ", ".join(f"{level}% on the {_keyboard_entry(config.brightness, model)}"
                                  for model, level in sorted(config.brightness.items()))
          or f"{DEFAULT_BRIGHTNESS}%"),
-        ("mouse color",
-         "follows the keyboard that leads" if config.mouse_sync_color else "its own"),
-        ("headset color",
-         "follows the keyboard that leads" if config.headset_sync_color else "its own"),
+        ("mouse follows",
+         "the keyboard that leads" if config.mouse_sync_color else NOT_FOLLOWING),
+        ("headset follows",
+         "the keyboard that leads" if config.headset_sync_color else NOT_FOLLOWING),
         # The window's Leader row and the docs' word; the config key stays sync_keyboard.
-        ("leader", "the one connected first" if leader_key is None
+        ("leader", pipewire_headsets.FIRST_CONNECTED if leader_key is None
          else f"{model_shown(leader_key)} ({leader})"
          if keyboard_named(leader_key) is not None else model_shown(leader_key)),
         ("DPI notices", "on, at a DPI button's step" if config.dpi_notices else "off"),
-        ("host mode", "on, the buttons through the button spy while the daemon runs"
+        ("host mode",
+         "on, Gearbench drives the buttons through the button spy while the daemon runs"
          if config.mouse_host_mode else "off, each mouse on its onboard profile"),
         ("lights off when locked", on_off(config.lights_off_when_locked)),
         ("tray icon", on_off(config.tray)),
-        ("idle", _idle_words(config.idle_dim_after, config.idle_off_after, config.never_dim))))
+        ("idle", _idle_words(config.idle_dim_after, config.idle_off_after, config.never_dim,
+                             with_game_profile=config.never_dim_with_game_profile))))
     for index, profile in sorted(config.profiles.items()):
-        marker = "*" if index == config.active else " "
-        print(f"\n{marker} {_escaped(profile_label(index, profile.name))}")
-        for model, light in sorted(profile.lighting.items()):
-            print(f"    lighting on the {_keyboard_entry(profile.lighting, model)}: "
-                  f"{lighting_words(light)}")
-        if not profile.lighting:
-            print("    lighting: none saved")
-        # A model's own keys (OWN_KEYS) run to dozens, each a `-` line while unbound: only a
-        # bound one is listed.
-        listed = [*G_KEYS, *(k for k in BINDABLE_KEYS
-                             if k not in G_KEYS and (profile.keys[k] or profile.shift[k]))]
-        # At least F12's width, so a file that binds no key with a longer name lines up as
-        # it did before those were bindable.
-        width = max(len(key) for key in [*listed, F_ROW_KEYS[-1]])
-        for key in listed:
-            base = _escaped(profile.keys[key] or "-")
-            shift = _escaped(profile.shift[key] or "-")
-            # MR: the binding on the MR layer, as the Keyboard tab names it; a headset's key
-            # has none.
-            print(f"    {key:<{width}} {base}" if key in HEADSET_KEYS
-                  else f"    {key:<{width}} {base:<18} MR: {shift}")
-        # Each mouse model's own; one with none takes its factory bindings.
-        for model, entry in sorted(profile.mouse.items()):
-            print(f"    mouse on the {_mouse_entry(profile.mouse, model)}: "
-                  + "  ".join(f"{b.upper()}={_escaped(spec)}" for b, spec in entry.items()))
-        if not profile.mouse:
-            print("    mouse: each model's factory bindings")
+        _say_profile(index, profile, active=index == config.active)
     return 0
 
 
@@ -575,20 +680,39 @@ def add_save_and_reload(sub: Subcommands) -> None:
     sub.add("save", help="write the daemon's live configuration to config.json and a loaded "
                          "game profile to its file, over a hand edit").set_defaults(
         func=lambda a: print_reply(send({"command": "save"}), a.json))
-    sub.add("reload", help="re-read the configuration from disk").set_defaults(
-        func=cmd_reload)
+    sub.add("reload", help="re-read config.json, the loaded game profile and the macro "
+                           "files").set_defaults(
+        func=lambda a: print_m_profile_reply(send({"command": "reload"}), a.json))
 
 
 def add_switches_and_idle(sub: Subcommands) -> None:
     sub.switch("lock-lights", command="lock_lights", state="lights_off_when_locked",
                words={"lights": _level_words},
                help="on (the default): the lights go off while the screen is locked or "
-                    "blank and before a suspend; off: they stay on")
+                    "GNOME blanks it and before a suspend; off: they stay on")
 
     sub.switch("tray", command="tray", words={"tray": _tray_switch_words},
-               help="on (the default): a top-bar icon with batteries, problems, DPI stages, "
-                    "game profiles and switches, where there is a tray (on GNOME, Ubuntu's "
-                    "AppIndicators extension); off: none")
+               help="on (the default): an icon with batteries, problems, DPI stages, "
+                    "profiles and switches, where there is a tray (on GNOME, an "
+                    "AppIndicator extension); off: none")
+
+    bn = sub.add("battery-notices",
+                 help="show each device's low-battery notices, or set one device's: "
+                      f"{AT_30_AND_15} (the default) below 30%% and 15%%, "
+                      f"{AT_10_AND_5} below 10%% and 5%%, {NO_NOTICES} for "
+                      f"none, or {URGENT}, whose second notice GNOME shows over "
+                      "a full-screen game, for a device the desktop does not warn of")
+    bn.add_argument("preset", nargs="?", choices=BATTERY_PRESETS, metavar="levels")
+    device = bn.add_mutually_exclusive_group()
+    device.add_argument("--keyboard", metavar="MODEL|ID",
+                        help="the keyboard to act on, by model name or product id, "
+                             "attached or not")
+    device.add_argument("--mouse", metavar="MODEL|ID",
+                        help="the mouse to act on, by model name or product id, attached or "
+                             "not")
+    device.add_argument("--headset", choices=list(pipewire_headsets.HEADSET_KEYED),
+                        help="the headset to act on, by its key, as a50 or g933")
+    bn.set_defaults(func=cmd_battery_notices, usage_error=bn.error)
 
     low, high = IDLE_RANGE
     idl = sub.add("idle", help="show or set the keyboard's idle dimming: it dims to half after "
@@ -600,7 +724,11 @@ def add_switches_and_idle(sub: Subcommands) -> None:
     idl.add_argument("--off-after", type=int, metavar="SECONDS",
                      help=f"seconds after the dim before the lights go off, {low} to {high}")
     idl.add_argument("--never-dim", choices=["on", "off"],
-                     help="on: never dim or turn off")
+                     help="on: never dim or turn off when idle; the screen lock still "
+                          "turns the lights off")
+    idl.add_argument("--never-dim-with-game-profile", choices=["on", "off"],
+                     help="on: while a game profile is loaded, never dim or turn off when "
+                          "idle")
     idl.set_defaults(func=cmd_idle)
 
 

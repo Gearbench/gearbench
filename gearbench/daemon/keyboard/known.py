@@ -3,9 +3,7 @@ lighting's tables, its G and M key counts and its control list, read at a connec
 the last connect of the same keyboard on the same route (Known). The same keyboard is the one
 whose getDeviceInfo (0x0003 fn 0, its unit id among it) and running main application (fn 1)
 answer as they did then; kept in memory alone, so each start of the daemon reads them all
-again. Each connect builds the controller's capabilities, 0x1D4B index, lighting, G keys and
-FN's reports from them (take_parts), and reads what the first paint does not need after it
-(finish)."""
+again."""
 
 from __future__ import annotations
 
@@ -23,6 +21,7 @@ from ...hidpp import (
     Feature,
     HidppError,
     UnreadableAnswer,
+    firmware_words,
     running_application,
 )
 from ...keyboard import (
@@ -34,7 +33,7 @@ from ...keyboard_zones import KeyboardZones, power_modes
 from ...keys import DivertedKeys
 from ...lighting import Lighting, LightingTables
 from ...modifiers import F_MODIFIERS, Modifiers
-from ..shared import F_WIRELESS
+from ..shared import F_WIRELESS, unreachable
 
 if TYPE_CHECKING:
     from ...hidpp import Hidpp
@@ -70,20 +69,18 @@ class Kept:
 def read_identity(dev: Hidpp) -> Identity | None:
     """The identity of the keyboard on `dev`: getDeviceInfo, then getFwInfo of each firmware
     entity in turn up to the active main application (hidpp.running_application). None where
-    it has no 0x0003 that gives a unit id, gives a zero one, cuts an entity's reply short or
-    runs no main application it lists: then nothing can tell it from another of its model."""
+    it has no 0x0003 that gives a unit id, gives a zero one or runs no main application it
+    lists: then nothing can tell it from another of its model. UnreadableAnswer for an
+    entity's reply cut short."""
     found = dev.feature(F_DEVICE_INFO)
     if found is None or found.version < MODEL_IDS_SINCE:
         return None
     info = dev.request(found.index, FN_DEVICE_INFO)
     if not any(info[UNIT_ID]):
         return None
-    try:
-        running = running_application(
-            lambda entity: dev.request(found.index, FN_FW_INFO, bytes([entity])), info[0],
-            "the keyboard")
-    except UnreadableAnswer:
-        return None
+    running = running_application(
+        lambda entity: dev.request(found.index, FN_FW_INFO, bytes([entity])), info[0],
+        "the keyboard")
     return None if running is None else Identity(info, *running)
 
 
@@ -134,11 +131,21 @@ class Known:
                   "read is taken", name)
         return kept
 
+    def firmware(self) -> str | None:
+        """The version of the firmware the open keyboard runs (hidpp.firmware_words), from the
+        getFwInfo reply its identity keeps, so nothing is sent for it. None with no keyboard
+        open, and for one that keeps nothing (finish)."""
+        keyboard = self.keyboard
+        # One open has its product id: Keyboard.set_up sets it before it opens the node.
+        kept = (None if keyboard.dev is None
+                else self.kept.get(cast(int, keyboard.keyboard_product)))
+        return None if kept is None else firmware_words(kept.identity.firmware)
+
     def take_parts(self, product: int) -> Kept | None:
         """The controller's capabilities, 0x1D4B index, lighting, G keys and FN's reports on its
         open keyboard of id `product`, each built from what its last connect kept where that is
         the same keyboard (recall), which it returns, else read off it, a lighting's 0x8081
-        zone bitmap among it for the fills' last zone (Paint.fill_last)."""
+        zone bitmap among it for the fills' last zone (Lighting.fill_and_paint)."""
         keyboard, model = self.keyboard, KEYBOARDS[product]
         kept = self.recall(product)
         dev = cast("Hidpp", keyboard.dev)
@@ -158,20 +165,20 @@ class Known:
         return kept
 
     def finish(self, product: int, kept: Kept | None) -> None:
-        """After the first paint: the custom assignments' reads (KeyControl.set_up), `kept`'s
-        control list in place of a read, then what this connect read kept for the next on the
-        route of id `product`, under the keyboard's identity, read off it now where `kept`
-        does not give it. A keyboard with none, or that refuses to say, keeps nothing."""
+        """After the custom assignments' reads (KeyControl.set_up): what this connect read,
+        kept for the next on the route of id `product` under the keyboard's identity, read off
+        it now where `kept` does not give it. A keyboard with none, or that refuses to say or
+        answers an entity short, keeps nothing."""
         keyboard = self.keyboard
-        keyboard.key_control.set_up(None if kept is None else kept.controls)
         dev = cast("Hidpp", keyboard.dev)
         try:
             identity = read_identity(dev) if kept is None else kept.identity
-        except HidppError as exc:
-            if exc.unreachable:
+        except (HidppError, UnreadableAnswer) as exc:
+            if unreachable(exc):
                 raise
-            log.debug("the %s refused to say which it is (%s); its next connect reads it "
-                      "whole", keyboard_name(product), exc)
+            # At info: `status` then gives no firmware version, and nothing else says why.
+            log.info("the %s did not say which it is (%s): it shows no firmware version, and "
+                     "its next connect reads it whole", keyboard_name(product), exc)
             identity = None
         if identity is None:
             self.kept.pop(product, None)

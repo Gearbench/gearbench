@@ -82,27 +82,31 @@ class DivertedKeys:
 
     # -- LEDs ------------------------------------------------------------
 
-    def set_m_leds(self, mask: int) -> None:
-        """Light M-key LEDs from a bitmask, bit 0 = M1."""
+    def set_m_leds(self, mask: int) -> bool:
+        """Light M-key LEDs from a bitmask, bit 0 = M1; whether a request went out, none on a
+        keyboard without them."""
         if self._mkeys is None:
-            return
+            return False
         self.dev.request(self._mkeys.index, MKEYS_SET_LEDS, bytes([mask]))
+        return True
 
-    def set_m_led(self, which: int) -> None:
-        """Light exactly one M LED, 1-based. An M profile past the keyboard's own M keys has no
-        LED: nothing is written."""
+    def set_m_led(self, which: int) -> bool:
+        """Light exactly one M LED, 1-based; whether a request went out. An M profile past the
+        keyboard's own M keys has no LED: nothing is written."""
         if which > self.m_count:
-            return
-        self.set_m_leds(1 << (which - 1))
+            return False
+        return self.set_m_leds(1 << (which - 1))
 
-    def set_mr_led(self, on: bool) -> None:
+    def set_mr_led(self, on: bool) -> bool:
+        """The MR LED on or off; whether a request went out, none on a keyboard without it."""
         if self._mr is None:
-            return
+            return False
         self.dev.request(self._mr.index, MR_SET_LED, bytes([0x01 if on else 0x00]))
+        return True
 
-    def all_leds_off(self) -> None:
-        self.set_m_leds(0)
-        self.set_mr_led(False)
+    def all_leds_off(self) -> bool:
+        """The M and MR LEDs off; whether a request went out."""
+        return self.set_m_leds(0) | self.set_mr_led(False)
 
     # -- notifications ---------------------------------------------------
 

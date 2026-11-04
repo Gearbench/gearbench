@@ -1,0 +1,57 @@
+#!/bin/sh
+# Usage: /usr/lib/gearbench/checkout-rules FOLDER
+#
+# The package's scripts run this as root, the .deb's, the .rpm's and the Arch
+# package's alike, after an install or an upgrade, with FOLDER the folder a
+# checkout install puts its rules in (install.sh's RULE_DIR). udev takes a rule
+# there over this package's rule of the same name, keeping any grant the
+# package narrows. Debian Policy keeps a package's scripts out of /usr/local,
+# so this only warns.
+set -e
+
+folder=${1:?usage: checkout-rules FOLDER}
+count=0
+found=
+for rule in 70-g915.rules 70-g502x.rules 70-g305.rules 70-astro-a50.rules \
+    70-g515.rules \
+    70-g502hero.rules \
+    70-g502x-lightspeed.rules \
+    70-pro-x-superlight.rules \
+    70-g915-tkl.rules \
+    70-g502x-wired.rules \
+    70-g502x-falcon.rules \
+    70-g815.rules \
+    70-g502-lightspeed.rules \
+    70-pro-wireless.rules \
+    70-g903-hero.rules \
+    70-hidpp-headsets.rules \
+    70-pro-x-superlight-2.rules \
+    70-pro-x2-superstrike.rules \
+    70-g203-lightsync.rules \
+    70-pro-x-tkl.rules \
+    70-g213.rules \
+    70-g915-x.rules \
+    70-g316-x.rules \
+    70-g512-x.rules \
+    70-gearbench-uinput.rules \
+    70-g432.rules \
+    70-astro-a50x.rules \
+    70-astro-a50-gen5.rules \
+    70-lightspeed-headsets.rules
+do
+    [ -e "$folder/$rule" ] || continue
+    count=$((count + 1))
+    found="${found:+$found, }$rule"
+done
+# The checkout first: install.sh 1.2.1 and earlier ask only dpkg for a package, so beside
+# an .rpm or an Arch package their uninstall stops the service and, from 1.1.0, turns off
+# the focus extension the package has too.
+if [ "$count" -eq 1 ]; then
+    echo "gearbench: $folder/$found, from an install from a checkout, overrides this" \
+        "package's rule of that name; in that checkout, run git pull, then" \
+        "./install.sh --uninstall" >&2
+elif [ "$count" -gt 1 ]; then
+    echo "gearbench: $folder holds $count rules from an install from a checkout, which" \
+        "override this package's rules of the same names: $found; in that checkout," \
+        "run git pull, then ./install.sh --uninstall" >&2
+fi

@@ -24,12 +24,28 @@ WATCHER = "org.kde.StatusNotifierWatcher"
 WATCHER_PATH = "/StatusNotifierWatcher"
 ITEM = "org.kde.StatusNotifierItem"
 MENU = "com.canonical.dbusmenu"
+#: The message bus itself, whose ListNames and NameOwnerChanged say who holds a tray host's
+#: name.
+BUS = "org.freedesktop.DBus"
+BUS_PATH = "/org/freedesktop/DBus"
+#: How a tray host's name starts, the name the program that draws the icons takes: on KDE
+#: Plasma that is plasmashell, and the watcher is kded's.
+HOST = "org.kde.StatusNotifierHost-"
+#: The namespace NameOwnerChanged is matched in, since a match rule takes no name's prefix.
+HOST_NAMESPACE = "org.kde"
+#: The most tray host names followed at once: a desktop runs a tray or two, and each name
+#: followed is memory that a program allowed to own org.kde.* names makes the daemon keep.
+HOSTS_MAX = 16
 
-NO_WATCHER = ("nothing owns org.kde.StatusNotifierWatcher, so there is no tray; on GNOME, "
-              "Ubuntu's AppIndicators extension provides one")
+NO_WATCHER = ("nothing owns org.kde.StatusNotifierWatcher, so there is no tray; on GNOME, an "
+              "AppIndicator extension provides one: Ubuntu AppIndicators on Ubuntu, AppIndicator "
+              "and KStatusNotifierItem Support elsewhere")
 NOT_SHELL = ("a program other than GNOME Shell owns org.kde.StatusNotifierWatcher, and under "
              "GNOME the icon is offered only to the Shell; `busctl --user list | grep "
              "StatusNotifierWatcher` names that program")
+TOO_MANY_HOSTS = (f"more than {HOSTS_MAX} tray host names are taken, and the tray icon answers "
+                  f"the programs holding the first {HOSTS_MAX} alone; `busctl --user list | "
+                  "grep StatusNotifierHost` shows which program holds each")
 #: How a watcher's refusal of the icon starts, in the journal and `tray_state`.
 NOT_TAKEN = "the tray did not take the icon"
 #: `tray_state`'s word while the icon is on its way to the tray, no reason it does not show:
@@ -108,6 +124,13 @@ class _Tray:
     #: its unique owner while it has one.
     watch: int = 0
     watcher: str | None = None
+    #: Off GNOME, each tray host's name and its unique owner, once `_follow_hosts` follows them
+    #: on the daemon's own session connection; None before. `hosts_subscription` is that
+    #: NameOwnerChanged subscription, and `hosts_waiting` counts the lookups of the hosts
+    #: there before it that have not answered: the item is registered once none has to.
+    hosts: dict[str, str] | None = None
+    hosts_subscription: int = 0
+    hosts_waiting: int = 0
     registering: bool = False
     registered: bool = False
     #: Why the tray did not take it, or that there is no tray, for `state`.
@@ -124,7 +147,8 @@ class TrayExport:
     tray.TrayMenu's callbacks run from the loop's `dispatch()`, and its `source` also from
     `show` and `refresh`, which the daemon calls outside it. `connected`, `dropped` and
     `shell_appeared` are how its holder tells it that the daemon's own session connection is
-    set up or gone, or that the Shell appeared."""
+    set up or gone, or that the Shell appeared. Whether the Shell runs it reads from
+    `session.owners`, which the holder's `Loop.watch` of SHELL on that bus keeps."""
 
     def __init__(self, loop: Loop, session: Bus) -> None:
         self._loop = loop
@@ -146,15 +170,17 @@ class TrayExport:
 
     def hide(self) -> None:
         """Take the icon down: its connection closed, which the tray drops the item at, and
-        its watch gone."""
+        its watch and its hosts' subscription gone."""
         tray, self._tray = self._tray, None
         if tray is None:
             return
         self._tray_idle(tray)
         self._unlink_tray(tray)
         if tray.watch:
-            self._loop.gio.bus_unwatch_name(tray.watch)
-            self._session.watchers.remove(tray.watch)
+            self._loop.unwatch(self._session, tray.watch)
+        if tray.hosts_subscription:
+            # Set only on a live connection, and `dropped` clears it with that connection.
+            self._loop.unsubscribe(self._session, tray.hosts_subscription)
 
     def refresh(self) -> None:
         """Compare the menu's model with what the tray shows and signal what
@@ -188,14 +214,17 @@ class TrayExport:
             self._export_tray(self._tray)
 
     def dropped(self) -> None:
-        """The daemon's own session connection is gone: the watcher's watch went with it, and
-        the item's own connection goes too; the next session connection opens a new one."""
+        """The daemon's own session connection is gone: the watcher's watch and the hosts'
+        subscription went with it, and the item's own connection goes too; the next session
+        connection opens a new one and looks the hosts up again, since a bus started again
+        gives its unique names out afresh."""
         tray = self._tray
         if tray is not None:
             self._tray_idle(tray)
             self._unlink_tray(tray)
             tray.link_error = None
-            tray.watch = 0
+            tray.watch = tray.hosts_subscription = 0
+            tray.hosts = None
 
     def shell_appeared(self) -> None:
         """A watcher passed over for not being the Shell's may be the Shell's now, and one
@@ -218,25 +247,20 @@ class TrayExport:
         tray.link.address = self._session.address
         self._link_tray(tray)
 
-        def appeared(_conn: object, _name: str, owner: str) -> None:
+        def appeared(owner: str) -> None:
             if self._tray is tray:
                 self._watcher_appeared(tray, owner)
 
-        def vanished(_conn: object, _name: str) -> None:
+        def vanished() -> None:
             if self._tray is tray:
                 self._tray_idle(tray)
                 tray.why = NO_WATCHER
                 # A topic of its own, which a tray coming back does not
                 # reset: Ubuntu's tray goes at every lock (2026-09-26).
                 self._loop.say("tray watcher", NO_WATCHER, logging.INFO)
-        with self._loop.home():
-            # On a connected bus: `show` exports on an open connection, and without one leaves
-            # it to `connected`, which the connection's setup calls.
-            tray.watch = self._loop.gio.bus_watch_name_on_connection(
-                cast("Gio.DBusConnection", self._session.conn), WATCHER,
-                self._loop.gio.BusNameWatcherFlags.NONE, self._loop.guard(appeared),
-                self._loop.guard(vanished))
-        self._session.watchers.append(tray.watch)
+        # On a connected bus: `show` exports on an open connection, and without one leaves it
+        # to `connected`, which the connection's setup calls.
+        tray.watch = self._loop.follow(self._session, WATCHER, appeared, vanished)
 
     def _watcher_appeared(self, tray: _Tray, owner: str) -> None:
         """A tray, or a new one: whatever the last one held went with it."""
@@ -311,9 +335,10 @@ class TrayExport:
         name the watcher takes for the item's; once that connection and a tray are there. Under
         GNOME only the Shell's watcher is asked, the rule `_may_be_tray` keeps, as `_from_tray`
         does: one another program holds gets no registration, and one it took or was asked for
-        before the Shell's name appeared no longer counts (`shell_appeared`). A refusal or a
-        timeout is tried again on the reconnect's backoff: the AppIndicators extension answers
-        only once the shell has started."""
+        before the Shell's name appeared no longer counts (`shell_appeared`). Elsewhere it waits
+        for the tray hosts' lookup (`_hosts_known`). A refusal or a timeout is tried again on
+        the reconnect's backoff: the AppIndicators extension answers only once the shell has
+        started."""
         owner, conn = tray.watcher, tray.link.conn
         if conn is None or owner is None:
             return
@@ -322,7 +347,7 @@ class TrayExport:
             tray.why = NOT_SHELL
             self._loop.say("tray", f"no tray icon: {NOT_SHELL}")
             return
-        if tray.registering or tray.registered:
+        if tray.registering or tray.registered or not self._hosts_known(tray):
             return
         tray.registering = True
 
@@ -350,6 +375,71 @@ class TrayExport:
         self._loop.call(tray.link, owner, WATCHER_PATH, WATCHER, "RegisterStatusNotifierItem",
                         self._loop.glib.Variant("(s)", (tray_model.ITEM_PATH,)), None, done,
                         refused)
+
+    def _hosts_known(self, tray: _Tray) -> bool:
+        """Whether the item may be registered as far as the tray hosts go: under GNOME at once,
+        since the Shell alone reads the item and no host is looked up; elsewhere once the hosts
+        already there are known, a lookup the first ask on an open connection starts
+        (`_follow_hosts`), so that each finds itself among them when it reads the item the
+        watcher announces. For a host that takes its name later, the bus sends NameOwnerChanged
+        as it takes it, a round trip at least before the host can ask the watcher for the item:
+        an order taken from the specification's steps, not measured."""
+        if not self._gnome() and tray.hosts is None:
+            if cast("Gio.DBusConnection", self._session.conn).is_closed():
+                # Dispatched after the bus went, ahead of its `closed`: GLib prints a critical
+                # line of its own for a subscription made on a closed connection, and the next
+                # connection's setup exports the item (`connected`).
+                return False
+            self._follow_hosts(tray)
+        return tray.hosts_waiting == 0
+
+    def _follow_hosts(self, tray: _Tray) -> None:
+        """Follow who owns a tray host's name, in `tray.hosts`: each change from
+        NameOwnerChanged, and the names there already from ListNames and GetNameOwner, whose
+        last answer registers the item."""
+        session, hosts = self._session, dict[str, str]()
+        tray.hosts, tray.hosts_waiting = hosts, 1
+        tray.hosts_subscription = self._loop.subscribe(
+            session, BUS, BUS, "NameOwnerChanged", BUS_PATH,
+            lambda args: self._host_moved(hosts, args[0], args[2]), arg0=HOST_NAMESPACE,
+            namespace=True, signature="(sss)")
+
+        def answered() -> None:
+            tray.hosts_waiting -= 1
+            if not tray.hosts_waiting:
+                self._register(tray)
+
+        def failed(err: GLib.Error) -> None:
+            # GetNameOwner of a host that went since ListNames, whose NameOwnerChanged came
+            # first, or a bus that did not answer: a host not known reads nothing.
+            log.debug("the tray hosts' lookup failed: %s", said(err))
+            answered()
+
+        def listed(reply: tuple) -> None:
+            names = [name for name in reply[0] if name.startswith(HOST)]
+            if len(names) > HOSTS_MAX:
+                self._loop.say("tray hosts", TOO_MANY_HOSTS)
+                del names[HOSTS_MAX:]
+            tray.hosts_waiting += len(names)
+            for name in names:
+                def owned(reply: tuple, name: str = name) -> None:
+                    self._host_moved(hosts, name, reply[0])
+                    answered()
+                self._loop.call(session, BUS, BUS_PATH, BUS, "GetNameOwner",
+                                self._loop.glib.Variant("(s)", (name,)), "(s)", owned, failed)
+            answered()
+        self._loop.call(session, BUS, BUS_PATH, BUS, "ListNames", None, "(as)", listed, failed)
+
+    def _host_moved(self, hosts: dict[str, str], name: str, owner: str) -> None:
+        """`name`, if a tray host's, is `owner`'s now, or no one's for "": followed while fewer
+        than HOSTS_MAX are."""
+        if not name.startswith(HOST):
+            return
+        hosts.pop(name, None)
+        if owner and len(hosts) >= HOSTS_MAX:
+            self._loop.say("tray hosts", TOO_MANY_HOSTS)
+        elif owner:
+            hosts[name] = owner
 
     def _tray_emit(self, tray: _Tray, changes: tray_model.Changes) -> None:
         """The signals for what changed: the item's, and the menu's layout and
@@ -385,7 +475,13 @@ class TrayExport:
                 return
 
     def _item_props(self, props: Mapping[str, object]) -> dict[str, object]:
-        return {name: self._loop.glib.Variant(tray_model.ITEM_TYPES[name], utf8(value))
+        """A menu item's properties as variants, a problem line's sign named as the panel's
+        is (tray.tray_sign) and each label escaped for the host (tray.tray_label)."""
+        gnome = self._gnome()
+        return {name: self._loop.glib.Variant(tray_model.ITEM_TYPES[name], utf8(
+                    tray_model.tray_sign(str(value), gnome=gnome) if name == "icon-name"
+                    else tray_model.tray_label(str(value), gnome=gnome) if name == "label"
+                    else value))
                 for name, value in props.items()}
 
     def _node(self, node: tray_model.Node) -> tuple:
@@ -395,22 +491,32 @@ class TrayExport:
 
     def _from_tray(self, sender: str) -> _Tray | None:
         """The tray if a call on the item or its menu is the tray's, else None: from the
-        StatusNotifierWatcher's owner, and under GNOME only if that is the Shell. A program
-        that is not a Flatpak app, or one given the whole session bus, can call the item's
-        connection, and one allowed to own org.kde.* can hold the watcher's name while the
-        AppIndicators extension is off at the lock screen."""
+        StatusNotifierWatcher's owner, and under GNOME only if that is the Shell; elsewhere
+        from a tray host's owner too, the program that draws the icons, as plasmashell does for
+        kded's watcher on KDE Plasma. A program that is not a Flatpak app, or one given the
+        whole session bus, can call the item's connection, and one allowed to own org.kde.*
+        can hold the watcher's name while the AppIndicators extension is off at the lock
+        screen, or a host's name where no Shell runs."""
         tray = self._tray
-        return (tray if tray is not None and sender == tray.watcher
-                and self._may_be_tray(sender) else None)
+        if tray is None:
+            return None
+        hosts = tray.hosts if not self._gnome() and tray.hosts else {}
+        return (tray if sender == tray.watcher and self._may_be_tray(sender)
+                or sender in hosts.values() else None)
 
     def _may_be_tray(self, name: str) -> bool:
         """Whether `name` may be the tray: under GNOME only the Shell may, so it must
         own org.gnome.Shell too; without a Shell, any watcher may."""
         return self._session.owners.get(SHELL) in (None, name)
 
+    def _gnome(self) -> bool:
+        """Whether GNOME Shell runs: org.gnome.Shell has an owner on the session bus."""
+        return self._session.owners.get(SHELL) is not None
+
     def _item_property(self, _conn: object, sender: str, _path: str, _interface: str,
                        name: str) -> object:
-        values = tray.menu.sni() if (tray := self._from_tray(sender)) is not None else {}
+        values = ({} if (tray := self._from_tray(sender)) is None
+                  else tray.menu.sni(gnome=self._gnome()))
         # None, for a read that raced `hide` or is not the tray's, is an
         # error to the caller, and GetAll leaves the property out.
         return (self._loop.glib.Variant(tray_model.SNI_TYPES[name], utf8(values[name]))
@@ -469,12 +575,11 @@ class TrayExport:
             return
         else:
             ids = [args[0]] if method == "AboutToShow" else args[0]
-            changes = menu.about_to_show(0 if 0 in ids else -1)
-            self._tray_emit(tray, changes)
-            reply = (self._loop.glib.Variant("(b)", (changes.layout,)) if method == "AboutToShow"
+            self._tray_emit(tray, menu.about_to_show(0 if 0 in ids else -1))
+            stale = [i for i in ids if menu.stale(i)]
+            reply = (self._loop.glib.Variant("(b)", (bool(stale),)) if method == "AboutToShow"
                      else self._loop.glib.Variant("(aiai)", (
-                         [i for i in ids if menu.known(i)] if changes.layout else [],
-                         [i for i in ids if not menu.known(i)])))
+                         stale, [i for i in ids if not menu.known(i)])))
         invocation.return_value(reply)
 
     @staticmethod

@@ -10,12 +10,12 @@ import json
 import logging
 import os
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, TypedDict, TypeGuard
 
-from ..battery import BATTERY_WARNINGS, icon_name, on_power, shown_percent
-from ..config import PROFILE_CHOICES, expect
+from ..battery import FULL, icon_name, notice_levels, on_power, shown_percent
+from ..config import NO_NOTICES, PROFILE_CHOICES, URGENT, battery_notices_of, expect
 from ..hidpp import (
     NO_RULE,
     PROBE_RETRIES,
@@ -27,6 +27,7 @@ from ..hidpp import (
     UnreadableAnswer,
     not_there,
     open_device,
+    power_supplied,
 )
 from ..keyboard import key_named, opening
 from ..library_files import slug
@@ -34,11 +35,12 @@ from ..lighting import DARK, DIM, LIT
 from ..mouse import (
     MODEL_IDS as MOUSE_IDS,
     MODELS as MOUSE_MODELS,
-    MouseError,
     key_name as mouse_key_name,
 )
+from ..sensor import MouseError
 from ..settings_files import ConfigError
-from ..wording import kind_of, number, reason, whole, word_list, written
+from ..tray import Battery
+from ..wording import ASLEEP_OR_SWITCHED_OFF, kind_of, number, reason, whole, word_list, written
 
 if TYPE_CHECKING:
     from ..hidpp import Hidpp
@@ -56,12 +58,10 @@ class ProbeBudget(TypedDict):
 
 #: The budget for a request to a device that may be asleep, writes included, from the first
 #: probe to the hand-back: the transport's (hidpp.PROBE_TIMEOUT, which has the measurement).
-MOUSE_PROBE_TIMEOUT = PROBE_TIMEOUT
-MOUSE_PROBE_RETRIES = PROBE_RETRIES
-MOUSE_PROBE: ProbeBudget = {"timeout": MOUSE_PROBE_TIMEOUT, "retries": MOUSE_PROBE_RETRIES}
+MOUSE_PROBE: ProbeBudget = {"timeout": PROBE_TIMEOUT, "retries": PROBE_RETRIES}
 
 #: How long a device that stopped answering is left unasked before one probe.
-#: A mouse's wait doubles up to mice.attached.MOUSE_RETRY_MAX while it stays silent;
+#: A mouse's wait doubles up to MOUSE_RETRY_MAX while it stays silent;
 #: the keyboard's and the A50 base station's stay at this. A report or an answer from a
 #: mouse or the keyboard clears its mark early; the base station sends nothing unasked,
 #: so its mark lasts until the probe is answered.
@@ -71,16 +71,27 @@ MOUSE_SILENT_RECHECK = 30.0
 #: low-battery notices on the receiver; G HUB reads it every 60 s.
 KEYBOARD_BATTERY_INTERVAL = 60.0
 
-#: A reading at or above this arms both notices (battery.BATTERY_WARNINGS) again and takes one
+#: A reading at or above this arms both notices (battery.PRESET_LEVELS) again and takes one
 #: showing down, for a charge the daemon never read (the owner's decision of 2026-09-28). It is
 #: 20 points over the 30 % notice, so the percentage's rise when the lights go off does not
-#: reach it.
+#: reach it. A percent read from the cell's voltage arms them only at its second reading in a
+#: row up here (BatteryNotices.held_rise).
 BATTERY_REARM = 50
 #: Why the last notice was not posted when the notification server refused it.
 BATTERY_REFUSED = "the notification server refused it"
+#: Each desktop that warns of a device's battery itself where the kernel gives the device a
+#: power supply, by its entry in XDG_CURRENT_DESKTOP, with the name a line gives it (the
+#: owner's decision of 2026-10-28, "The 'also warns' rule goes by desktop"). Both read in
+#: their source: GNOME's gsd-power posts a notice for each device battery UPower lists, at
+#: UPower's levels, any kind of device (gsd-power-manager.c, engine_charge_low); KDE
+#: Plasma's PowerDevil 6.8.2 one for each battery Solid lists that is no power supply, as
+#: it falls to 10% or below by default (powerdevilcore.cpp,
+#: emitBatteryChargePercentNotification), and Solid lists UPower's mouse, keyboard, headset
+#: and headphones among others. Any other desktop counts as not warning.
+WARNING_DESKTOPS = {"GNOME": "GNOME", "KDE": "KDE Plasma"}
 
 #: The refusal of a number that is no M profile, the number put in.
-NOT_AN_M_PROFILE = f"profile is {PROFILE_CHOICES}, not {{}}"
+NOT_AN_M_PROFILE = f"the M profile is {PROFILE_CHOICES}, not {{}}"
 #: The refusal of a command naming a game profile the library does not hold, with its name
 #: quoted (wording.quoted). Not wording.NO_GAME_PROFILE, the choice of no profile at all.
 NO_GAME_PROFILE_NAMED = "no game profile named {}"
@@ -92,10 +103,10 @@ UINPUT_NOT_OPENED = "/dev/uinput could not be opened"
 #: A power-on report comes in pairs; one re-apply per this many seconds answers both.
 REAPPLY_INTERVAL = 2.0
 
-#: Seconds between the looks for the cable of a mouse or a headset driven through its
-#: receiver, each a walk of sysfs that sends nothing, while the watch on /dev does not run
-#: (Plugs.pace): the keyboard's pace (daemon/keyboard/notes.py's RECONNECT_DELAY), so a cable
-#: plugged in takes the device over within 2 s.
+#: Seconds between the looks for a missing keyboard and for the cable of a keyboard, a mouse
+#: or a headset driven through its receiver, each a walk of sysfs that sends nothing, while
+#: the watch on /dev does not run (Plugs.pace), so a cable plugged in takes the device over
+#: within 2 s.
 CABLE_LOOK = 2.0
 
 #: Seconds between the looks at whether the node of a headset found that did not answer has
@@ -109,6 +120,12 @@ GONE_LOOK = 1.0
 #: HEADSET_RETRY_MAX.
 HEADSET_RETRY = 5.0
 HEADSET_RETRY_MAX = 60.0
+
+#: How often a missing mouse, or a keyboard switched off behind its receiver, is probed,
+#: doubling after each probe nothing answers up to MOUSE_RETRY_MAX: one that is off keeps its
+#: receiver's node and never answers, and each probe holds the loop 1.5 s.
+MOUSE_RETRY = 10.0
+MOUSE_RETRY_MAX = 120.0
 
 #: How early, in seconds, a periodic look or poll may be taken (look_due). The looks a pass
 #: sets come due as far apart as the work between them took in it, a walk of /proc or a
@@ -172,14 +189,6 @@ def unanswered(exc: BaseException) -> bool:
     return any(not_there(failure) for failure in (exc, exc.__cause__))
 
 
-def on_or_off(value: object) -> bool | None:
-    """A request's switch value as a bool, or None when it is not one."""
-    if isinstance(value, str):
-        return {"on": True, "true": True, "1": True,
-                "off": False, "false": False, "0": False}.get(value.strip().lower())
-    return value if isinstance(value, bool) else None
-
-
 def whole_number(value: object, command: str) -> int:
     """A request's value as a whole number: one in JSON (wording.whole), or text of decimal
     digits after at most one minus; else ValueError saying what `command` wants. int()
@@ -226,6 +235,22 @@ def attached_list(labels: Iterable[str]) -> str:
     return "attached: " + ", ".join(labels)
 
 
+def mouse_model_asked(value: object, attached: Iterable[str]) -> str:
+    """The key (mouse.model_key) of the mouse model a request's `device` names by any of its
+    product ids or its name (mouse_model_named), attached or not. A value neither text nor a
+    number is name_text's refusal; one that names no mouse model is a ConfigError listing the
+    mice attached by their labels (`attached`), or with none the models there are."""
+    text = name_text(value, "device")
+    key = mouse_model_named(text)
+    if key is None:
+        labels = list(attached)
+        listed = (attached_list(labels) if labels else
+                  f"they are {word_list([mouse_key_name(model) for model in MOUSE_IDS], 'and')}")
+        raise ConfigError(f"{text.strip().lower()!r} names no mouse model Gearbench drives; "
+                          f"{listed}")
+    return key
+
+
 def kept_pick(kept: str | None) -> int | None:
     """config.json's `mouse_selected` as the product id the mice are selected on (Mice
     .selected), which Mice.current finds on either route; None for none, and for an id no
@@ -259,19 +284,24 @@ def no_effect(device: str, name: str, has: tuple[str, ...] | list[str],
 
 
 def switch_refusal(command: str, value: object) -> str:
-    """What a switch command says to a value on_or_off could not read."""
+    """What a switch command says to a value switch_value could not read."""
     if isinstance(value, str):
         return f"{command} is on or off, not {value!r}"
     return f"{command} is on or off, not {kind_of(value)}"
 
 
 def switch_value(value: object, command: str) -> bool:
-    """A switch command's value as a bool (on_or_off), or ConfigError in switch_refusal's
-    words, which handle_command answers as the refusal."""
-    switch = on_or_off(value)
-    if switch is None:
-        raise ConfigError(switch_refusal(command, value))
-    return switch
+    """A switch command's value as a bool: a bool as itself, or on, true, 1, off, false or 0 as
+    text in any case and with spaces around it; else ConfigError in switch_refusal's words,
+    which handle_command answers as the refusal."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        switch = {"on": True, "true": True, "1": True,
+                  "off": False, "false": False, "0": False}.get(value.strip().lower())
+        if switch is not None:
+            return switch
+    raise ConfigError(switch_refusal(command, value))
 
 
 def nested_past(value: object, limit: int) -> bool:
@@ -288,12 +318,19 @@ def nested_past(value: object, limit: int) -> bool:
     return False
 
 
+def is_request(request: object) -> TypeGuard[dict]:
+    """Whether the control socket runs `request`: a JSON object whose command, where it has
+    one, is text. One with no command is looked up as "", which no command is."""
+    return isinstance(request, dict) and isinstance(request.get("command", ""), str)
+
+
 def not_a_request(request: object) -> str:
-    """Why the control socket runs nothing for `request`: it is not a JSON object, or its
-    command is not text, which str() would look up as Python writes it ("['x']")."""
+    """Why the control socket runs nothing for `request`, one is_request refuses: it is not a
+    JSON object, or its command is not text, which str() would look up as Python writes it
+    ("['x']")."""
     if isinstance(request, dict):
-        return f"command is text, not {kind_of(request['command'])}"
-    return f"a request is a JSON object, not {kind_of(request)}"
+        return f"bad request: command is text, not {kind_of(request['command'])}"
+    return f"bad request: a request is a JSON object, not {kind_of(request)}"
 
 
 def digest(shown: object) -> str:
@@ -319,10 +356,14 @@ def not_reached(device: str, failure: BaseException) -> dict | None:
                    failure)
 
 
+#: What is said of a keyboard or a mouse attached without lighting Gearbench drives (its
+#: `lighting` None), by the device's name: "Gearbench drives", since some such devices have
+#: lights, as the PRO X SUPERLIGHT has the DPI indicator its firmware owns.
+NO_LIGHTING = "the {} has no lighting Gearbench drives"
 #: Why a mouse or a headset's lights do not follow the keyboard, by the device's name: the
 #: journal's line, said once an attach, and the note of `mouse_sync` or `headset_sync` turned
 #: on.
-NOT_SYNCED = "the {} has no lighting Gearbench drives, so it does not follow the keyboard"
+NOT_SYNCED = NO_LIGHTING + ", so it does not follow the keyboard"
 #: The refusal of a mouse's or a headset's own lighting while it follows the keyboard that
 #: leads: the device, the leader by its name (keyboard.followed) and the command that turns
 #: its switch off.
@@ -331,16 +372,21 @@ SYNC_ON = ("the {device} follows the {leader}'s color; turn off Follow the {lead
 
 #: hidpp_refusal's sentences, each with the device's name put in.
 DEVICE_GONE = "the {} went away"
-DEVICE_NO_REPLY = "the {} did not answer; it may be asleep or switched off"
+DEVICE_NO_REPLY = f"the {{}} did not answer; it may be {ASLEEP_OR_SWITCHED_OFF}"
+#: The same for a wired device, which neither sleeps nor switches off: its name and what
+#: it is plugged in by, as "its USB adapter".
+DEVICE_NO_REPLY_WIRED = "the {} did not answer; unplug {} and plug it back in"
 DEVICE_OFF = "the {} is switched off or out of range"
 DEVICE_REFUSED = "the {} refused that"
 
 #: A device node this user may not open, with its path and the device's words put in:
 #: "Astro A50 X's base station", "G432".
 NODE_DENIED = "no permission to open {}, the {}'s node: " + NO_RULE
-#: A found device whose setup failed: its name, why ("no answer" for a timeout), and what
-#: it is plugged in by, as "its base station".
-DEVICE_NOT_SET_UP = "the {} could not be set up ({}); unplug {} and plug it back in"
+#: A found device whose setup failed: its name and why ("no answer" for a timeout).
+SET_UP_FAILED = "the {} could not be set up ({})"
+#: SET_UP_FAILED's, with what the device is plugged in by, as "its base station", for the
+#: replug that sets it up again.
+DEVICE_NOT_SET_UP = SET_UP_FAILED + "; unplug {} and plug it back in"
 #: The reply to an answer Gearbench cannot read, with the device's name.
 NOT_UNDERSTOOD = "the {} gave an answer Gearbench does not understand"
 
@@ -385,14 +431,18 @@ def with_note(reply: dict, note: str | None, detail: str | None = None) -> dict:
 
 
 def attached_entry(name: str, device: str | None, route: str, battery: dict | None,
-                   battery_at: float | None, *, answering: bool = True,
-                   battery_found: bool = True) -> dict:
+                   battery_at: float | None, notices: BatteryNotices, *,
+                   answering: bool = True) -> dict:
     """A mouse or a headset attached, as `status`'s `mice_attached` and `headsets_attached`
     give it: its name; its node, None for a headset away whose receiver is let go; its route
-    in wording.route's words; whether it lists a battery, its last reading and when that was
-    taken; and whether it answers, as its own reply's `answering`."""
-    return {"name": name, "device": device, "route": route, "battery_found": battery_found,
-            "battery": battery, "battery_at": battery_at, "answering": answering}
+    in wording.route's words; whether it lists a battery (`notices`' battery_found), its last
+    reading and when that was taken; the lowest level its `notices` warned of since they were
+    last armed again, as the keyboard's `battery_warned`; and whether it answers, as its own
+    reply's `answering`."""
+    return {"name": name, "device": device, "route": route,
+            "battery_found": notices.battery_found(), "battery": battery,
+            "battery_at": battery_at, "battery_warned": notices.battery_warned,
+            "answering": answering}
 
 
 def same_profile(one: str, other: str) -> bool:
@@ -504,19 +554,41 @@ class AttachNotes:
         return None
 
 
+def warning_desktop() -> str | None:
+    """The name of the desktop running, where it warns of a battery the kernel gives a device
+    (WARNING_DESKTOPS); None for any other, or none named. It relies on XDG_CURRENT_DESKTOP in
+    the daemon's environment, which the user manager's gives the unit: GNOME's gnome-session
+    puts its whole environment there (gsm-util.c, gsm_util_export_user_environment), and
+    Plasma's startplasma before it starts its session's target (startplasma.cpp,
+    syncDBusEnvironment, through KUpdateLaunchEnvironmentJob's SetEnvironment). Read in
+    their source and measured on 2026-11-03: GNOME under GNOME Shell 50 and 51, KDE under
+    Plasma 6.8.1."""
+    entries = os.environ.get("XDG_CURRENT_DESKTOP", "").split(":")
+    return next((WARNING_DESKTOPS[entry] for entry in entries if entry in WARNING_DESKTOPS),
+                None)
+
+
 class BatteryNotices:
-    """A device's low-battery notices (warn_battery), one rule for every device. A subclass
-    sets the words and battery_names(); the session's desktop posts the notices."""
+    """A device's low-battery notices (warn_battery), one rule for every device, at the levels
+    of its preset in config.json's battery_notices (battery_preset). A subclass sets the words
+    and each method here that raises NotImplementedError; the session's desktop posts the
+    notices."""
 
     #: The last percentage on battery, the lowest threshold warned of, the notice showing,
     #: and why the last one could not be posted, so a repeat of it is said at debug; and how
     #: many notices went to the desktop, so one whose id comes after a later send is taken
-    #: down.
+    #: down, and one whose refusal comes after it changes nothing.
     _battery_before: int | None = None
     battery_warned: int | None = None
     _battery_notice: int | None = None
     _battery_unposted: str | None = None
     _battery_sends = 0
+    #: The preset the last reading was warned of by, so a reading under another arms both
+    #: notices again: a notice up for a level the new preset does not have would stay up.
+    _battery_preset: str | None = None
+    #: The model the notices were last armed for (armed_for): another model's readings are
+    #: another battery's.
+    battery_of: str | None = None
     #: The journal's prefix for the device's lines, what it is doing on power after its name
     #: ("is charging"), and the notice's last sentence.
     BATTERY_PREFIX: str
@@ -529,11 +601,63 @@ class BatteryNotices:
         """The device's name in the notice, and in the journal, as "the headset"."""
         raise NotImplementedError
 
+    def battery_ids(self) -> Sequence[str]:
+        """The names config.json's battery_notices may keep the device's preset under, the one
+        it is kept under first (config.battery_notices_of): a keyboard's or a mouse's model ids
+        (keyboard.model_ids, mouse.model_ids), or a headset's key alone."""
+        raise NotImplementedError
+
+    def battery_preset(self) -> str:
+        """The device's preset of config.BATTERY_PRESETS (config.battery_notices_of)."""
+        return battery_notices_of(self.d.config.battery_notices, self.battery_ids())
+
+    def tray_line(self, key: str, name: str, reading: dict | None, *, answering: bool = True,
+                  cabled: bool = False, read_at: float | None = None) -> Battery:
+        """The tray's line for a reading of the device's (tray.Battery.of), low below the lower
+        level of its preset (battery_preset)."""
+        return Battery.of(key, name, reading, answering=answering, cabled=cabled,
+                          read_at=read_at, preset=self.battery_preset())
+
+    def battery_node(self) -> Path | None:
+        """The hidraw node the device is driven on, None while it is not."""
+        raise NotImplementedError
+
+    def battery_found(self) -> bool:
+        """Whether the device driven has a battery; a subclass whose models may have none says
+        which."""
+        return True
+
+    def notices_reply(self) -> dict:
+        """The device's preset, whether the kernel gives it a power supply and the desktop
+        that warns of its battery itself, for its reply: the window's Battery notices row and
+        the Battery row's colors."""
+        return {"battery_notices": self.battery_preset(),
+                "kernel_battery": self.kernel_battery(), "desktop_warns": self.desktop_warns()}
+
+    def kernel_battery(self) -> bool:
+        """Whether the kernel gives the device's node a power supply (hidpp.power_supplied),
+        which UPower reads and a desktop may warn of (desktop_warns)."""
+        node = self.battery_node()
+        return node is not None and power_supplied(node)
+
+    def desktop_warns(self) -> str | None:
+        """The desktop that warns of the device's battery itself (warning_desktop), where the
+        kernel gives it one (kernel_battery), None where none does: its very-low notice is not
+        urgent then, and its row offers no urgent preset (the owner's decisions of
+        2026-10-28)."""
+        return warning_desktop() if self.kernel_battery() else None
+
     def warn_battery(self, reading: dict) -> None:
-        """A notice when two readings in a row are below a threshold not yet
-        warned of; on external power or charging, or at BATTERY_REARM or more,
-        arm both again and take it down."""
+        """A notice when two readings in a row are below a level of the device's preset not yet
+        warned of, none under NO_NOTICES; a fully charged reading is never below, as the window
+        and the tray compare it (battery.below). On external power or charging, at
+        BATTERY_REARM or more, but for a rise held back (held_rise), or with another preset
+        than the last reading's, arm both again and take it down."""
         subject = self.battery_names()[1]
+        preset = self.battery_preset()
+        if preset != self._battery_preset:
+            self._battery_preset = preset
+            self.battery_rearmed(f"{subject}'s battery notices are now {preset}")
         if on_power(reading):
             self.battery_rearmed(f"{subject} {self.BATTERY_POWERED}")
             return
@@ -542,17 +666,44 @@ class BatteryNotices:
             return
         # So a notice below 30 % never says 30 % left.
         percent = shown_percent(percent)
+        # A fully charged reading starts no run of two below, so the next one alone posts none.
+        full = reading.get("state") == FULL
+        before, self._battery_before = self._battery_before, None if full else percent
         if percent >= BATTERY_REARM:
-            self.battery_rearmed(f"{subject}'s battery is at {percent}%")
+            if not self.held_rise(reading, before, percent):
+                self.battery_rearmed(f"{subject}'s battery is at {percent}%")
             return
-        before, self._battery_before = self._battery_before, percent
-        if before is None:
+        if full or before is None or preset == NO_NOTICES:
             return
-        for threshold in sorted(BATTERY_WARNINGS):
+        levels = notice_levels(preset)
+        for threshold in sorted(levels):
             if percent < threshold and before < threshold:
                 if self.battery_warned is None or threshold < self.battery_warned:
-                    self.send_battery_notice(threshold, percent)
+                    self.send_battery_notice(threshold, percent, threshold == min(levels))
                 return
+
+    def held_rise(self, reading: dict, before: int | None, percent: int) -> bool:
+        """Whether a reading at BATTERY_REARM or more leaves the notices as they are: one read
+        from the cell's voltage, which gives its millivolts, after one below. Such a percent
+        moves with the load: an old G933's read 18%, 51% and 28% within 23 minutes while its
+        music played, paused and played again (measured 2026-10-28), and its notice came
+        twice. So it arms them again only at its second reading in a row up there, as a
+        notice comes only at the second below its level; a percent the device works out
+        itself arms them at once, since a device may report one only as it changes."""
+        if "millivolts" not in reading or before is None or before >= BATTERY_REARM:
+            return False
+        if self.battery_warned is not None:
+            log.debug("%s%s's battery is at %d%%; its battery warning stays until a second "
+                      "reading in a row at %d%% or more", self.BATTERY_PREFIX,
+                      self.battery_names()[1], percent, BATTERY_REARM)
+        return True
+
+    def armed_for(self, model: str, why: str) -> None:
+        """Both notices armed again (battery_rearmed, `why` for its line) when `model` is
+        another than the one they were last armed for."""
+        if model != self.battery_of:
+            self.battery_of = model
+            self.battery_rearmed(why)
 
     def battery_rearmed(self, why: str) -> None:
         """Both notices armed again and the one showing taken down, `why` for the log line."""
@@ -563,23 +714,30 @@ class BatteryNotices:
             self.d.session.desktop.close_notification(self._battery_notice)
             self._battery_notice = None
 
-    def send_battery_notice(self, threshold: int, percent: int) -> None:
-        """The notice for `threshold`, in place of the one showing. One the
-        desktop did not take is not counted, so the next reading tries again."""
+    def send_battery_notice(self, threshold: int, percent: int, lowest: bool) -> None:
+        """The notice for `threshold`, the lower of the preset's levels where `lowest`, in place
+        of the one showing. One the desktop did not take is not counted, so the next reading
+        tries again."""
         session = self.d.session
         name, subject = self.battery_names()
-        lowest = threshold == min(BATTERY_WARNINGS)
+        # Urgent only where no desktop warns of it too, where its row offers the preset.
+        urgent = lowest and self._battery_preset == URGENT and self.desktop_warns() is None
         summary = f"{name} battery {'very low' if lowest else 'low'}"
         body = f"{percent}% left. {self.BATTERY_BODY}"
         before, self.battery_warned = self.battery_warned, threshold
         said = f"{self.BATTERY_PREFIX}{subject}'s battery is at {percent}%, below {threshold}%"
         sent = self._battery_sends + 1
 
-        def done(notice: int | None) -> None:
+        def done(notice: int | None, refused: bool) -> None:
             if notice is None:
+                # A refusal that comes after a later send leaves what that send set.
+                if sent != self._battery_sends:
+                    return
+                # Armed again since (battery_rearmed), the refusal was the last warning's.
                 if self.battery_warned == threshold:
                     self.battery_warned = before
-                self._battery_unposted = BATTERY_REFUSED
+                    if refused:
+                        self._battery_unposted = BATTERY_REFUSED
             elif self.battery_warned is None or sent != self._battery_sends:
                 # Armed again since, or sent again before this id came, which that send could
                 # not replace: both would stay up.
@@ -589,23 +747,18 @@ class BatteryNotices:
 
         # The icon the Battery row and the tray show for the same reading.
         icon = icon_name({"percent": percent})
-        if not session.desktop.notify(summary, body, icon,
-                                      replaces_id=self._battery_notice or 0, done=done):
+        if not session.desktop.notify(summary, body, icon, replaces_id=self._battery_notice or 0,
+                                      done=done, urgent=urgent):
             self.battery_warned = before
-            self.battery_unposted(said)
+            why = ("python3-gi is not installed" if not session.desktop.available
+                   else "the session bus is not connected")
+            # At debug when the last why was the same: without python3-gi that is every reading.
+            log.log(logging.DEBUG if why == self._battery_unposted else logging.INFO,
+                    "%s; no notice posted, since %s; trying again at the next reading", said, why)
+            self._battery_unposted = why
             return
         # Counted once sent: `done` comes from the bus's reply, at a later dispatch.
         self._battery_sends = sent
         # The desktop warns of a refusal once; each reading tries again, said at debug.
         refused, self._battery_unposted = self._battery_unposted == BATTERY_REFUSED, None
         log.log(logging.DEBUG if refused else logging.INFO, "%s; posting a notice", said)
-
-    def battery_unposted(self, said: str) -> None:
-        """Log that a battery notice `said` could not be posted, and why: at
-        info unless the last why was the same, since without python3-gi that
-        is every reading."""
-        why = ("python3-gi is not installed" if not self.d.session.desktop.available
-               else "the session bus is not connected")
-        log.log(logging.DEBUG if why == self._battery_unposted else logging.INFO,
-                "%s; no notice posted, since %s; trying again at the next reading", said, why)
-        self._battery_unposted = why

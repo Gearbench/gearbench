@@ -4,11 +4,12 @@ and the headsets, and answers the CLI and the window on a control socket.
 This module is the core: the select loop, the control socket, `status`, the color a synced
 mouse and a synced headset's lights take from the leader, saving config.json, the virtual
 keyboard and mouse, and the shutdown. The controllers it builds do the rest, and
-shared.py holds what they share. client.py is the front ends' side of the socket; this module
-gives again the names the front ends and the probes in tools/ take from it, so that they
-import the daemon alone. The claim must be held, or the first keypress hands the lighting
-back to the firmware; while it is held, the keyboard's idle and wake notices need an answer
-and a paint. A bad shutdown leaves the G and M keys emitting nothing.
+shared.py holds what they share. client.py is the front ends' side of the socket, and
+request_reader.py reads a request off it for serve_one; this module gives again the names
+the front ends and the probes in tools/ take from client.py, so that they import the daemon
+alone. The claim must be held, or the first keypress hands the lighting back to the
+firmware; while it is held, the keyboard's idle and wake notices need an answer and a paint.
+A bad shutdown leaves the G and M keys emitting nothing.
 """
 
 from __future__ import annotations
@@ -28,27 +29,45 @@ from pathlib import Path
 from typing import cast
 
 from ..apps import candidates
-from ..config import PROFILE_IDS, Config, config_path, format_color, profile_label, unusable
+from ..config import (
+    PROFILE_IDS,
+    Config,
+    Said,
+    config_path,
+    format_color,
+    profile_label,
+    unusable,
+)
 from ..hidpp import DeviceGone, HidppFailure, one_listing
-from ..json_text import NUMBER_TOO_LONG, TOO_DEEP, codec_words
 from ..lighting import LightingError
-from ..mouse import MouseError
 from ..report import untested
-from ..runtime_folder import LISTEN_REFUSED, make_private, missing_folders, shared_problem
+from ..runtime_folder import listen_problem
+from ..sensor import MouseError
 from ..settings_files import (
     FIX_AND_RELOAD,
+    SAVE_OVER,
     ConfigError,
     FileUnreadable,
     changed_on_disk,
     file_stamp,
 )
 from ..uinput import UinputError, VirtualKeyboard, VirtualMouse
-from ..wording import SERVICE_JOURNAL, escaped, quoted, reason, service_command
+from ..wording import (
+    SERVICE_JOURNAL,
+    SETTINGS_NOT_SAVED,
+    UNKNOWN_COMMAND,
+    ended,
+    escaped,
+    quoted,
+    reason,
+    service_command,
+)
 from .a50x import A50XHeadset
 from .bindings import Bindings
 from .client import (
     BUSY as BUSY,
     DOWN as DOWN,
+    NOT_IN_TIME as NOT_IN_TIME,
     NOT_REACHED as NOT_REACHED,
     NOT_RUNNING as NOT_RUNNING,
     REPLY_UNREAD as REPLY_UNREAD,
@@ -58,6 +77,7 @@ from .client import (
     failure as failure,
     invoking_uid as invoking_uid,
     listening as listening,
+    root_alone as root_alone,
     send_command as send_command,
     socket_path,
     use_invoking_users_runtime_dir as use_invoking_users_runtime_dir,
@@ -67,16 +87,18 @@ from .games import Games
 from .headset import Headset, HeadsetError, headset_refusal
 from .keyboard import AIMED, Keyboard, Keyboards
 from .mice import Mice
+from .notices import Notices
 from .per_keyboard import PerKeyboard
 from .plugs import Plugs
+from .request_reader import CLIENT_TIMEOUT, BadRequest, read_request
 from .session import Session
 from .shared import (
     UINPUT_NOT_OPENED,
     checked_layer,
     hidpp_refusal,
+    is_request,
     kept_pick,
     mouse_refusal,
-    nested_past,
     not_a_request,
     refusal,
     with_note,
@@ -103,33 +125,6 @@ VIRTUAL_KEYBOARD_MISSING = "no virtual keyboard, so key bindings and macros type
 VIRTUAL_MOUSE_MISSING = ("no virtual mouse, so macro clicks, wheel tilt and Back or Forward "
                          "bindings fail")
 
-#: handle_command's answer to an OSError, with the file and its reason in words, the
-#: window's SAVE_FAILED shape.
-CONFIG_NOT_SAVED = "could not save {}: {}"
-
-#: Longest pause between a request's segments (the timeout is per recv): a longer gap is a
-#: client that stopped talking, and waiting on it stalls key handling.
-CLIENT_TIMEOUT = 0.5
-
-#: Time from the accept to send the whole request: CLIENT_TIMEOUT alone lets a client that
-#: sends a byte every 0.4 s hold the loop indefinitely.
-REQUEST_DEADLINE = 2.0
-
-#: The most a request may hold, since the loop buffers a whole request before it parses it.
-#: The largest a front end sends, a macro of 64 text steps at their longest, is about 35 KB.
-MAX_REQUEST = 1 << 20
-
-#: How deep a request may nest lists and objects, itself counted: json.loads reads nesting
-#: deeper than repr() of a value in a refusal can walk. A front end sends at most 5, a game
-#: profile with its own DPI stages in import_profile.
-MAX_DEPTH = 32
-
-#: A bad request's words for what json.loads raises on a body, by the error's own type, where
-#: the error's text would not do: the stack's, and int()'s past 4300 digits, whose text asks
-#: for sys.set_int_max_str_digits(), which no client can call. JSONDecodeError gives its own
-#: text, with its position; serve_one words a UnicodeDecodeError by its codec.
-UNREADABLE = {RecursionError: TOO_DEEP, ValueError: NUMBER_TOO_LONG}
-
 #: The reply to a request that met a fault: a handler raised what nothing expects, or its
 #: reply could not be written as JSON. log.exception puts the traceback in the journal, or in
 #: the terminal of a daemon run there.
@@ -151,21 +146,21 @@ def loggable(request: dict) -> dict:
     return shown
 
 
-def load_config() -> tuple[Config, str | None]:
-    """The configuration and None, or the defaults and why the file was not usable.
+def load_config(said: Said) -> tuple[Config, str | None]:
+    """The configuration and None, or the defaults and why the file was not usable. What the
+    read says once goes in `said` (Config.load).
 
     A bad field must not stop the daemon, or the G keys emit nothing. The reason is returned so
     that nothing is saved over the file (Daemon.save_config).
     """
     try:
-        return Config.load(), None
+        return Config.load(said=said), None
     except (ConfigError, OSError) as exc:
         why = unusable(exc)
         # Escaped: the error quotes the file's keys and a link's target as they are, and the
         # journal splits a record at each newline (cli.service.JournalFormatter).
-        log.error("%s is not usable (%s); starting with the defaults instead. "
-                  "Nothing will be written over it: fix the file and run "
-                  "`gearbench-ctl reload`.", escaped(config_path()), escaped(why))
+        log.error("%s is not usable (%s); starting with the defaults, and nothing is saved "
+                  "over it; %s", escaped(config_path()), escaped(why), FIX_AND_RELOAD)
         return Config(), why
 
 
@@ -186,10 +181,6 @@ def tuning_of(overlay: str | None) -> str:
     """Whose stages and rate a mouse takes, for TUNING_NOW: game profile `overlay`'s, its name
     quoted (wording.quoted), or with None onboard profile 1's."""
     return "onboard profile 1's" if overlay is None else f"{quoted(overlay)}'s"
-
-
-class BadRequest(Exception):
-    """A request serve_one refuses before any handler sees it."""
 
 
 # -- the layer each change edits, for check_layer ----------------------------
@@ -221,14 +212,18 @@ class Daemon:
         #: config.json's file_stamp at its last read or write here: a save refuses once it
         #: differs. Taken before the read, so an edit between the two is not taken as read.
         self._config_stamp = file_stamp(config_path())
-        #: config.json's file_stamp when the last reload could not use it, and why. While the
+        #: config.json's file_stamp when the last reload could not use it, why, and whether
+        #: `gearbench-ctl save` writes over it: not where the read failed, since the save
+        #: reads the file first for its backup (settings_files.keep_old_version). While the
         #: file keeps that stamp, no reload takes it, so a refusal gives that error instead.
         #: A save drops it.
-        self._reload_refused: tuple[tuple[int, int, int, int] | None, str] | None = None
+        self._reload_refused: tuple[tuple[int, int, int, int] | None, str, bool] | None = None
         #: config_error: why config.json could not be used at startup, or at a reload refused
         #: since, or None. While it is set, nothing is written over the file until a reload
         #: reads it.
-        self.config, self.config_error = load_config()
+        #: What config.json's reads have said once, kept for the reloads.
+        self.config_said: Said = set()
+        self.config, self.config_error = load_config(self.config_said)
         self._unsaved_warned = False
         self.per_keyboard = PerKeyboard(self)
         #: Every keyboard driven, a controller each; `keyboard` is the leader's.
@@ -266,6 +261,7 @@ class Daemon:
         self.session = Session(self)
         self.games = Games(self)
         self.tray = Tray(self)
+        self.notices = Notices(self)
         self._sock_path = socket_path()
         #: The single-instance lock's fd while listen() holds it, and (st_dev, st_ino) of the
         #: socket file this daemon bound: shutdown removes that file only.
@@ -304,6 +300,19 @@ class Daemon:
     def forget_slow(self, repeats: str) -> None:
         """Log the next slow step of `repeats` at info again: its device's attempt changed."""
         self._slow_said.pop(repeats, None)
+
+    # -- idle dimming --------------------------------------------------------
+
+    def never_dims(self) -> str | None:
+        """Why no keyboard dims or goes dark for idleness now, for the journal: never dim
+        on, or a game profile loaded with never_dim_with_game_profile on (the owner's request
+        of 2026-10-03 and decision 13 of 2026-10-28); None while they dim. The lock's dark is
+        the lock's own."""
+        if self.config.never_dim:
+            return "never dim is on"
+        if self.config.never_dim_with_game_profile and self.games.overlay is not None:
+            return "a game profile is loaded"
+        return None
 
     # -- the color a synced mouse and headset take ------------------------
 
@@ -347,7 +356,8 @@ class Daemon:
                 log.warning("%s", escaped(exc))     # it can quote load_config's error
                 self._unsaved_warned = True
         except OSError as exc:
-            log.warning("could not save %s: %s", escaped(config_path()), reason(exc))
+            log.warning("%s", escaped(SETTINGS_NOT_SAVED.format(exc.filename or config_path(),
+                                                                reason(exc))))
 
     def save_setting(self, **changes: object) -> None:
         """Set config fields and save config.json. A refused or failed save puts them back and
@@ -382,10 +392,10 @@ class Daemon:
         # While the file is as a refused reload found it, the refusal is that reload's error,
         # as another reload would refuse it the same way.
         if refused is not None and refused[0] == stamp:
+            save = f", or {SAVE_OVER}" if refused[2] else ""
             raise FileUnreadable(
                 f"{config_path()} could not be read at the last reload ({refused[1]}); "
-                f"nothing is saved over it; {FIX_AND_RELOAD}, or `gearbench-ctl save` writes "
-                f"the daemon's copy over it")
+                f"nothing is saved over it; {FIX_AND_RELOAD}{save}")
         raise changed_on_disk(config_path())
 
     def check_layer(self, command: str, request: dict) -> None:
@@ -447,13 +457,13 @@ class Daemon:
         return self.config_error is not None
 
     def save_config(self, over_an_edit: bool = False) -> Path:
-        """Write config.json and answer its path, or raise ConfigError: check_config_writable's
-        refusal, or Config.save's.
+        """Write config.json and answer its path, or raise ConfigError (check_config_writable's
+        refusal, or Config.save's) or OSError (a save that failed).
 
         A file unreadable at load or changed on disk is not written over until `reload` reads
         it: the first holds the user's profiles behind one bad field, the second is a hand
         edit. `over_an_edit` is `gearbench-ctl save`, which writes over a hand edit, one the
-        last reload could not read included, but never over a file unreadable at load, while
+        last reload could not parse included, but never over a file unreadable at load, while
         the daemon holds only the defaults.
         """
         if not over_an_edit or self.save_refused():
@@ -469,32 +479,24 @@ class Daemon:
     # -- control socket --------------------------------------------------
 
     def listen(self) -> None:
-        """Open the control socket for this user only, or exit if another daemon is running,
-        a file sits where the socket's folder should be, or another account could put a folder
-        of its own there, as far as runtime_folder.open_to_others can tell: under the unit's
-        PrivateUsers=yes it cannot tell another account's folder or link on the way from root's,
-        which the unit checks first, outside it, making a missing folder there
-        (runtime_folder.main).
+        """Open the control socket for this user only, making its folder where it is not there,
+        or exit if another daemon is running, or with runtime_folder.listen_problem's words if
+        a file sits where the socket's folder should be, the folder cannot be made or looked
+        at, or another account could put a folder of its own there, as far as
+        runtime_folder.open_to_others can tell: under the unit's PrivateUsers=yes it cannot tell
+        another account's folder or link on the way from root's, which the unit checks first,
+        outside it, making a missing folder there (runtime_folder.main).
 
         The lock beside the socket is held until shutdown: without it, a second daemon's probe
         could land between the first's bind and listen, be refused, and remove the new socket
         as stale.
         """
-        folder = self._sock_path.parent
-        try:
-            make_private(folder, missing_folders(folder))
-        except FileExistsError:
-            # mkdir's own words, "File exists", name neither which path nor what to do.
-            raise SystemExit(
-                f"Gearbench daemon cannot listen: a file is at {escaped(folder)}, where its "
-                f"runtime folder should be; remove the file, or set XDG_RUNTIME_DIR to a "
-                f"folder, then start the daemon again") from None
         # Another account that may write here, through the folder's group or as any account,
         # or that may swap the folder for its own through one on the way, could bind the
         # socket first, swap its name for a link between bind and chmod, or plant the lock as
         # a link to a file this process may create.
-        if (problem := shared_problem(folder)) is not None:
-            raise SystemExit(LISTEN_REFUSED.format(folder=escaped(folder), problem=problem))
+        if (problem := listen_problem(self._sock_path.parent)) is not None:
+            raise SystemExit(problem)
         lock = self._sock_path.with_name("gearbench.lock")
         fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
         try:
@@ -541,6 +543,7 @@ class Daemon:
             **self.per_keyboard.commands(),
             **self.session.commands(),
             **self.tray.commands(),
+            **self.notices.commands(),
         }
 
     def handle_command(self, request: object) -> dict:
@@ -550,16 +553,17 @@ class Daemon:
         carry "detail", the failure's own text (refusal), or "kind": a file problem the window
         shows in a banner (ConfigError.kind) or a layer no longer in force (LayerChanged), which
         it reads again. Nothing a client sends may raise out of here, a body that is not a JSON
-        object included; serve_one has already refused one nested past MAX_DEPTH.
+        object included; serve_one has already refused one nested past
+        request_reader.MAX_DEPTH.
         """
-        if not isinstance(request, dict) or not isinstance(request.get("command", ""), str):
+        if not is_request(request):
             return {"ok": False, "error": not_a_request(request)}
         command = request.get("command", "").lower()
         if command not in ("status", "mouse", "headset", "g432", "a50x"):
             log.debug("command %s", loggable(request))
         handler = self.commands.get(command)
         if handler is None:
-            return {"ok": False, "error": f"unknown command {command!r}"}
+            return {"ok": False, "error": UNKNOWN_COMMAND.format(command)}
         try:
             self.check_layer(command, request)
             return handler(request)
@@ -580,18 +584,21 @@ class Daemon:
         except (ValueError, TypeError) as exc:
             return {"ok": False, "error": f"bad request: {exc}"}
         except DeviceGone as exc:
-            # The keyboard's: a mouse's failure comes back as MouseError from mouse_call,
-            # which has torn that mouse down already.
-            self.keyboard.teardown_device()
-            return hidpp_refusal("keyboard", exc)
+            # The leader's: a keyboard command's failure is answered in Keyboards.run, and a
+            # mouse's comes back as MouseError from mouse_call, which has torn that mouse down
+            # already. Named before the teardown, after which another keyboard may lead.
+            keyboard = self.keyboard
+            keyboard.teardown_device()
+            return hidpp_refusal(keyboard.model_name(), exc)
         except HidppFailure as exc:
-            return hidpp_refusal("keyboard", exc)
+            return hidpp_refusal(self.keyboard.model_name(), exc)
         except MouseError as exc:
             return mouse_refusal(exc)
         except (LightingError, UinputError) as exc:
             return {"ok": False, "error": str(exc)}
         except OSError as exc:
-            return refusal(CONFIG_NOT_SAVED.format(config_path(), reason(exc)), exc)
+            return refusal(SETTINGS_NOT_SAVED.format(exc.filename or config_path(), reason(exc)),
+                           exc)
 
     # -- the core's commands ---------------------------------------------
 
@@ -659,13 +666,11 @@ class Daemon:
             "idle_dim_after": self.config.idle_dim_after,
             "idle_off_after": self.config.idle_off_after,
             "never_dim": self.config.never_dim,
+            "never_dim_with_game_profile": self.config.never_dim_with_game_profile,
             "session_locked": self.session.session_locked,
             "screen_blanked": self.session.screen_blanked,
             "desktop": self.session.desktop.status(),
             "tray": self.tray.status(),
-            # The lowest low-battery threshold the keyboard was warned of since the notices were
-            # last armed again (BatteryNotices.battery_rearmed), or None.
-            "battery_warned": self.keyboard.battery.battery_warned,
             "virtual_keyboard": self.kbd is not None,
             "virtual_mouse": self.ptr is not None,
             # A restarted daemon comes up under the same profile and overlay names, so the
@@ -681,13 +686,12 @@ class Daemon:
         """What is wrong, as {"code", "message"}, a keyboard's with "keyboard", its model's
         key, the leader's first. Only sysfs and the files are read: nothing is sent to a
         device."""
-        found: list[dict] = []
+        found: list[dict] = [{"code": code, "message": message, "keyboard": model}
+                             for code, message, model in self.keyboards.problems()]
 
         def add(code: str, message: str) -> None:
             found.append({"code": code, "message": message})
 
-        found +=[{"code": code, "message": message, "keyboard": model}
-                  for code, message, model in self.keyboards.problems()]
         for code, message in (*self.mice.problems(),
                               *(entry for headset in self.headsets
                                 for entry in headset.problems())):
@@ -750,9 +754,9 @@ class Daemon:
         """
         stamp = file_stamp(config_path())
         try:
-            config = Config.load()
+            config = Config.load(said=self.config_said)
         except (ConfigError, OSError) as exc:
-            self._reload_refused = (stamp, unusable(exc))
+            self._reload_refused = (stamp, unusable(exc), isinstance(exc, ConfigError))
             if self.config_error is not None:
                 self.config_error = self._reload_refused[1]
             if isinstance(exc, ConfigError):
@@ -812,8 +816,10 @@ class Daemon:
     # -- answering a client ----------------------------------------------
 
     def serve_one(self) -> str | None:
-        """Accept one client and answer it, whatever it sent; return the command's name, when
-        it is text, else None, for dispatch's slow-step log.
+        """Accept one client and answer it, whatever it sent; return the command handle_command
+        looked up for it, by its name in lower case, else None, for dispatch's slow-step log,
+        which a name no command has would fill with the client's text, up to
+        request_reader.MAX_REQUEST.
 
         Nothing a client does may end the process: the unit's start limit is five starts in a
         minute, so a crash anyone with the socket can trigger leaves the unit dead and the
@@ -833,27 +839,13 @@ class Daemon:
             self._accept_said = said
             return None
         self._accept_said = None
-        deadline = time.monotonic() + REQUEST_DEADLINE
         command = None
         with conn:
             try:
-                received = bytearray()
-                while (chunk := read_before(conn, deadline)):
-                    received += chunk
-                    if len(received) > MAX_REQUEST:
-                        raise BadRequest(f"longer than the {MAX_REQUEST} bytes a request may be")
-                try:
-                    request = json.loads(received or b"{}")
-                except UnicodeDecodeError as exc:
-                    # As settings_files.read_json says it.
-                    raise BadRequest(codec_words(exc, received)) from None
-                except (RecursionError, ValueError) as exc:
-                    raise BadRequest(UNREADABLE.get(type(exc), str(exc))) from None
-                # The same words: which of the two refuses a deep body depends on the stack.
-                if nested_past(request, MAX_DEPTH):
-                    raise BadRequest(UNREADABLE[RecursionError])
-                if isinstance(request, dict) and isinstance(request.get("command"), str):
-                    command = request["command"]
+                request = read_request(conn)
+                if (isinstance(request, dict) and isinstance(request.get("command"), str)
+                        and (named := request["command"].lower()) in self.commands):
+                    command = named
                 body = json.dumps(self.handle_command(request))
             # Not ValueError or RecursionError: out of handle_command, or json.dumps of a reply
             # it cannot write, either is a bug to log.
@@ -863,7 +855,7 @@ class Daemon:
                 log.exception("command failed")
                 body = json.dumps({"ok": False, "error": INTERNAL_ERROR})
             with contextlib.suppress(OSError):
-                # Not what the deadline left the last read.
+                # Not what REQUEST_DEADLINE left read_request's last read.
                 conn.settimeout(CLIENT_TIMEOUT)
                 conn.sendall(body.encode() + b"\n")
         self.tray.changed()
@@ -885,11 +877,11 @@ class Daemon:
         try:
             while self.running:
                 next_attempt = self.one_pass(next_attempt)
-        except Exception as exc:
+        except Exception:
             # Before the shutdown, whose "shutting down" line would read as a clean stop, and
             # at critical, for `journalctl -p warning`. The failure exit makes systemd restart
-            # the daemon, up to the unit's start limit.
-            log.critical("the loop failed and the daemon is stopping: %r", exc, exc_info=True)
+            # the daemon, up to the unit's start limit. The traceback gives the error once.
+            log.critical("the loop failed and the daemon is stopping", exc_info=True)
             return 1
         finally:
             signal.set_wakeup_fd(previous_wakeup)
@@ -963,7 +955,7 @@ class Daemon:
             # A node came, went or was opened to this user: each look runs now, as at its time.
             next_attempt = 0.0
             self.keyboards.look_now()
-            self.mice.routes.look_now()
+            self.mice.look_now(replug=self.plugs.named)
             self.a50x.look_now()
             self.tray.due_now()
         if self.keyboards.look_for_cables(force=plugged):
@@ -1022,8 +1014,9 @@ class Daemon:
             log.info("virtual %s ready", " and ".join(made))
 
     def dispatch(self, batch: list[tuple[selectors.SelectorKey, int]]) -> bool:
-        """Hand each ready fd of one select batch to its handler, timed (note_slow), and answer
-        whether the batch was motion alone: mouse HID++ nodes only, each pump_mouse True.
+        """Hand each ready fd of one select batch to its handler, timed (note_slow) except the
+        waits and the stop signal, and answer whether the batch was motion alone: mouse HID++
+        nodes only, each pump_mouse True.
 
         A handler can close an fd later in the batch, and another node can be opened on its
         number: a key that is no longer the one registered is skipped.
@@ -1109,7 +1102,7 @@ class Daemon:
     # -- shutdown --------------------------------------------------------
 
     def system_is_stopping(self) -> bool:
-        """Whether the machine is powering off rather than just stopping the daemon.
+        """Whether the machine is going down (a power-off, reboot or halt), not the daemon alone.
 
         systemd answers "stopping" for the whole of a shutdown or reboot. Any other answer, or
         none, counts as not shutting down: a keyboard wrongly lit is better than one wrongly dark.
@@ -1130,15 +1123,18 @@ class Daemon:
         state, error = done.stdout.strip(), done.stderr.strip()
         # Any other answer, or an error, may be a power-off taken for a plain stop.
         expected = state in ("running", "stopping") and not error
+        # A signal's end is no exit status (wording.ended).
+        how = (f"exit {done.returncode}" if done.returncode >= 0
+               else ended("systemctl", done.returncode).removeprefix("systemctl "))
         log.log(logging.DEBUG if expected else logging.INFO,
-                "systemctl is-system-running answered %r, exit %d%s", state, done.returncode,
+                "systemctl is-system-running answered %r, %s%s", state, how,
                 f": {error}" if error else "")
         return state == "stopping"
 
     def shutdown(self) -> None:
         """Let go of everything, and say in one line what was let go."""
         going_down = self.system_is_stopping()
-        log.info("shutting down%s", ", machine is powering off" if going_down else "")
+        log.info("shutting down%s", ", the machine is going down" if going_down else "")
         self.bindings.runner.cancel()
         keep_dark = going_down and self.config.mouse_sync_color
         if keep_dark:
@@ -1146,9 +1142,9 @@ class Daemon:
             # mouse black.
             self.mice.ready_for_dark()
         said = self.keyboards.teardown_all(going_down)
-        # Before the virtual keyboard closes: it types the release of a key a mouse button
-        # holds.
-        self.bindings.let_go_of_keys(mouse=True)
+        # Before the virtual keyboard closes: it types the release of a key a mouse button or
+        # a headset's G key holds.
+        self.bindings.let_go_of_keys()
         if self.kbd is not None:
             self.kbd.close()
             self.kbd = None
@@ -1185,18 +1181,3 @@ class Daemon:
             os.close(self._lock)
             self._lock = None
         log.info("stopped; %s", "; ".join(said))
-
-
-def read_before(conn: socket.socket, deadline: float) -> bytes:
-    """One read of a client's request, waiting no longer than CLIENT_TIMEOUT or what is left
-    before `deadline`, a time.monotonic(); BadRequest after CLIENT_TIMEOUT with nothing sent
-    or once that has passed."""
-    left = deadline - time.monotonic()
-    if left > 0:
-        conn.settimeout(min(CLIENT_TIMEOUT, left))
-        try:
-            return conn.recv(65536)
-        except TimeoutError:
-            if time.monotonic() < deadline:
-                raise BadRequest(f"nothing sent for {CLIENT_TIMEOUT:g} s") from None
-    raise BadRequest(f"not sent whole within the {REQUEST_DEADLINE:g} s a request may take")

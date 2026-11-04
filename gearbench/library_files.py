@@ -28,6 +28,7 @@ from typing import NoReturn, Protocol
 from .config import expect, refuse_name
 from .settings_files import (
     ConfigError,
+    behind_link,
     link_to_nothing,
     shown_path,
     sync_removal,
@@ -35,10 +36,6 @@ from .settings_files import (
     write_json,
 )
 from .wording import escaped, quoted, reason, word_list
-
-__all__ = ["SLUG_MAX_BYTES", "Folder", "FolderLibrary", "SkipWarnings", "Taken", "Titled",
-           "by_name", "check_version", "file_name", "list_folder", "may_hold_it", "not_deleted",
-           "read_folder", "read_name", "refuse_taken", "save_renamed", "slug", "unread_reason"]
 
 log = logging.getLogger("gearbench")
 
@@ -249,8 +246,14 @@ class Folder[N: Titled]:
     skipped: list[tuple[str, str]] = field(default_factory=list)
     #: Why the folder could not be listed, in words, or None.
     unlisted_reason: str | None = None
+    #: That reason as a sentence with the folder's path, or None.
+    unlisted: str | None = None
     #: The files in `skipped` that loaded, left out for another file of the same name.
     shadowed: set[str] = field(default_factory=set)
+    #: The files in `skipped` whose read raised a ConfigError, which a save may write over;
+    #: not one whose read raised an OSError, such as Permission denied, which a save that
+    #: reads the file first meets too.
+    invalid: set[str] = field(default_factory=set)
 
 
 def list_folder(directory: Path) -> list[Path]:
@@ -332,30 +335,40 @@ def read_folder[N: Titled](directory: Path, load: Callable[[Path], N],
     try:
         paths = list_folder(directory)
     except OSError as exc:
-        # None before the first save. A folder that is a link to nothing, or is in one, is
-        # not that: its files are somewhere, and must not read as deleted.
-        if isinstance(exc, FileNotFoundError) and link_to_nothing(directory) is None:
-            # Gone with its folder, so each is news when the folder comes back as it was.
-            warnings.listed([])
-            return folder
-        warnings.skip(directory, exc, folder=True)
-        folder.unlisted_reason = reason(exc)
+        error = exc
+        if isinstance(exc, FileNotFoundError):
+            # None before the first save. A folder that is a link to nothing, or is in one, is
+            # not that: its files are somewhere, and must not read as deleted.
+            if (place := link_to_nothing(directory)) is None:
+                warnings.listed([])
+                return folder
+            error = behind_link(directory, place)
+        warnings.skip(directory, error, folder=True)
+        folder.unlisted_reason = reason(error)
         # The row names the folder by its name alone, so the reason gives its path, in words.
-        said = f"{shown_path(directory)} could not be listed ({folder.unlisted_reason})"
-        folder.skipped.append((directory.name, said))
+        folder.unlisted = f"{shown_path(directory)} could not be listed ({folder.unlisted_reason})"
+        folder.skipped.append((directory.name, folder.unlisted))
         return folder
-    # The folder's own break, and each file's that has gone, forgotten: the daemon reads the
-    # folder for as long as it runs.
     warnings.listed(paths)
     found: list[tuple[Path, N]] = []
     for path in paths:
         try:
             found.append((path, load(path)))
         except (ConfigError, OSError) as exc:
+            failure: Exception = exc
+            if isinstance(exc, FileNotFoundError):
+                # Removed since the listing, by a delete or a rename in another process: gone,
+                # as it is at the next read. Behind a link to nothing, its own or a folder's
+                # above it, it is somewhere, as at a listing that finds the link, and is named.
+                if (place := link_to_nothing(path)) is None:
+                    continue
+                failure = behind_link(path, place)
             # One bad file must not hide the rest, and is named once, or a profile that
             # stops loading looks deleted and a macro that stops working like a lost binding.
-            warnings.skip(path, exc)
-            folder.skipped.append((path.name, reason(exc)))
+            warnings.skip(path, failure)
+            folder.skipped.append((path.name, reason(failure)))
+            if isinstance(exc, ConfigError):
+                folder.invalid.add(path.name)
     # One file per slug, since every lookup goes by slug: a second file with the same name,
     # a file manager's copy say, could be listed but never addressed, and one that sorts
     # first would be read in place of the file `file_name` gives and block writing it.
@@ -388,15 +401,20 @@ class FolderLibrary[N: Titled]:
         self.skipped: list[tuple[str, str]] = []
         #: The last read's `Folder.unlisted_reason`.
         self.unlisted_reason: str | None = None
+        #: The last read's `Folder.unlisted`.
+        self.unlisted: str | None = None
         #: The last read's `Folder.shadowed`: files that loaded, so they hold no item a
         #: lookup by name misses.
         self.shadowed: set[str] = set()
+        #: The last read's `Folder.invalid`.
+        self.invalid: set[str] = set()
 
     def read(self, load: Callable[[Path], N]) -> list[N]:
         """The folder's items, one per name, each read by `load`; what it left out is kept."""
         folder = read_folder(self.directory, load, self._skipped)
         self.skipped, self.unlisted_reason = folder.skipped, folder.unlisted_reason
-        self.shadowed = folder.shadowed
+        self.unlisted = folder.unlisted
+        self.shadowed, self.invalid = folder.shadowed, folder.invalid
         return folder.kept
 
     def unread(self) -> list[tuple[str, str]]:

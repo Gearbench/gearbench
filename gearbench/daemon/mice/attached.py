@@ -16,10 +16,8 @@ from ...lighting import Cluster, effect_order
 from ...mouse import (
     CABLED_IDS,
     GEARBENCH_LIGHTING,
-    MODELS,
     OWN_LIGHTING,
     WAITS_TO_CLAIM,
-    MouseError,
     key_name,
     model_ids,
     model_key,
@@ -28,11 +26,11 @@ from ...mouse_device import Mouse
 from ...mouse_lighting import MouseLights
 from ...profiles import MouseTuning
 from ...report import untested, untested_note
+from ...sensor import MouseError
 from ...spy import ButtonSpy
 from ...wording import written
 from ..shared import (
     MOUSE_SILENT_RECHECK,
-    NODE_DENIED,
     attached_list,
     mouse_model_named,
     whole_number,
@@ -40,12 +38,6 @@ from ..shared import (
 
 # A mouse heard from within this long counts as awake (AttachedMouse.may_be_asleep).
 MOUSE_AWAKE = 1.0
-
-# How often a missing mouse is looked for, doubling on each failure up to MOUSE_RETRY_MAX: a
-# mouse that is off keeps its receiver's node and never answers the probe.
-MOUSE_RETRY = 10.0
-
-MOUSE_RETRY_MAX = 120.0
 
 # The longest the retry waits while a client asks about a missing mouse: a probe of a mouse
 # that is off costs the loop 1.5 s, so not one per poll.
@@ -67,11 +59,6 @@ def enable_refusal(name: str) -> str:
             f"buttons, enabled in its onboard profile, would do nothing outside host mode; in "
             f"host mode, the default, they reach Gearbench without this write "
             f"(`gearbench-ctl mouse-host on`)")
-
-
-def denied_problem(path: Path, product: int) -> str:
-    """NODE_DENIED for a mouse node this user may not open, as Unattached.denied_mice gives it."""
-    return NODE_DENIED.format(path, MODELS[product])
 
 
 def no_mouse(found: Sequence[str]) -> str:
@@ -100,8 +87,16 @@ def dpi_keys(product: int) -> list[str]:
 def other_route(product: int) -> bool:
     """Whether the model of `product` has a route of the other kind: a cable for an id through
     its receiver, a receiver for an id on its cable (mouse.CABLED_IDS)."""
+    return len(kept_routes(product)) > 1
+
+
+def kept_routes(product: int) -> list[int]:
+    """`product`, then its model's ids on a route of the other kind (other_route): the ids
+    the same mouse comes back on. Another id of the same kind, the G102 LIGHTSYNC's beside
+    the G203 LIGHTSYNC's, is a second mouse (Mice.attached_models)."""
     cabled = product in CABLED_IDS
-    return any((int(key, 16) in CABLED_IDS) != cabled for key in dpi_keys(product))
+    return [product, *(route for key in dpi_keys(product)
+                       if ((route := int(key, 16)) in CABLED_IDS) != cabled)]
 
 
 def own_stages(tuning: MouseTuning | None) -> tuple[int, ...] | None:
@@ -203,6 +198,10 @@ class SentColor:
     #: Counted as shown once answered: False for an effect or a drag's preview, or once what
     #: the mouse shows may have changed since the send (AttachedMouse.forget_showing).
     repeat: bool
+    #: A drag's preview: its refusal goes to the journal at debug, as an awake mouse's does
+    #: (MouseLighting.sync_mouse_color), and its reply lost on a mouse heard from since is
+    #: dropped, not owed (check_mouse_write).
+    preview: bool = False
 
 
 @dataclass(kw_only=True)
@@ -257,10 +256,8 @@ class AttachedMouse:
     #: either, until the link is back, it says anything or a resume asks every mouse again
     #: (recheck_mice).
     link_down: bool = False
-    #: Lighting to write again once it answers and no color is in flight (tend_mice): skipped
-    #: while it was silent, since no power-on report follows a mouse marked silent while it was
-    #: on; asked for while a color was in flight; a send whose answer was lost; a DPI flash's
-    #: repaint.
+    #: Lighting to write again once it answers and no color is in flight (tend_mice): a mouse
+    #: marked silent while it was on sends no power-on report to bring it.
     owed_lighting: bool = False
     #: It shows its own lighting, no claim having landed: a mouse that waits to claim
     #: (mouse.WAITS_TO_CLAIM), from its attach until a claim lands (MouseLighting.claim, before its
@@ -278,8 +275,7 @@ class AttachedMouse:
     #: to write (MouseLighting.let_go), and due no more once that release has gone out or any
     #: release has landed (MouseLighting.release), as `mouse_effect`'s `release` sends (the
     #: owner's decision of 2026-10-18, "Release at startup", made for the G502 HERO). It goes
-    #: once whether it lands or not, and to the G502 LIGHTSPEED and the PRO WIRELESS too.
-    #: False on any other mouse.
+    #: once, whether it lands or not. False on a mouse that does not wait to claim.
     release_owed: bool = field(init=False)
     #: When its lighting is written again after a DPI flash (after_dpi_write), or None.
     repaint_at: float | None = None
@@ -292,14 +288,15 @@ class AttachedMouse:
     #: Gearbench's cookie was set after its last setup that took, and nothing has undone that
     #: since: a setup started, a resume, a host mode switch that changes its mode, or a HOST-mode
     #: profile 1 write after which its DPI was not put back or its rate not taken
-    #: (put_back_after_write, rate_owed). Only then does a recheck read it back: a cookie left
-    #: by an earlier run, or set ahead of a setup that was cut short, would vouch for a setup
-    #: that did not take.
+    #: (put_back_after_write, rate_after_write). Only then does a recheck read it back: a
+    #: cookie left by an earlier run, or set ahead of a setup that was cut short, would vouch
+    #: for a setup that did not take.
     cookie_set: bool = False
-    #: Its last setup is unfinished: stopped answering part way, missed at a host mode switch or
-    #: a resume, or a put-back after a profile 1 write not done. Once it answers, tend_mice sets
-    #: it up again, since no recheck will: one heard from before its recheck gets none, and one
-    #: that never stopped answering has none.
+    #: Its last setup is unfinished: stopped answering part way or at a link back, missed at a
+    #: host mode switch or a resume, or after a profile 1 write a DPI not put back or a rate
+    #: refused (put_back_after_write, rate_after_write). Once it
+    #: answers, tend_mice sets it up again, since no recheck will: one heard from before its
+    #: recheck gets none, and one that never stopped answering has none.
     cut_short: bool = False
     #: The static color it is known to show, or None; a drag's preview is not counted. A synced
     #: color it shows is not written again: each write to an idle mouse waits for it to wake
@@ -314,7 +311,8 @@ class AttachedMouse:
     read_at: float = 0.0
     read_wall: int | None = None
     #: The DPI the daemon last put it on or read from it (on_dpi), or None: known_dpi's answer
-    #: with no reading, since a game profile's own stages put it on a DPI config.json lacks.
+    #: ahead of the remembered one, since a game profile's own stages put it on a DPI
+    #: config.json lacks.
     dpi_on: int | None = None
     #: The last battery any reading or report carried, and when, in wall-clock seconds.
     battery: dict | None = None
@@ -323,10 +321,15 @@ class AttachedMouse:
     #: mouse's first battery report; from then on `mouse` never asks for the battery.
     battery_index: int | None = None
     battery_reports: bool = False
+    #: When its last battery report came, monotonic: the mouse is awake, for a color in
+    #: flight whose answer was lost (MouseLighting.check_mouse_write), though the report
+    #: leaves `heard_at` as it was (MouseBatteries.take_report).
+    reported_at: float = float("-inf")
     #: When it was attached or last marked answering (mark_answering), monotonic. Later than
     #: `read_at` means the reading may be out of date.
     heard_at: float
-    #: Why the last switch to onboard profile 1 did not take, for `problems`, or None.
+    #: Why the last switch to onboard profile 1 did not take, for `problems`, or None: kept by
+    #: Mice.run_profile_one and hand_back's profile step.
     profile_error: str | None = None
     #: Its 0x8110 button spy, looked up for a model in spy.SPY_MODELS, or None; HOST mode needs it.
     spy: ButtonSpy | None = None
@@ -383,10 +386,6 @@ class AttachedMouse:
     #: has been taken since (take_tuning). In HOST mode, on a mouse still attached and not owed
     #: the tuning, tuning_state answers "refused".
     tuning_failed: bool = False
-    #: True after a HOST-mode profile 1 write whose DPI could not be read before or put back
-    #: after (put_back_after_write), so what the mouse reads may be profile 1's default stage,
-    #: no choice. Cleared at the next flash_write.
-    dpi_not_put_back: bool = False
     #: The report rate last sent live and answered, or None while unknown. retune compares with
     #: this: one cut short after its rate write leaves `tuning` behind the rate in force.
     live_rate: int | None = None
@@ -468,9 +467,8 @@ class AttachedMouse:
 
     @property
     def its_spy(self) -> ButtonSpy:
-        """`spy` on a mouse that has one. `host` is set only on such a mouse, and Mice's
-        setup_host, respy and stop_spy are called only for one: connect_mouse, wants_host,
-        host_mode_changed and _setup_onboard check `spy` first."""
+        """`spy` on a mouse that has one: `host` is set only on such a mouse, and every path to
+        it checks `spy` or `host` first."""
         return cast(ButtonSpy, self.spy)
 
     @property
@@ -486,9 +484,8 @@ class AttachedMouse:
         return self.silent or time.monotonic() - self.heard_at >= MOUSE_AWAKE
 
     def on_dpi(self, dpi: int) -> None:
-        """The mouse is on `dpi` as far as the daemon knows: `mouse` answers with it until the
-        mouse is next read, which a `mouse` with `ask` false never does, and known_dpi when
-        there is no reading."""
+        """The mouse is on `dpi` as far as the daemon knows: known_dpi answers with it, and
+        `mouse` too until the mouse is next read, which a `mouse` with `ask` false never does."""
         self.dpi_on = dpi
         if self.reading is not None:
             self.reading["dpi"] = dpi
@@ -516,10 +513,9 @@ class AttachedMouse:
 
 @dataclass(frozen=True)
 class KeptMouse:
-    """What a mouse torn down leaves for the next AttachedMouse of its model, on either route
-    (Mice._mouse_kept): its own color and effect, the game profile's own stages and rate it
-    was last put on with the load then, and the DPIs from before them and from before the
-    load that desktop_dpi puts back. Each is the AttachedMouse field of its name."""
+    """What a mouse torn down leaves, under its product id (Mice._mouse_kept), for the next
+    AttachedMouse on that id or on its model's other route (take): the AttachedMouse fields
+    of the same names."""
 
     color: int | None = None
     effect: str | None = None
@@ -532,3 +528,10 @@ class KeptMouse:
     def of(cls, attached: AttachedMouse) -> KeptMouse:
         """What `attached` leaves, read from its fields of the same names."""
         return cls(**{each.name: getattr(attached, each.name) for each in fields(cls)})
+
+    @staticmethod
+    def take(kept: dict[int, KeptMouse], product: int) -> KeptMouse:
+        """What a mouse torn down left for one attached on `product`, taken out of `kept`: its
+        own id's, else its model's other route's (kept_routes); nothing kept for none."""
+        return next((kept.pop(route) for route in kept_routes(product) if route in kept),
+                    KeptMouse())

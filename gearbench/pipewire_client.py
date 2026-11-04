@@ -10,6 +10,7 @@ import re
 import subprocess
 import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import wording
@@ -50,6 +51,11 @@ CLIENT_MODULES = """\
 #: refuses a character below 0x20 ("Character not allowed").
 NOT_IN_CONF = re.compile(r'["\\\x00-\x1f]')
 TIMEOUT = 5.0          # any one program
+#: What pw-cli 1.6.2 writes on stderr for a command that failed, as it exits 0 all the same:
+#: its own refusal, 'Error: "..."', and an error PipeWire sent back for the command, such as
+#: a node gone before the set reached it, "remote 0: error id:..." (pw-cli.c's main and
+#: on_core_error; both seen on stderr, with exit status 0, on 2026-11-03).
+PW_CLI_FAILED = ("Error:", ": error id:")
 #: How long a wait for PipeWire to catch up with a start or a change lasts, and how often
 #: it looks: systemctl start and systemd-run return before PipeWire has built the chain.
 SETTLE = 2.0
@@ -58,22 +64,33 @@ Run = Callable[..., subprocess.CompletedProcess]
 DUMP = ["pw-dump", "--no-colors"]
 #: pw-dump's monitor. pw-dump 1.6.2 prints its first dump, then each object that changes,
 #: whole, and {"id": N, "info": null} for one removed, each print a JSON array whose "["
-#: and "]" stand alone on their lines (a throwaway PipeWire, 2026-10-17).
+#: and "]" stand alone on their lines (a throwaway PipeWire, 2026-10-17). A Metadata is the
+#: exception: printed again, it holds only the entries set since its last print, and a key
+#: removed is in no print (pw-dump.c's metadata_dump and metadata_property, read
+#: 2026-10-31), so the defaults are read from a fresh pw-dump (dump_objects).
 MONITOR = ["pw-dump", "--monitor", "--no-colors"]
 #: The program that runs a filter chain's conf, `pipewire -c`.
 PIPEWIRE = "/usr/bin/pipewire"
 #: The most one print may hold before printed drops it: far over the 74 KB of a
 #: throwaway PipeWire's first dump (2026-10-17), and far under what would fill the memory.
 PRINT_MAX = 64 * 2 ** 20
+#: The most pw-dump --monitor's pipe is read in one go, in bytes.
+CHUNK = 1 << 16
 #: The journal line of a unit following pw-dump --monitor for a print it did not read, by
 #: the unit's name, then the cause.
 UNREAD = "{}: a print of pw-dump --monitor was not read ({{}}); it reads on"
 #: Why a print was not read: printed's None.
-NOT_A_PRINT = f"no JSON, or over {PRINT_MAX // 2 ** 20} MiB"
+NOT_A_PRINT = f"no JSON, or over {wording.size_words(PRINT_MAX)}"
 #: Why a pw-dump whose objects shaped cannot read is refused.
 UNKNOWN_SHAPE = "pw-dump printed objects of a shape Gearbench does not know"
 #: Where parent_of and unit_of_process read a process; a test points it at a tree of its own.
 PROC = Path("/proc")
+
+
+def conf_holds(name: str) -> bool:
+    """Whether `name` can be a node's name in a conf's SPA-JSON string: not empty, and none
+    of NOT_IN_CONF."""
+    return bool(name) and NOT_IN_CONF.search(name) is None
 
 
 class StepError(Exception):
@@ -117,9 +134,20 @@ def run_program(run: Run, argv: list[str], timeout: float = TIMEOUT,
 
 def pw_cli(run: Run, argv: list[str]) -> str:
     """Run a `pw-cli` command: "" when it went through, else why not, in words; StepError
-    when it did not run. pw-cli 1.6 exits 0 when its command fails: its words decide."""
+    when it did not run. pw-cli 1.6 exits 0 when its command fails: its words decide
+    (PW_CLI_FAILED)."""
     done = run_program(run, argv, check_exit=False)
-    return program_words(done, "pw-cli") if done.returncode or "Error:" in done.stderr else ""
+    failed = done.returncode or any(mark in done.stderr for mark in PW_CLI_FAILED)
+    return program_words(done, "pw-cli") if failed else ""
+
+
+def pw_cli_failed(run: Run, argv: list[str]) -> str | None:
+    """Why the `pw-cli` command `argv` did not go through or did not run, in words (pw_cli);
+    None once it went through."""
+    try:
+        return pw_cli(run, argv) or None
+    except StepError as err:
+        return str(err)
 
 
 def dump_objects(run: Run) -> list:
@@ -133,31 +161,71 @@ def dump_objects(run: Run) -> list:
     return objects
 
 
-def printed(lines: Iterable[str]) -> Iterator[list | None]:
-    """Each print of pw-dump --monitor in `lines`, a JSON array, or None for one that is
-    no JSON or is over PRINT_MAX, which is not kept past it. A print ends at a line that
-    is "]" alone."""
-    held: list[str] = []
-    size = 0
-    for line in lines:
-        size += len(line)
-        if size <= PRINT_MAX:
-            held.append(line)
+class Prints:
+    """The prints of pw-dump --monitor, read off its pipe as each part comes (feed_bytes),
+    for a process that waits on more than the monitor too, or a line at a time (feed)."""
+
+    def __init__(self) -> None:
+        self._held: list[str] = []
+        self._size = 0
+        #: The part of a line read before its end (lines_of).
+        self._pending = bytearray()
+
+    def feed_bytes(self, chunk: bytes) -> Iterator[list | None]:
+        """Each print `chunk`, read from pw-dump --monitor's pipe, ends after what came before
+        it, cut into lines by lines_of, a line past PRINT_MAX included (feed)."""
+        for line in lines_of(chunk, self._pending):
+            yield from self.feed(line)
+
+    def feed(self, line: str) -> Iterator[list | None]:
+        """The print `line` ends, if it ends one: a JSON array, or None for one that is no
+        JSON or is over PRINT_MAX, which is not kept past it. A print ends at a line that is
+        "]" alone."""
+        self._size += len(line)
+        if self._size <= PRINT_MAX:
+            self._held.append(line)
         if line.rstrip("\n") != "]":
-            continue
+            return
         # One over PRINT_MAX lacks its closing "]", so it is no JSON; JSON that ends at a
         # "]" is an array.
         try:
-            found = json.loads("".join(held))
+            found = json.loads("".join(self._held))
         except (ValueError, RecursionError):
             found = None
-        held, size = [], 0
+        self._held, self._size = [], 0
         yield found
 
 
+def printed(chunks: Iterable[bytes]) -> Iterator[list | None]:
+    """Each print of pw-dump --monitor in `chunks`, the parts of its pipe as they were read
+    (Prints.feed_bytes)."""
+    reader = Prints()
+    for chunk in chunks:
+        yield from reader.feed_bytes(chunk)
+
+
+def lines_of(chunk: bytes, pending: bytearray) -> list[str]:
+    """The whole lines `chunk` ends, after what `pending` holds of a line before it, each
+    as text, a byte that is not UTF-8 replaced, as pw-dump's names can hold one; `pending`
+    keeps the rest. A line past PRINT_MAX is given as it is, so the print that holds it is
+    dropped (Prints) and nothing more is kept."""
+    searched = len(pending)
+    pending += chunk
+    # Only the chunk is searched: `pending` holds no newline, and a line that comes in many
+    # reads is not searched again at each.
+    end = pending.rfind(b"\n", searched) + 1
+    lines = [line.decode("utf-8", "replace") + "\n" for line in pending[:end].split(b"\n")[:-1]]
+    del pending[:end]
+    if len(pending) > PRINT_MAX:
+        lines.append(pending.decode("utf-8", "replace"))
+        pending.clear()
+    return lines
+
+
 def merge(objects: dict[int, dict], found: list) -> None:
-    """Fold one print into `objects`, by id: an object printed whole replaces the one
-    before it, and one removed, printed with no type, goes."""
+    """Fold one print into `objects`, by id: an object printed replaces the one before it,
+    and one removed, printed with no type, goes. A Metadata printed again holds only its
+    entries set since (MONITOR), so `objects` holds no whole Metadata."""
     for obj in found:
         if isinstance(obj, dict) and wording.whole(obj.get("id")):
             if "type" in obj:
@@ -166,30 +234,24 @@ def merge(objects: dict[int, dict], found: list) -> None:
                 objects.pop(obj["id"], None)
 
 
+def systemctl(*args: str) -> list[str]:
+    """Options go before the verb: with POSIXLY_CORRECT set, systemctl's getopt
+    stops at the verb and reads a later option as a unit name."""
+    return ["systemctl", "--user", *args]
+
+
 def unit_of(run: Run, show: list[str]) -> dict[str, str]:
-    """The unit `show`, a `systemctl show` command line, asks for, as systemctl gives it;
-    StepError when systemctl fails."""
-    units = parse_units(run_program(run, show).stdout)
-    return units[0] if units else {}
+    """The unit `show`, a `systemctl show` command line, asks for, as systemctl gives it: the
+    first block of its output with a key, {} for none; StepError when systemctl fails."""
+    for block in re.split(r"\n[ \t]*\n", run_program(run, show).stdout.strip()):
+        if unit := dict(line.split("=", 1) for line in block.splitlines() if "=" in line):
+            return unit
+    return {}
 
 
 def main_pid(unit: dict[str, str]) -> int:
     """The unit's MainPID, 0 for none, which matches no client's pid."""
     return as_whole(unit.get("MainPID")) or 0
-
-
-def parse_units(text: str) -> list[dict[str, str]]:
-    """`systemctl show` output, one dict per unit in argument order."""
-    units = []
-    for block in re.split(r"\n[ \t]*\n", text.strip()):
-        unit = {}
-        for line in block.splitlines():
-            key, sep, value = line.partition("=")
-            if sep:
-                unit[key] = value
-        if unit:
-            units.append(unit)
-    return units
 
 
 def parent_of(pid: int) -> int | None:
@@ -215,8 +277,7 @@ def unit_of_process(pid: int) -> str | None:
 
 
 def as_whole(value: object) -> int | None:
-    """A whole number from pw-dump or systemctl, as a JSON number or a string of digits,
-    else None."""
+    """A whole number given as a JSON number or a string of digits, else None."""
     if wording.whole(value):
         return value
     try:
@@ -242,16 +303,66 @@ def dumped[T](run: Run, parse: Callable[[Sequence[object]], T]) -> T:
     return shaped(parse, dump_objects(run))
 
 
+def waited[T](look: Callable[[], T], done: Callable[[T], bool]) -> T:
+    """look's value, read again every SETTLE_STEP for up to SETTLE while `done` says no: the
+    last one read. What look raises goes up at once."""
+    deadline = time.monotonic() + SETTLE
+    value = look()
+    while not done(value) and time.monotonic() < deadline:
+        time.sleep(SETTLE_STEP)
+        value = look()
+    return value
+
+
 def settled[S](read_state: Callable[[], S], summary: Callable[[S], tuple[str, str]],
                waits: bool) -> S:
-    """read_state's state, read again every SETTLE_STEP for up to SETTLE while `waits` and
-    its summary is starting."""
-    state = read_state()
-    deadline = time.monotonic() + SETTLE
-    while waits and summary(state)[0] == "starting" and time.monotonic() < deadline:
-        time.sleep(SETTLE_STEP)
-        state = read_state()
-    return state
+    """read_state's state, read again (waited) while `waits` and its summary is starting."""
+    return waited(read_state, lambda state: not waits or summary(state)[0] != "starting")
+
+
+#: The states Gearbench's user units give in the same words, Spatial's and Outputs'
+#: (unit_kind) and each equalizer's and noise suppression's (pipewire_unit.unit_summary),
+#: `{}` the failure's own: systemctl not answering, pw-dump not installed, and pw-dump failing.
+NO_MANAGER = "systemctl --user did not answer: {}"
+NO_TOOLS = "on, but PipeWire's pw-dump is not installed"
+PIPEWIRE_NOT_READ = "on, but PipeWire could not be read ({})"
+#: The kinds of spatial.unit_kind and pipewire_unit.unit_summary in which systemctl cannot
+#: act on the unit, so a window grays out its switch.
+LOCKED = frozenset({"no_manager", "not_installed"})
+
+
+@dataclass(frozen=True)
+class UnitState:
+    """What systemd and pw-dump say of the unit: the fields unit_summary reads, before those
+    of the conf's own nodes, which each unit's State adds."""
+
+    systemd: str | None = None        # why `systemctl --user show` failed
+    active: str = "inactive"          # the unit's ActiveState
+    tools: bool = True                # False: pw-dump not installed
+    pipewire: str | None = None       # why pw-dump failed or did not parse
+
+
+def unit_and_graph(run: Run, show: list[str], from_unit: Callable[[dict[str, str]], dict],
+                   graph: Callable[[Sequence[object], dict[str, str] | None], dict]) -> dict:
+    """A unit's State fields: `from_unit`'s of the unit `show`, a `systemctl show` command
+    line, asks for (unit_of), else `systemd`, why systemctl failed; then `graph`'s of a fresh
+    pw-dump's objects (dumped) and that unit, None where systemctl failed, else `tools` False
+    for a pw-dump not installed or `pipewire`, why it failed or did not parse. Never raises."""
+    fields: dict = {}
+    unit = None
+    try:
+        unit = unit_of(run, show)
+    except StepError as err:
+        fields["systemd"] = str(err)
+    else:
+        fields.update(from_unit(unit))
+    try:
+        fields.update(dumped(run, lambda objects: graph(objects, unit)))
+    except NotInstalled:
+        fields["tools"] = False
+    except StepError as err:
+        fields["pipewire"] = str(err)
+    return fields
 
 
 def of_type(objects: Sequence[object], kind: str) -> list[tuple[int, dict, dict]]:
@@ -269,16 +380,49 @@ def of_type(objects: Sequence[object], kind: str) -> list[tuple[int, dict, dict]
     return found
 
 
-def node_pids(objects: Sequence[object]) -> list[tuple[int, dict, dict, int]]:
-    """Each Node in pw-dump's objects whose client.id names a Client with a process, as (id,
-    info, props, pid): the pipewire.sec.pid PipeWire took from that client's socket, which
-    the client cannot set, so it tells whose a node is where the node's name cannot. Each is
-    read by as_whole, text of digits included and true not; 0, which SO_PEERCRED
+def listed_name(props: dict) -> str:
+    """A node, by its props in pw-dump, as GNOME's Sound settings list it: its
+    node.description, else its node name."""
+    label = props.get("node.description")
+    return label if isinstance(label, str) and label else props["node.name"]
+
+
+def described(objects: Sequence[object], name: str) -> str:
+    """The node named `name` in pw-dump's objects as GNOME lists it (listed_name), else the
+    name, as text a line holds (wording.printable)."""
+    props = next((props for _node, _info, props in of_type(objects, "Node")
+                  if props.get("node.name") == name), {"node.name": name})
+    return wording.printable(listed_name(props))
+
+
+def client_pids(objects: Sequence[object]) -> dict[int, int]:
+    """The process of each Client in pw-dump's objects that has one, by the Client's id: the
+    pipewire.sec.pid PipeWire took from the client's socket, which the client cannot set.
+    Each is read by as_whole, text of digits included and true not; 0, which SO_PEERCRED
     gives a client outside PipeWire's pid namespace, is no process."""
-    pids = {client: pid for client, _info, props in of_type(objects, "Client")
+    return {client: pid for client, _info, props in of_type(objects, "Client")
             if (pid := as_whole(props.get("pipewire.sec.pid")))}
+
+
+def node_client(props: dict) -> int | None:
+    """The Client that made a Node, by the node's props in pw-dump: its client.id, else None,
+    and None for a node made with object.linger true. PipeWire 1.6.2's adapter and spa-node
+    factories set client.id to the maker's own only on a node that does not linger
+    (module-adapter.c's and module-spa-node-factory.c's create_object), so a lingering node
+    keeps any client.id its maker gave it, a sandboxed client's included. pw-dump prints the
+    "true" and "1" PipeWire reads as true (spa_atob) as true and 1."""
+    if props.get("object.linger") in (True, 1):
+        return None
+    return as_whole(props.get("client.id"))
+
+
+def node_pids(objects: Sequence[object]) -> list[tuple[int, dict, dict, int]]:
+    """Each Node in pw-dump's objects whose maker (node_client) is a Client with a process
+    (client_pids), as (id, info, props, pid), so the pid tells whose a node is where the
+    node's name cannot."""
+    pids = client_pids(objects)
     return [(node, info, props, pids[client]) for node, info, props in of_type(objects, "Node")
-            if (client := as_whole(props.get("client.id"))) in pids]
+            if (client := node_client(props)) in pids]
 
 
 def trusted_clients(objects: Sequence[object]) -> set[int]:
@@ -297,13 +441,24 @@ def card_nodes(objects: Sequence[object], card: Sequence[tuple[str, Sequence[obj
     Headset's card, by id with their props, and the props of their nodes, each in pw-dump's
     order. A client sets the props of what it makes, device.id included, so a Device counts
     only when its client.id names a Client PipeWire did not restrict (trusted_clients), and
-    a node only when its device.id is such a Device and its client.id is that Device's; one
-    with no client.id counts for none."""
+    a node only when its device.id is such a Device and its maker (node_client) is that
+    Device's client, or another such Client of the same process (one_process); one with no
+    maker counts for none."""
     trusted = trusted_clients(objects)
+    pids = client_pids(objects)
     cards = {found: props for found, _info, props in of_type(objects, "Device")
              if all(props.get(key) in values for key, values in card)
              and as_whole(props.get("client.id")) in trusted}
     nodes = [props for _node, _info, props in of_type(objects, "Node")
              if (found := as_whole(props.get("device.id"))) in cards
-             and as_whole(props.get("client.id")) == as_whole(cards[found].get("client.id"))]
+             and (client := node_client(props)) in trusted
+             and one_process(client, as_whole(cards[found].get("client.id")), pids)]
     return cards, nodes
+
+
+def one_process(client: int | None, other: int | None, pids: dict[int, int]) -> bool:
+    """Whether the Clients `client` and `other` are one, or two of one process by `pids`,
+    client_pids': WirePlumber 0.5.18 makes a card's Device through one of its connections
+    and the card's nodes through another (measured on Arch Linux, 2026-10-28). A client of no
+    process is one only with itself."""
+    return client == other or (client in pids and other in pids and pids[client] == pids[other])

@@ -44,7 +44,10 @@ from .config import G633_G_KEYS, G635_G_KEYS, G933_G_KEYS, G935_G_KEYS
 from .hidpp import (
     DEVICE_INDEX,
     F_DEVICE_INFO,
+    F_FEATURE_SET,
+    FN_COUNT,
     FN_DEVICE_INFO,
+    FN_FEATURE_ID,
     FN_FW_INFO,
     PROBE_RETRIES,
     PROBE_TIMEOUT,
@@ -56,11 +59,11 @@ from .hidpp import (
     UnreadableAnswer,
     feature_of,
     find_attached,
-    firmware_entity,
-    running_application,
+    find_every_attached,
+    running_version,
 )
 from .keys import F_GKEY, GKEY_SET_DIVERT, KeyEvent, key_changes
-from .wording import NOT_READ, counted, whole, word_list, written
+from .wording import NOT_READ, counted, whole, whole_in, word_list, written
 
 #: Its HID interface, the one each model's udev rule grants: interface 3, the one HID
 #: interface in public hardware probes' lsusb of the G933, G935, G733 (each of its ids), G535
@@ -90,7 +93,7 @@ class HeadsetModel:
     #: receiver.
     plugged_by: str = BY_RECEIVER
     #: The names its G keys bind under, G1's first, a bit each of 0x8010's events from bit 0:
-    #: the G933's three, which the Windows captures of 2026-10-25 read, and the G935's,
+    #: the G933's three, which G HUB read on Windows on 2026-10-25, and the G935's,
     #: G633's and G635's three, taken to be the G933's, untested (the owner's decision of
     #: 2026-10-25): Logitech's setup guides give the G935 and G635 a programmable G1, G2 and
     #: G3, and the G633 shares the G933's G-key layout, but no source names their feature.
@@ -102,6 +105,12 @@ class HeadsetModel:
     def short(self) -> str:
         """The name without the maker's: "G432" for "Logitech G432"."""
         return self.name.removeprefix("Logitech ")
+
+    @property
+    def used_features(self) -> tuple[int, ...]:
+        """The features its record's fields have the daemon use beside LOOKED_UP: 0x8310 on a
+        model with an equalizer of its own (`onboard_eq`), 0x8010 on one with G keys."""
+        return ((F_EQUALIZER,) if self.onboard_eq else ()) + ((F_GKEY,) if self.g_keys else ())
 
 
 #: Each model, by G HUB's device list (`ghub-extract/devicedb`, build 869589): its ids, its
@@ -127,12 +136,10 @@ MODELS = (
     HeadsetModel("pro_x_wireless", "Logitech PRO X Wireless", (0x0ABA,),
                  cells={0x0ABA: PRO_X_WIRELESS_CELL}),
 )
-#: The family in the words a description that names the A50 beside it uses, in --help's
-#: and the man page's NAME line.
-FAMILY = "the G432 and other Logitech G headsets"
 #: Each model by its product ids, its name as the window, the tray, the notices and the CLI
-#: give it, without the maker's (`short`), and its cell by them. PipeWire's nodes keep
-#: `name`, as in "Logitech G432 Equalizer".
+#: give it, without the maker's (`short`), and its cell by them. The equalizer's PipeWire
+#: nodes keep `name`, as in "Logitech G432 Equalizer", and noise suppression's take `short`,
+#: as in "G432 Microphone (Noise Filter)".
 MODEL_OF = {product: model for model in MODELS for product in model.products}
 PRODUCTS = {product: model.short for product, model in MODEL_OF.items()}
 CELLS = {product: cell for model in MODELS for product, cell in model.cells.items()}
@@ -140,6 +147,13 @@ CELLS = {product: cell for model in MODELS for product, cell in model.cells.item
 MODEL_KEYED = {model.key: model for model in MODELS}
 #: The G432, the model taken where none is named.
 G432_MODEL = MODEL_KEYED["g432"]
+
+
+def reply_model(reply: dict) -> HeadsetModel | None:
+    """The model a daemon reply names by its key; None where it names none this install
+    knows. str() keeps a value of another type from raising."""
+    return MODEL_KEYED.get(str(reply.get("model")))
+
 
 SIDETONE = 0x8300
 FN_GET_SIDETONE = 0
@@ -152,17 +166,17 @@ SIDETONE_MEANS = "your voice in the earcups"
 SIDETONE_RANGE = (0, 100)
 #: What a reset writes where no read found a level before the first write.
 SIDETONE_UNREAD_RESET = 0
+#: How long a front end waits for `g432` with `read`, in seconds, in place of
+#: send_command's 3 s: after an attach that read nothing, the read takes each value again
+#: and sends the preset picked once more, 3.1 s on the G933 (measured 2026-11-03).
+READ_WAIT = 10.0
 
-#: 0x0001 FeatureSet's getCount, the features past the root, and getFeatureID, one index's
-#: id (x0001 v2; Solaar's hidpp20.py, FeaturesArray).
-F_FEATURE_SET = 0x0001
-FN_COUNT, FN_FEATURE_ID = 0, 1
 #: The most rows the table walk reads, whatever getCount says: the family lists 6 to 9
 #: (Solaar's listings), and a byte the device gets wrong cannot lengthen the walk.
 FEATURES_MAX = 32
 #: 0x1F20's getADCMeasurement (battery.F_ADC), and its power-off time, in minutes with 0 for
 #: never, which Solaar's ADCPower setting reads at function 1 from version 2 on, and which
-#: function 2 sets, echoed, as G HUB sets a G933's (the Windows captures of 2026-10-25).
+#: function 2 sets, echoed, as G HUB sets a G933's (on Windows, 2026-10-25).
 FN_ADC = 0
 FN_POWER_OFF = 1
 FN_SET_POWER_OFF = 2
@@ -170,7 +184,7 @@ FN_SET_POWER_OFF = 2
 #: (the kernel's EVENT_ADC_MEASUREMENT_STATUS_BROADCAST).
 EVENT_ADC = 0
 #: 0x8010's event 0, the G keys held as a bitmask from bit 0, G1's, `00` once each is let go
-#: (keys.py; a G933's `01`, `02` and `04`, the Windows captures of 2026-10-25), and the byte
+#: (keys.py; a G933's `01`, `02` and `04`, read by G HUB on Windows, 2026-10-25), and the byte
 #: of fn 2, enableSoftwareControl, that turns those events on and off: G HUB sends a G933
 #: `01` at each connect, answered with its echo, and `00` as it lets one go.
 EVENT_KEYS = 0
@@ -219,9 +233,11 @@ SENT = frozenset({
     (F_ADC, FN_ADC), (F_ADC, FN_POWER_OFF), (F_ADC, FN_SET_POWER_OFF),
     (F_EQUALIZER, FN_EQ_INFO), (F_EQUALIZER, FN_FREQUENCIES), (F_EQUALIZER, FN_GAINS),
     (F_EQUALIZER, FN_SET_GAINS), (F_GKEY, GKEY_SET_DIVERT)})
-#: The writes of SENT the headset keeps through a power-off, or is taken to: the power-off
-#: time, which G HUB never sent again at a reconnect (the Windows captures of 2026-10-25).
-#: `request` refuses each on a model not tested on this hardware (kept_refusal).
+#: The writes of SENT `request` refuses on a model not tested on this hardware (kept_refusal),
+#: since the headset keeps them through a power-off, or is taken to: the power-off time, which
+#: G HUB never sent again at a reconnect (on Windows, 2026-10-25). The sidetone's write is not
+#: among them, though the G432's adapter kept its level through a replug: it counts among the
+#: volatile writes, a reset the way back (the owner's decision of 2026-10-19).
 KEPT = frozenset({(F_ADC, FN_SET_POWER_OFF)})
 #: The features `find_features` looks up once the table lists them, for their index and
 #: version.
@@ -231,8 +247,14 @@ LOOKED_UP = (F_DEVICE_INFO, SIDETONE, F_ADC)
 def find_g432() -> tuple[Path, int] | None:
     """A headset of the family's hidraw node and product id, read from sysfs by the vid, pid
     and interface its udev rule matches, the models in MODELS' order; opens nothing."""
-    found = find_attached(product=tuple(MODEL_OF), interface=INTERFACE)
+    found = find_attached(product=MODEL_OF, interface=INTERFACE)
     return found[:2] if found else None
+
+
+def find_each_g432() -> list[tuple[Path, int]]:
+    """Each headset of the family's node and product id, two of one model both, read from sysfs
+    as find_g432 reads it, find_g432's first; opens nothing."""
+    return [found[:2] for found in find_every_attached(MODEL_OF, INTERFACE)]
 
 
 def open_g432(path: str | os.PathLike[str], product: int) -> G432:
@@ -255,15 +277,15 @@ LISTED_WORDS = {
 NO_HEADSET_EQ = "the {}'s equalizer runs on the computer; `gearbench-ctl g432-eq` sets it"
 EQ_UNTESTED = ("Gearbench does not write the {}'s equalizer until that is tested on this model: "
                "it may keep the gains it is sent")
-#: Why a write the headset keeps (KEPT, and its lights' in headset_lights) is refused on a
+#: Why a write of KEPT, or a kept write of its lights' in headset_lights, is refused on a
 #: model not tested on this hardware, the owner's rule of 2026-10-17: its name goes in.
 KEPT_UNTESTED = ("Gearbench does not write the {}'s memory until that is tested on this "
                  "model: what it is sent there stays through a power-off")
 #: Why a gain list is refused: the band count, then the range's ends.
 NOT_GAINS = "the equalizer takes {}, each a whole number of dB from {} to {}"
 
-#: Why a sidetone level is refused, SIDETONE_RANGE's ends put in.
-NOT_A_LEVEL = "the sidetone level is a whole number from {} to {}, not {}"
+#: What a sidetone level is called in its refusal (wording.whole_in).
+SIDETONE_WORDS = "the sidetone"
 
 
 @dataclass(frozen=True)
@@ -308,11 +330,8 @@ def eq_range(info: bytes) -> tuple[int, int]:
     return max(low or -info[1], GAIN_MIN), min(high or info[1], GAIN_MAX)
 
 
-#: The label of the minutes of silence a wireless one powers off after, in the text output
-#: of `headset`, `g432-sidetone` and `g432-auto-off`: the window's row, Auto shut-off.
-AUTO_OFF_LABEL = "auto shut-off"
 #: The power-off times Gearbench sets, in minutes, 0 for never: those G HUB offers a G933,
-#: each sent at 0x1F20's function 2 and read back (the Windows captures of 2026-10-25; the
+#: each sent at 0x1F20's function 2 and read back (G HUB on Windows, 2026-10-25; the
 #: owner's answer of 2026-10-25).
 POWER_OFF_CHOICES = (0, 5, 15, 30, 60)
 #: POWER_OFF_CHOICES in words but 0, which each sentence words as never on its own.
@@ -321,13 +340,13 @@ POWER_OFF_OFFERED = word_list([str(minutes) for minutes in POWER_OFF_CHOICES[1:]
 NOT_A_POWER_OFF = "the auto shut-off is {} minutes, or 0 for never, not {}"
 #: Why it is refused on a headset whose 0x1F20 is older than POWER_OFF_SINCE: the model's
 #: name and the version.
-NO_POWER_OFF = ("the {} has no auto shut-off Gearbench sets: its HID++ feature 0x1F20 is "
+NO_POWER_OFF = ("the {} has no auto shut-off Gearbench sets: its feature 0x1f20 is "
                 "version {}, and the time is read and set from version 2 on")
 
 
 def auto_off_words(minutes: object) -> str:
-    """A headset's auto shut-off time as the CLI and the journal give it, in the words of the
-    window's entries, lowercase: so many minutes, never for 0, or not read for none."""
+    """A headset's auto shut-off time as the CLI, the journal and, capitalized, the window
+    give it: so many minutes, never for 0, or not read for none."""
     if minutes == 0:
         return "never"
     if whole(minutes):
@@ -344,15 +363,12 @@ def power_off_minutes(value: object) -> int:
 
 def sidetone_level(value: object) -> int:
     """A sidetone level the feature takes, or ValueError saying what it takes."""
-    low, high = SIDETONE_RANGE
-    if not whole(value) or not low <= value <= high:
-        raise ValueError(NOT_A_LEVEL.format(low, high, written(value)))
-    return value
+    return whole_in(value, *SIDETONE_RANGE, SIDETONE_WORDS)
 
 
 def kept_refusal(model: HeadsetModel) -> str | None:
-    """Why `model` is sent no write it keeps: KEPT_UNTESTED for a model not tested on this
-    hardware, else None."""
+    """Why `model` is sent no write of KEPT, nor its lights' kept writes (headset_lights):
+    KEPT_UNTESTED for a model not tested on this hardware, else None."""
     return None if model.tested else KEPT_UNTESTED.format(model.short)
 
 
@@ -374,7 +390,7 @@ class G432:
         #: lookups of `find_features` found; empty before it.
         self.table: dict[int, int] = {}
         self.features: dict[int, Feature] = {}
-        #: The G keys held, as the last of 0x8010's events gave them.
+        #: The G keys held, as the last of 0x8010's events since forget_held gave them.
         self._keys_held = 0
 
     @property
@@ -424,8 +440,8 @@ class G432:
     def request(self, feature_id: int, function: int, params: bytes = b"", *,
                 probe: bool = False) -> bytes:
         """One request of SENT, to the root's index 0 or to the index its root lookup gave,
-        on the probe's budget with `probe`; ValueError for any other, for a write the headset
-        keeps on a model not tested (kept_refusal), for a feature `find_features` did not
+        on the probe's budget with `probe`; ValueError for any other, for a write of KEPT
+        on a model not tested (kept_refusal), for a feature `find_features` did not
         find, or for setFrequencyGains with a persistence other than RAM, before anything is
         written. Raises HidppFailure."""
         if (feature_id, function) not in SENT:
@@ -454,7 +470,7 @@ class G432:
         after the node opens; then the table, FEATURES_MAX rows at most, and the root lookup
         of each feature of LOOKED_UP it lists. None of the lookups is of a feature the table
         does not list, 0x8310 only on a model with an equalizer of its own and 0x8010 only
-        on one with G keys (`HeadsetModel.g_keys`). Kept as `table` and `features`; raises
+        on one with G keys (`HeadsetModel.used_features`). Kept as `table` and `features`; raises
         HidppFailure, and UnreadableAnswer for a headset with no 0x0001."""
         found = feature_of(self.request(ROOT_FEATURE, 0, F_FEATURE_SET.to_bytes(2, "big"),
                                         probe=True))
@@ -465,9 +481,7 @@ class G432:
         self.table = {index: int.from_bytes(
             self.request(F_FEATURE_SET, FN_FEATURE_ID, bytes([index]))[0:2], "big")
             for index in range(1, min(count, FEATURES_MAX) + 1)}
-        onboard = (F_EQUALIZER,) if self.model.onboard_eq else ()
-        keys = (F_GKEY,) if self.model.g_keys else ()
-        for feature_id in (*LOOKED_UP, *onboard, *keys):
+        for feature_id in (*LOOKED_UP, *self.model.used_features):
             if (feature := self.lookup(feature_id)) is not None:
                 self.features[feature_id] = feature
         return self.features
@@ -482,19 +496,14 @@ class G432:
     def firmware(self) -> str | None:
         """The firmware that runs, its name and version as getFwInfo gives them, U1
         42.00.B0001 on the G432 read on 2026-10-17: the active main application of the
-        entities getDeviceInfo counts (hidpp.running_application). None where the headset
-        lists no 0x0003 or no such entity. Raises HidppFailure, UnreadableAnswer for an entry
-        too short to decode."""
+        entities getDeviceInfo counts (hidpp.running_version). None where the headset lists
+        no 0x0003 or no such entity. Raises HidppFailure, UnreadableAnswer for an entry too
+        short to decode."""
         if not self.has(F_DEVICE_INFO):
             return None
-        count = self.request(F_DEVICE_INFO, FN_DEVICE_INFO)[0]
-        running = running_application(
-            lambda entity: self.request(F_DEVICE_INFO, FN_FW_INFO, bytes([entity])), count,
+        return running_version(
+            lambda function, params: self.request(F_DEVICE_INFO, function, params),
             f"the {self.model.short}")
-        if running is None:
-            return None
-        found = firmware_entity(running[1])
-        return f"{found.prefix} {found.version}"
 
     def sidetone(self) -> int:
         """The level the headset reports, byte 0 of function 0's reply, where Solaar's
@@ -515,8 +524,13 @@ class G432:
         keys held forgotten: off, the headset has them, and on, after a switch-off too, none
         is held. The headset loses it at a power-off. Raises HidppFailure, and ValueError for
         a headset `find_features` found no 0x8010 on."""
-        self._keys_held = 0
+        self.forget_held()
         self.request(F_GKEY, GKEY_SET_DIVERT, bytes([KEYS_ON if on else KEYS_OFF]))
+
+    def forget_held(self) -> None:
+        """Take none of the G keys as held, so the next event's mask is read from none: their
+        releases will not come, as from a headset taken to be away or turned on again."""
+        self._keys_held = 0
 
     def battery(self) -> dict:
         """getADCMeasurement in battery.read's shape, with the model's cell for this id.

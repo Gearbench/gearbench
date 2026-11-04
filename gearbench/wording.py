@@ -5,9 +5,10 @@ rests on. Standard library only, and below every other module, the device layers
 from __future__ import annotations
 
 import json
+import math
 import time
 import unicodedata
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from pathlib import Path
 from typing import TypeGuard
 
@@ -18,28 +19,45 @@ from typing import TypeGuard
 #: holds the file's name, up to 255 bytes, and the field.
 MAX_REFUSAL = 1000
 #: What every view says of a value the device has not given, its battery included, while
-#: the device answers: "Not read" on a row, "not read" in the tray and the CLI.
+#: the device answers: "Not read" on a row, "not read" in the CLI and "battery not read" in
+#: the tray.
 NOT_READ = "not read"
 #: What the window's Status dot, the CLI's note and the tray's battery line say of a device
 #: that does not answer.
 ASLEEP_OR_SWITCHED_OFF = "asleep or switched off"
+#: The start of the CLI's note on a device that does not answer, and all that note and the
+#: tray's battery line say of a keyboard on its cable: switched off, a keyboard leaves its
+#: cable's node, so asleep or switched off is not why.
+NOT_ANSWERING_WORDS = "not answering"
 #: The choice of no game profile, the M profile alone: the Keyboard tab's Loaded row and the
 #: tray's Game profile submenu.
 NO_GAME_PROFILE = "No game profile"
-#: The refusal of an empty name, each kind of profile and a macro by its own name: the
-#: daemon's, and the window's toast before it asks.
+#: The refusal of an empty name, each kind of profile, a macro and an equalizer preset by
+#: its own name: the daemon's, and the window's toast before it asks.
 M_PROFILE_NEEDS_A_NAME = "an M profile needs a name"
 GAME_PROFILE_NEEDS_A_NAME = "a game profile needs a name"
 MACRO_NEEDS_A_NAME = "a macro needs a name"
+PRESET_NEEDS_A_NAME = "a preset needs a name"
+#: Reload from disk's toast line for a note too long for one (style.say_not_shown): the
+#: keyboard did not show the lighting read again, or did not take the idle times read again.
+RELOAD_NOT_TAKEN = "The keyboard did not take all of the reload"
+#: Reload from disk's button on the Keyboard tab, and the config banner's.
+RELOAD_LABEL = "Reload…"
 #: What a file that could not be read, or that a pack holds and never imports, is listed
 #: under: a group's title, a row's first words, `pack`'s heading.
 LEFT_OUT = "Left out"
-#: The heading of a refusal: the window's Details dialog, a long refusal's toast line when
-#: its first clause is too long for one too (refusal_line), and the tray's notice of a
-#: refused menu choice.
+#: The heading of a refusal: the window's Details dialog and a long refusal's toast line
+#: when its first clause is too long for one too, or is cut inside a quoted name
+#: (refusal_line).
 REFUSED_HEADING = "That did not work"
 #: The reason said for a refusal or a failure that came with none of its own.
 NO_REASON = "no reason given"
+#: The refusal of a setting a headset does not have: the model's name, the setting asked
+#: for, written, and the settings it has, in words.
+NO_SETTING = "there is no {} setting {}; the settings are {}"
+#: A settings file's save that failed: the file or folder the error names (write_json names
+#: the file saved, behind a link the one the link leads to), then why, in words.
+SETTINGS_NOT_SAVED = "could not save {}: {}"
 #: The user unit the daemon runs as (systemd/gearbench.service), and the command that shows
 #: its journal.
 SERVICE = "gearbench"
@@ -51,8 +69,13 @@ def service_command(verb: str) -> str:
     return f"systemctl --user {verb} {SERVICE}"
 
 
-#: The step after a failure only a newer daemon fixes, naming the daemon as every message
-#: does.
+#: The daemon's reply to a command it has no handler for, the same since 1.0.1: a front end
+#: reads it as a daemon older than itself (import_plan.reply_lines), so it keeps this
+#: wording.
+UNKNOWN_COMMAND = "unknown command {!r}"
+
+#: The step after a failure that a daemon of another version caused, naming the daemon as
+#: every message does.
 RESTART_DAEMON = f"restart the daemon: `{service_command('restart')}`"
 
 
@@ -76,15 +99,23 @@ def reason(exc: BaseException) -> str:
     return str(exc)
 
 
+#: The first words `capitalized` leaves as they are: each outside program the package runs,
+#: whose failure starts with its name ("pw-record is not installed"), and the daemons a
+#: problem names first. A program the package starts joins this set.
+KEEPS_CASE = frozenset({"systemctl", "systemd-run", "journalctl", "pipewire", "pw-dump",
+                        "pw-cli", "pw-metadata", "pw-record", "pw-play", "gearbench-ctl",
+                        "ratbagd", "logind"})
+
+
 def capitalized(text: str) -> str:
     """A refusal or a problem as a window, the tray or a notice shows it: the daemon and the
     command line write one as a lowercase fragment, with no final period and "; " before a
     second clause, and each place that shows one capitalizes its first letter (the owner's
-    decision of 2026-10-22). A command, a daemon or a file keeps its case: "systemctl --user
-    did not answer", "logind is not reachable", "config.json could not be read"."""
+    decision of 2026-10-22). A command, a daemon (KEEPS_CASE) or a file keeps its case:
+    "systemctl --user did not answer", "logind is not reachable", "config.json could not be
+    read"."""
     first = text.split(" ", 1)[0]
-    if (first in ("systemctl", "gearbench-ctl", "ratbagd", "logind", "pw-dump", "pw-cli")
-            or "." in first or "/" in first):
+    if first in KEEPS_CASE or "." in first or "/" in first:
         return text
     return text[:1].upper() + text[1:]
 
@@ -160,6 +191,24 @@ def written(value: object) -> str:
     return repr(value)
 
 
+#: The refusal of a value that is not a whole number in its range: what the value is, the
+#: unit after "whole number" (" of dB", or none), the range's ends and the value written.
+NOT_WHOLE_IN = "{} is a whole number{} from {} to {}, not {}"
+
+
+def whole_in(value: object, low: int, high: int, what: str, unit: str = "") -> int:
+    """`value` where it is a whole number from `low` to `high`, else ValueError in
+    NOT_WHOLE_IN's words."""
+    if not whole(value) or not low <= value <= high:
+        raise ValueError(NOT_WHOLE_IN.format(what, unit, low, high, written(value)))
+    return value
+
+
+def whole_within(value: object, low: int, high: int) -> int | None:
+    """`value` where it is a whole number from `low` to `high`, else None."""
+    return value if whole(value) and low <= value <= high else None
+
+
 def given_count(value: object, noun: str) -> str:
     """What a refusal of a list of `noun`s says was given: "9 bands" for a list or tuple,
     "the number 5" for a number, so it does not read as a count, or written(value)."""
@@ -221,6 +270,15 @@ def counted(n: int, noun: str) -> str:
     return f"{n:,} {noun}{'' if n == 1 else 's'}"
 
 
+def size_words(size: int) -> str:
+    """A limit in bytes as the docs give it: "16 MiB" or "16 KiB" for a whole number of
+    either, else counted: "255 bytes", "0 bytes"."""
+    for unit, shift in (("MiB", 20), ("KiB", 10)):
+        if size and not size % (1 << shift):
+            return f"{size >> shift:,} {unit}"
+    return counted(size, "byte")
+
+
 def route(plugged_by: str) -> str:
     """How a device reaches the computer, by what plugs into it, as every view says it,
     the window with a capital: "on its cable", or "through its receiver", "through its
@@ -254,16 +312,30 @@ def hertz(freq: int) -> str:
     return f"{freq / 1000:g} kHz" if freq >= 1000 else f"{freq} Hz"
 
 
-def shares_words(game: int) -> str:
-    """A Game/Voice balance as its two shares, by its Game share in whole percent, as the
-    window, the CLI and the GUIDE give it: "Voice 33% · Game 67%"."""
+def shares_words(value: int, top: int) -> str:
+    """A Game/Voice balance, 0 all Voice to `top` all Game, as its two shares in whole
+    percent, as the window, the CLI and the GUIDE give it: "Voice 33% · Game 67%"."""
+    game = round(value * 100 / top)
     return f"Voice {100 - game}% · Game {game}%"
+
+
+def levels_words(chat: int, game: int) -> str:
+    """Outputs' balance as Gearbench Chat's and Gearbench Game's levels, each a whole percent
+    as GNOME's Sound settings show a volume (headset_audio.gnome_percent), as the window gives
+    it: "Chat 100% · Game 83%". A gain keeps its dB words (signed)."""
+    return f"Chat {chat}% · Game {game}%"
 
 
 def signed(gain: float) -> str:
     """A gain as every view gives it, with its sign, a zero's too, so a column of gains
     lines up: "+3 dB", "-1.5 dB", "+0 dB"."""
     return f"{gain:+zg} dB"
+
+
+def bands_words(bands: Iterable[tuple[int, float]]) -> str:
+    """An equalizer's bands, each (frequency, gain), as the window gives them: "32 Hz +0 dB,
+    64 Hz +3 dB"."""
+    return ", ".join(f"{hertz(freq)} {signed(gain)}" for freq, gain in bands)
 
 
 def numbered(number: int, name: str) -> str:
@@ -274,6 +346,12 @@ def numbered(number: int, name: str) -> str:
 def gain_range(low: float, high: float) -> str:
     """A range of gains as `signed` gives a gain, dB once at its end: "-7 to +7 dB"."""
     return f"{low:+zg} to {signed(high)}"
+
+
+def countdown_seconds(left: float) -> int:
+    """The seconds a countdown shows with `left` to go, in every view: whole and rounded
+    up, so its last tenth reads 1 s, never 0."""
+    return math.ceil(left)
 
 
 #: The end of a reading a device that no longer answers was last read with, {} its

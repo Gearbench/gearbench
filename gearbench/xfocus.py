@@ -14,6 +14,7 @@ Where GNOME starts Xwayland on demand, this connection keeps it running.
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
 import os
 import re
@@ -84,6 +85,12 @@ TIMEOUT = 5.0
 #: The longest message taken from the server. The setup reply, the longest asked for, is a
 #: few kilobytes; a longer one is another protocol, which would be buffered forever.
 MAX_MESSAGE = 1 << 20
+#: The most one read takes from the socket, in bytes.
+READ_SIZE = 1 << 16
+#: The most reads tick() makes while an answer waits: 1 MiB, past the 208 KiB a Unix socket
+#: holds by default (net.core.wmem_default, read 2026-11-01). An answer behind more is behind
+#: a flood of events, which would hold the loop for as long as it went on.
+TICK_READS = MAX_MESSAGE // READ_SIZE
 #: parse_setup's words for an accepted reply it cannot read.
 TOO_SHORT = "a setup reply too short to read"
 NO_SCREEN = "a setup reply with no screen"
@@ -183,21 +190,26 @@ def read_cookie(number: int, environ: Mapping[str, str],
 def open_socket(number: int) -> socket.socket:
     """A connected, non-blocking socket to display `number`, abstract first, then path.
 
-    Raises the last OSError when neither connects. Abstract first: the unit's PrivateTmp hides
-    /tmp/.X11-unix, and an abstract socket belongs to the network namespace, which the unit
-    shares with the session. A Unix socket's connect never waits: it connects or fails.
+    Raises the abstract socket's OSError when neither connects, or the path's where that one
+    is not ENOENT. Abstract first: the unit's PrivateTmp hides /tmp/.X11-unix, and an abstract
+    socket belongs to the network namespace, which the unit shares with the session. A Unix
+    socket's connect never waits: it connects or fails.
     """
     path = f"{X11_DIR}/X{number}"
-    failure: OSError = OSError(f"no socket for display :{number}")
+    failure: OSError | None = None
     for address in ("\0" + path, path):
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_NONBLOCK)
         try:
             sock.connect(address)
         except OSError as exc:
             sock.close()
-            failure = exc
+            # Under PrivateTmp the path is never there: its ENOENT would hide why the
+            # abstract socket failed, a server gone (ECONNREFUSED) or not accepting (EAGAIN).
+            if failure is None or exc.errno != errno.ENOENT:
+                failure = exc
             continue
         return sock
+    assert failure is not None  # noqa: S101 -- for the type checker: the loop tried two addresses
     raise failure
 
 
@@ -270,7 +282,8 @@ class XFocus:
     None for no program (no active window, the window manager's own, or no pid). `pending`:
     the first connection is being made, so the daemon can wait for it; the running-process
     scan would load a profile and drop it a moment later. `changed()` is called on the
-    daemon's loop when focus comes into or goes out of force and when the settled pid changes.
+    daemon's loop when focus comes into force or a failure takes it out, and when the settled
+    pid changes; close() does not call it.
     """
 
     def __init__(self, changed: Callable[[], None], *,
@@ -304,8 +317,10 @@ class XFocus:
         self._root = 0
         self._mask = 0
         self._atoms: dict[str, int] = {}
-        #: The window manager's check window, for its client's ids.
+        #: The window manager's check window, for its client's ids, and whether a read of it
+        #: waits for its answer (_read_wm_check).
         self._wm_window: int | None = None
+        self._wm_check_asked = False
         #: Whether this connection's setup has sent its own focus read (_begin).
         self._begun = False
         #: The next connect attempt, and the wait after one that fails.
@@ -322,9 +337,9 @@ class XFocus:
 
     # ------------------------------------------------------------ the loop
 
-    def start(self, selector: selectors.BaseSelector, tag: object = "focus") -> bool:
-        """Start connecting, the socket registered on `selector` under `tag`. False, logged
-        once, when DISPLAY names no local display."""
+    def start(self, selector: selectors.BaseSelector, tag: object = "focus") -> None:
+        """Start connecting, the socket registered on `selector` under `tag`; when DISPLAY
+        names no local display, say so once and try nothing."""
         self._selector, self._tag = selector, tag
         self.display = self._environ.get("DISPLAY") or None
         self._number = display_number(self.display)
@@ -333,29 +348,16 @@ class XFocus:
                    else f"DISPLAY {self.display!r} is not a local display")
             log.info("no X server to follow window focus on (%s); %s unless Gearbench's "
                      "GNOME Shell extension reports focus", why, BY_RUNNING_PROGRAMS)
-            return False
+            return
         self.pending = True
         self._connect()
-        return True
 
     def dispatch(self, mask: int) -> None:
         """Flush output and read input, from the daemon's loop when the socket is ready."""
         if mask & selectors.EVENT_WRITE:
             self._flush()
-        if self._sock is None or not mask & selectors.EVENT_READ:
-            return
-        try:
-            chunk = self._sock.recv(65536)
-        except BlockingIOError:
-            return
-        except OSError as exc:
-            self._fail(f"the connection to the X server failed ({reason(exc)})")
-            return
-        if not chunk:
-            self._fail("the X server closed the connection")
-            return
-        self._in += chunk
-        self._take()
+        if mask & selectors.EVENT_READ:
+            self._read()
 
     def deadline(self) -> float | None:
         """When tick() next has something to do, on the clock given, or None."""
@@ -370,10 +372,13 @@ class XFocus:
         """Do what falls due: a connect attempt, a settled focus, a server silent for TIMEOUT."""
         # A loop held past TIMEOUT by another handler leaves an answer unread: read it before
         # judging, on the time taken before the read, since a focus change the read passes
-        # on can hold the loop past TIMEOUT while a request it sent waits unread.
+        # on can hold the loop past TIMEOUT while a request it sent waits unread. Read until
+        # nothing waits, the socket is empty or TICK_READS reads are in: an answer can wait
+        # behind more than one READ_SIZE of root events.
         now = self._clock()
-        if self._setup_at is not None or self._waiting:
-            self.dispatch(selectors.EVENT_READ)
+        for _ in range(TICK_READS):
+            if not ((self._setup_at is not None or self._waiting) and self._read()):
+                break
         if self._setup_at is not None and now >= self._setup_at + TIMEOUT:
             self._fail(f"the X server did not answer the connection setup in {TIMEOUT:g} s")
         elif self._waiting and now >= min(s for s, _a in self._waiting.values()) + TIMEOUT:
@@ -424,6 +429,7 @@ class XFocus:
         self._settle.clear()
         self._atoms.clear()
         self._wm_window = None
+        self._wm_check_asked = False
         self._begun = False
         self.xres = None
         self.ready = self.pending = False
@@ -444,6 +450,25 @@ class XFocus:
         log.log(level, "%s; %s, trying again in %g s", why, meanwhile, wait)
         if was:
             self._changed()
+
+    def _read(self) -> bool:
+        """Take up to READ_SIZE bytes from the server and handle each whole message; False
+        when it had nothing waiting or the connection is gone."""
+        if self._sock is None:
+            return False
+        try:
+            chunk = self._sock.recv(READ_SIZE)
+        except BlockingIOError:
+            return False
+        except OSError as exc:
+            self._fail(f"the connection to the X server failed ({reason(exc)})")
+            return False
+        if not chunk:
+            self._fail("the X server closed the connection")
+            return False
+        self._in += chunk
+        self._take()
+        return True
 
     def _write(self, data: bytes) -> None:
         self._out += data
@@ -578,10 +603,22 @@ class XFocus:
         # window's and X-Resource's version, and an answer of no window would put focus in
         # force without them. Set before the reads, so a drop by either clears it.
         self._begun = True
-        self._get_property(self._root, WM_CHECK, ATOM_WINDOW, self._took_wm_window)
+        self._read_wm_check()
         self._read_focus()
 
+    def _read_wm_check(self) -> None:
+        """Read the check window, unless a read of it waits. A server sends a client's events
+        and replies in the order it makes them, so a change whose event comes while that read
+        waits is in its answer. Any X client can send the event, and a read for each would
+        pile up behind another client's server grab. Set before the read, so a drop by it
+        clears it."""
+        if self._wm_check_asked:
+            return
+        self._wm_check_asked = True
+        self._get_property(self._root, WM_CHECK, ATOM_WINDOW, self._took_wm_window)
+
     def _took_wm_window(self, window: int | None) -> None:
+        self._wm_check_asked = False
         self._wm_window = window or None
 
     def _property_changed(self, event: bytes) -> None:
@@ -589,7 +626,7 @@ class XFocus:
         if window != self._root:
             return
         if atom == self._atoms.get(WM_CHECK):
-            self._get_property(self._root, WM_CHECK, ATOM_WINDOW, self._took_wm_window)
+            self._read_wm_check()
         elif atom == self._atoms.get(ACTIVE) and self._begun:
             self._generation += 1       # a read on its way is out of date
             self._settle.change(self._clock())

@@ -8,38 +8,51 @@
 # usr/lib/systemd/user/gearbench.service.
 UNIT = debian/gearbench.user.service
 SPATIAL_UNIT = debian/gearbench.gearbench-spatial.user.service
+OUTPUTS_UNIT = debian/gearbench.gearbench-outputs.user.service
+
+# The two edits all three units take, explained at the target below.
+UNIT_EDITS = -e 's|^Environment="PYTHONPATH=.*|UnsetEnvironment=PYTHONPATH PYTHONHOME|' \
+	-e 's|@PYTHON@|/usr/bin/python3|g'
 
 %:
 	dh $@ --with python3 --buildsystem=pybuild
 
-# The unit in systemd/ carries @CHECKOUT@ because install.sh points it at a git
-# checkout. A packaged install has the code on the system path and an entry
+# The unit in systemd/ carries @CHECKOUT@ and @PYTHON@ because install.sh
+# points it at a git checkout and the interpreter it picks. A packaged install
+# has the code on the system path, run by /usr/bin/python3, and an entry
 # point in /usr/bin, so WorkingDirectory= has nothing to say and ExecStart= is
-# absolute. Its PYTHONPATH= line becomes an unset of the one the session
-# exported. In the daemon's unit that is a second guard, since its console
-# script runs with -I (below). In the spatial unit, whose ExecStart runs
-# python3 -s -P, an empty element ("$PYTHONPATH:/opt/x" with none set before)
-# names the working directory, $HOME, which -P leaves on sys.path.
+# absolute. Each unit's PYTHONPATH= line becomes an unset of the one the
+# session exported. Each python3 -s -P in the units runs in $HOME, a user
+# unit's working directory without WorkingDirectory=: the daemon's runtime
+# folder check (its ExecStartPre=+, outside the sandbox) and the spatial and
+# Outputs units' ExecStart. There an empty element ("$PYTHONPATH:/opt/x" with
+# none set before) names $HOME, which -P leaves on sys.path, and the unset is
+# their one guard. For the daemon itself it is a second, since its console
+# script runs with -I (below).
 # The greps are guards: a templated unit that reached a .deb would start a
 # daemon that cannot import itself, one without the settings folder's
 # ExecStartPre would fail every start where ReadWritePaths= applies, and one
 # without the runtime folder's would let the daemon start below another
-# account's folder, which its user namespace hides.
+# account's folder, which its user namespace hides. packaging/install-files
+# runs this target for the .rpm and the Arch package, which install the same
+# units.
 execute_after_dh_auto_build:
-	sed -e 's|^Environment="PYTHONPATH=.*|UnsetEnvironment=PYTHONPATH PYTHONHOME|' \
-	    -e '/^WorkingDirectory=/d' \
+	sed $(UNIT_EDITS) -e '/^WorkingDirectory=/d' \
 	    -e 's|^ExecStart=.*|ExecStart=/usr/bin/gearbench-ctl daemon|' \
 	    systemd/gearbench.service > $(UNIT)
-	! grep -q @CHECKOUT@ $(UNIT)
+	! grep -q '@[A-Z_]*@' $(UNIT)
 	grep -qx 'ExecStart=/usr/bin/gearbench-ctl daemon' $(UNIT)
 	grep -qx 'ExecStartPre=+/usr/bin/install -d -m 0700 %E/gearbench' $(UNIT)
 	grep -qx 'ExecStartPre=+/usr/bin/python3 -s -P -m gearbench.runtime_folder' $(UNIT)
 	grep -qx 'UnsetEnvironment=PYTHONPATH PYTHONHOME' $(UNIT)
-	sed -e 's|^Environment="PYTHONPATH=.*|UnsetEnvironment=PYTHONPATH PYTHONHOME|' \
-	    spatial/gearbench-spatial.service.in > $(SPATIAL_UNIT)
+	sed $(UNIT_EDITS) spatial/gearbench-spatial.service.in > $(SPATIAL_UNIT)
 	! grep -q '@[A-Z_]*@' $(SPATIAL_UNIT)
 	grep -qx 'UnsetEnvironment=PYTHONPATH PYTHONHOME' $(SPATIAL_UNIT)
 	grep -qx 'ExecStart=/usr/bin/python3 -s -P -m gearbench.spatial_unit run %t/gearbench-spatial.conf' $(SPATIAL_UNIT)
+	sed $(UNIT_EDITS) outputs/gearbench-outputs.service.in > $(OUTPUTS_UNIT)
+	! grep -q '@[A-Z_]*@' $(OUTPUTS_UNIT)
+	grep -qx 'UnsetEnvironment=PYTHONPATH PYTHONHOME' $(OUTPUTS_UNIT)
+	grep -qx 'ExecStart=/usr/bin/python3 -s -P -m gearbench.outputs_unit run %t/gearbench-outputs.conf' $(OUTPUTS_UNIT)
 
 # The console script, which the unit, the desktop entry and D-Bus start, runs
 # with -I: no PYTHON* variable and no user site-packages from the session,
@@ -51,12 +64,13 @@ override_dh_python3:
 
 # The daemon's unit enabled for every account: at the login
 # screen the daemon exits before it opens a device, where python3-gi lets it
-# read the session's class. The spatial one installed off, since the Headset
-# tab switches it on per account. This order: a plain call after the named
-# one would enable both.
+# read the session's class. The spatial and Outputs ones installed off, since
+# each is switched on per account. This order: a plain call after the named
+# ones would enable them all.
 override_dh_installsystemduser:
 	dh_installsystemduser
 	dh_installsystemduser --name=gearbench-spatial --no-enable
+	dh_installsystemduser --name=gearbench-outputs --no-enable
 
 # README.md and SECURITY.md link docs/GUIDE.md, which links both back, as the
 # repository lays them out; the README also links the images, the icon, spatial/
@@ -64,18 +78,26 @@ override_dh_installsystemduser:
 # by side, the other files are where debian/gearbench.install puts them and the
 # license text is in /usr/share/common-licenses, so the installed copies link
 # those places. They stay uncompressed, or a link to one would lead nowhere.
-# The grep stops the build if a link of a form rewritten here is left.
+# The grep stops the build if a link of a form rewritten here is left. The
+# .rpm's and the Arch package's build runs this target too, with DOC and
+# LICENSE_TEXT their own: those systems keep a package's license in
+# /usr/share/licenses. Under nodoc, which dh puts in DEB_BUILD_OPTIONS for a
+# nodoc profile too, dh_installdocs installs none of the pages and there is
+# nothing to rewrite.
 DOC = debian/gearbench/usr/share/doc/gearbench
+LICENSE_TEXT = /usr/share/common-licenses/GPL-3
 execute_after_dh_installdocs:
+ifeq (,$(filter nodoc,$(DEB_BUILD_OPTIONS)))
 	sed -i -e 's|](docs/GUIDE\.md|](GUIDE.md|g' -e 's|](docs/images/|](images/|g' \
 	    -e 's|](desktop/icons/scalable/|](/usr/share/icons/hicolor/scalable/apps/|g' \
 	    -e 's|](spatial/|](/usr/share/gearbench/spatial/|g' \
-	    -e 's|](LICENSE)|](/usr/share/common-licenses/GPL-3)|g' \
-	    $(DOC)/README.md $(DOC)/SECURITY.md
+	    -e 's|](LICENSE)|]($(LICENSE_TEXT))|g' \
+	    "$(DOC)/README.md" "$(DOC)/SECURITY.md"
 	sed -i -e 's|](\.\./README\.md|](README.md|g' -e 's|](\.\./SECURITY\.md|](SECURITY.md|g' \
-	    $(DOC)/GUIDE.md
+	    "$(DOC)/GUIDE.md"
 	! grep -q -e '](docs/' -e '](\.\./' -e '](desktop/' -e '](spatial/' -e '](LICENSE)' \
-	    $(DOC)/*.md
+	    "$(DOC)"/*.md
+endif
 
 override_dh_compress:
 	dh_compress -X.md

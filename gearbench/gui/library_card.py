@@ -1,8 +1,8 @@
 """A headset page's preset library, the equalizer presets kept on this computer for the model
 the page shows, read and saved on the worker thread, as the G432's page saves its own. Under
 each equalizer's Preset row it adds Name, which renames the library's preset that plays, and,
-after the bands, Save as new preset…, which asks a name and saves the bands the equalizer
-plays as a new preset, and Delete preset, for the one that plays. The page lists the library
+after the bands, Save as new preset…, which asks a name and saves the bands the sliders show
+as a new preset, and Delete preset, for the one that plays. The page lists the library
 in its Preset row and picks one through the daemon (`request`). The file is read once the
 page's reply names a model, at each of the page's reads after that and after each change.
 
@@ -15,6 +15,7 @@ page. Building it runs nothing.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Protocol, Self, cast
@@ -28,6 +29,8 @@ from ..g432 import HeadsetModel
 from ..wording import capitalized
 from .style import (
     DELETE_HEADING,
+    DELETE_OPENER,
+    DELETE_PRESET,
     DELETE_RESPONSE,
     LIBRARY_UNREAD,
     NOT_DELETED,
@@ -37,10 +40,12 @@ from .style import (
     EntryTexts,
     ask_name,
     confirm,
-    delete_preset_row,
     displayable,
+    name_button,
     name_refusal,
     offer_save_new,
+    opener_row,
+    presets_full,
     save_new_row,
     toast_not_saved,
     toast_note,
@@ -49,13 +54,16 @@ from .style import (
 from .worker import DaemonWorker, Result
 
 #: Save as new preset…'s tooltip.
-SAVE_NEW_HELP = "Keeps the bands playing now"
+SAVE_NEW_HELP = "Keeps the bands the sliders show"
 NAME = "Name"
 DELETE_HELP = "The headset keeps playing its bands"
-DELETE_BODY = f"{DELETE_HELP}. This cannot be undone."
-#: A library read's toast line when its failure is too long for a toast, the whole failure
-#: behind Details.
-NOT_LOADED = LIBRARY_UNREAD
+#: The confirmation says where the preset goes from: a user leaving G HUB can take Delete for
+#: a write to the headset.
+DELETE_BODY = ("It goes from this computer's library; "
+               f"{DELETE_HELP[0].lower()}{DELETE_HELP[1:]}. This cannot be undone.")
+#: A row's name for a screen reader on a page with more than one equalizer: its label, then
+#: the equalizer's, so that no two controls in the window share a name.
+OF_EQUALIZER = "{label}, {equalizer}"
 
 
 class Keyed(Protocol):
@@ -66,11 +74,13 @@ class Keyed(Protocol):
 
 
 class Shelved(Protocol):
-    """A library a card shows, an eq_presets.Saved: its presets, numbered from 1, and the
-    changes the card makes but a save."""
+    """A library a card shows, an eq_presets.Saved: its presets, numbered from 1, one by its
+    number, and the changes the card makes but a save."""
 
     @property
     def presets(self) -> Sequence[eq_presets.Named]: ...
+
+    def get(self, number: int) -> eq_presets.Record: ...
 
     def named(self, number: int, name: str) -> Self: ...
 
@@ -80,8 +90,8 @@ class Shelved(Protocol):
 class Shelf[M: Keyed, L: Shelved, B](Protocol):
     """A kind of library, for models M, of libraries L, of presets of bands B: its file's
     read, change and path, the bands of a page's reply in its format (None for none it
-    takes), the presets of an equalizer by number and name, the one it plays, the daemon's
-    request that picks one, and a library with a new preset."""
+    takes), the presets of an equalizer by number and name, the one it plays, and a library
+    with a new preset."""
 
     def load(self, model: M) -> L: ...
 
@@ -94,8 +104,6 @@ class Shelf[M: Keyed, L: Shelved, B](Protocol):
     def of(self, library: L, instance: str) -> list[tuple[int, str]]: ...
 
     def playing(self, library: L, instance: str, bands: B) -> int | None: ...
-
-    def request(self, library: L, number: int) -> dict: ...
 
     def added(self, library: L, name: str, instance: str, bands: B) -> L: ...
 
@@ -125,10 +133,6 @@ class Centurion:
         return library.playing(instance, bands)
 
     @staticmethod
-    def request(library: a50x_library.Library, number: int) -> dict:
-        return library.get(number).request()
-
-    @staticmethod
     def added(library: a50x_library.Library, name: str, instance: str,
               bands: tuple[Band, ...]) -> a50x_library.Library:
         return library.added(a50x_library.Preset(name, instance, bands))
@@ -153,17 +157,12 @@ class Headset:
 
     @staticmethod
     def of(library: g432_library.Library, _instance: str) -> list[tuple[int, str]]:
-        return [(number, preset.name) for number, preset in zip(library.numbers,
-                                                                library.presets, strict=True)]
+        return [(number, preset.name) for number, preset in enumerate(library.presets, 1)]
 
     @staticmethod
     def playing(library: g432_library.Library, _instance: str,
                 bands: tuple[g432_library.Band, ...]) -> int | None:
         return library.playing(bands)
-
-    @staticmethod
-    def request(library: g432_library.Library, number: int) -> dict:
-        return library.get(number).request()
 
     @staticmethod
     def added(library: g432_library.Library, name: str, _instance: str,
@@ -185,17 +184,53 @@ def _add(holder: Holder, row: Gtk.Widget) -> None:
         holder.add(row)
 
 
+def say_library_failure(toast: Callable[..., object], path: Path, error: object,
+                        failed: str) -> str | None:
+    """A read's or a change's failure for the preset library at `path`, toasted: an OSError
+    with the path (toast_not_saved), any other refusal in words, `failed` the toast's line
+    when it is too long. Answers why the file takes no change from now on, for the library's
+    description: a LibraryPartial's sentence, the file read in part since the last read;
+    else None."""
+    if isinstance(error, OSError):
+        toast_not_saved(toast, path, error)
+    else:
+        toast_note(toast, capitalized(str(error)), failed, one_sentence=True)
+    return str(error) if isinstance(error, eq_presets.LibraryPartial) else None
+
+
+@dataclass
+class EqualizerRows[B]:
+    """One equalizer's rows and what they show: the holder of its rows, what its Preset row
+    says it plays, the bands it played at the page's last reply, None while they are not
+    read, the bands Save as new keeps (the reply's, or the sliders' a page holds: keep), and
+    whether that reply let its writes through, False once the page's headset is gone
+    (writable)."""
+
+    holder: Holder
+    shown: Callable[[], str]
+    name: Adw.EntryRow
+    save: Adw.ButtonRow
+    delete_row: Adw.ActionRow
+    delete_button: Gtk.Button
+    bands: B | None = None
+    kept: B | None = None
+    writable: bool = False
+
+
 class LibraryCard[M: Keyed, L: Shelved, B]:
     """The library of the model shown, of the kind `shelf` keeps, and each equalizer's rows
     for it: `changed` is the page's, which lists it again in its Preset rows once a read or
-    a change lands. `model` is the one the page's last reply named, None before one and for
-    a model this install does not know, and `library` its file's last read, None before the
-    first and while it does not read."""
+    a change lands, and `kept_up` is told of a change that failed (Window.kept_up). `model`
+    is the one the page's last reply named, None before one and for a model this install
+    does not know, and `library` its file's last read, None before the first and while it
+    does not read."""
 
     def __init__(self, worker: DaemonWorker, toast: Callable[..., object],
-                 changed: Callable[[], None], shelf: Shelf[M, L, B]) -> None:
+                 kept_up: Callable[[], None], changed: Callable[[], None],
+                 shelf: Shelf[M, L, B]) -> None:
         self._worker = worker
         self._toast = toast
+        self._kept_up = kept_up
         self._changed = changed
         self._shelf = shelf
         self.model: M | None = None
@@ -205,32 +240,29 @@ class LibraryCard[M: Keyed, L: Shelved, B]:
         #: A change is out, which the window's close waits for; a read is out.
         self.busy = self._reading = False
         self._texts = EntryTexts()
-        #: Each equalizer's holder of its rows and its rows, by its socket word, what its
-        #: Preset row says it plays, the bands it played at the page's last reply, None while
-        #: they are not read, and whether that reply let its writes through, False once the
-        #: page's headset is gone (writable).
-        self._holders: dict[str, Holder] = {}
-        self._shown: dict[str, Callable[[], str]] = {}
-        self.name_rows: dict[str, Adw.EntryRow] = {}
-        self.save_rows: dict[str, Adw.ButtonRow] = {}
-        self.delete_rows: dict[str, Adw.ActionRow] = {}
-        self.delete_buttons: dict[str, Gtk.Button] = {}
-        self._bands: dict[str, B | None] = {}
-        self._writable: dict[str, bool] = {}
+        #: Each equalizer's rows, by its socket word.
+        self.rows: dict[str, EqualizerRows[B]] = {}
 
-    def add_rows(self, instance: str, holder: Holder, shown: Callable[[], str]) -> None:
+    def add_rows(self, instance: str, holder: Holder, shown: Callable[[], str],
+                 equalizer: str | None) -> None:
         """`instance`'s rows, Name in `holder` now and the rest after its bands (to_end), each
         hidden until a reply gives bands; `shown` gives what its Preset row says it plays, the
-        name Save as new starts from."""
-        self._holders[instance], self._shown[instance] = holder, shown
-        self._bands[instance], self._writable[instance] = None, False
-        name = self.name_rows[instance] = Adw.EntryRow(title=NAME, show_apply_button=True)
+        name Save as new starts from. `equalizer`, the equalizer's name on a page with more
+        than one, None on a page with one, follows each control's label in its name for a
+        screen reader (OF_EQUALIZER)."""
+        name = Adw.EntryRow(title=NAME, show_apply_button=True)
         name.connect("apply", self.on_name, instance)
         watch_name(name)
         _add(holder, name)
-        self.save_rows[instance] = save_new_row(SAVE_NEW_HELP, self.on_save_new, instance)
-        self.delete_rows[instance], self.delete_buttons[instance] = delete_preset_row(
-            DELETE_HELP, self.on_delete, instance)
+        rows = self.rows[instance] = EqualizerRows(
+            holder, shown, name, save_new_row(SAVE_NEW_HELP, self.on_save_new, instance),
+            *opener_row(DELETE_PRESET, DELETE_HELP, DELETE_OPENER, self.on_delete, instance))
+        if equalizer is not None:
+            # The entry row's text is what takes the focus, and so what a screen reader says.
+            for control, label in ((cast("Gtk.Text", name.get_delegate()), NAME),
+                                   (rows.save, SAVE_HEADING),
+                                   (rows.delete_button, DELETE_PRESET)):
+                name_button(control, OF_EQUALIZER.format(label=label, equalizer=equalizer))
         self.to_end(instance)
         # Off until a reply gives bands: a page shows its rows before its first read.
         self._show_rows(instance)
@@ -238,11 +270,11 @@ class LibraryCard[M: Keyed, L: Shelved, B]:
     def to_end(self, instance: str) -> None:
         """Save as new and Delete preset after every row `instance`'s holder holds now: the
         page adds band rows as its replies give them."""
-        holder = self._holders[instance]
-        for row in (self.save_rows[instance], self.delete_rows[instance]):
+        rows = self.rows[instance]
+        for row in (rows.save, rows.delete_row):
             if row.get_parent() is not None:
-                holder.remove(row)
-            _add(holder, row)
+                rows.holder.remove(row)
+            _add(rows.holder, row)
 
     # -- what the page reads -------------------------------------------------
 
@@ -254,21 +286,23 @@ class LibraryCard[M: Keyed, L: Shelved, B]:
     def playing(self, instance: str) -> int | None:
         """The number of the library's preset `instance` plays, by the bands of the page's
         last reply; None for none."""
-        bands = self._bands.get(instance)
+        bands = self.rows[instance].bands
         return None if bands is None or self.library is None else (
             self._shelf.playing(self.library, instance, bands))
 
     def request(self, number: int) -> dict:
         """The daemon's request that picks the library's preset `number`, one of those `of`
         gave."""
-        return self._shelf.request(cast("L", self.library), number)
+        return cast("L", self.library).get(number).request()
 
     def said(self) -> str | None:
-        """Why the file takes no change, as markup for the description of the page's
-        equalizer group, where it stays while it lasts: the sentence quotes the file's path, a
-        lone surrogate in it as U+FFFD, and its cause. None while the file takes one."""
-        return None if self.refused is None else GLib.markup_escape_text(
-            displayable(self.refused))
+        """The library's word for the description of the page's equalizer group, as markup,
+        where it stays while it lasts: why the file takes no change, the sentence quoting the
+        file's path, a lone surrogate in it as U+FFFD, and its cause; else, with the library
+        full, why Save as new preset… is grayed out (style.presets_full). None for neither."""
+        if self.refused is not None:
+            return GLib.markup_escape_text(displayable(self.refused))
+        return presets_full(None if self.library is None else self.library.presets)
 
     # -- what the page shows -------------------------------------------------
 
@@ -279,7 +313,7 @@ class LibraryCard[M: Keyed, L: Shelved, B]:
                 None if self.model is None else self.model.key):
             return
         self.model, self.library, self.refused = model, None, None
-        for instance in self._holders:
+        for instance in self.rows:
             self._show_rows(instance)
         self.refresh()
 
@@ -287,35 +321,52 @@ class LibraryCard[M: Keyed, L: Shelved, B]:
         """`instance`'s rows for the bands of the page's reply, a list of the reply's band
         objects or anything else for none read, while its writes are let through or not: the
         bands in the format of the model shown (the shelf's `bands`), none for a model this
-        install does not know."""
-        self._bands[instance] = (None if self.model is None
-                                 else self._shelf.bands(self.model, instance, bands))
+        install does not know. Save as new keeps them until `keep` gives others."""
+        rows = self.rows[instance]
+        rows.bands = rows.kept = (None if self.model is None
+                                  else self._shelf.bands(self.model, instance, bands))
         self.writable(instance, writable)
+
+    def keep(self, instance: str, bands: object) -> None:
+        """`bands`, in the format of the page's reply, for Save as new to keep in place of the
+        reply's, for sliders a page holds where the user moved them, until the next `show`."""
+        self.rows[instance].kept = (None if self.model is None
+                                    else self._shelf.bands(self.model, instance, bands))
 
     def writable(self, instance: str, writable: bool) -> None:
         """`instance`'s rows on or off as its writes are let through or not, for the bands of
         the page's last reply: off too once the page's headset is gone."""
-        self._writable[instance] = writable
+        self.rows[instance].writable = writable
         self._show_rows(instance)
 
     def _show_rows(self, instance: str) -> None:
         """Save as new for bands a preset takes, and Name and Delete preset while a
         preset of the library plays, each on while its writes are let through, no change is
-        out and the file takes a change; Save as new also needs the library read and room in it."""
-        number = self.playing(instance)
-        name, delete = self.name_rows[instance], self.delete_rows[instance]
+        out and the file takes a change; Save as new also needs the library read, room in it
+        and none of its presets playing."""
+        number, rows = self.playing(instance), self.rows[instance]
+        name, delete = rows.name, rows.delete_row
         name.set_visible(number is not None)
         delete.set_visible(number is not None)
-        if number is not None and not self._typing(name):
+        # Not while a change is out: the library is the one before it, so a rename's row
+        # would show the old name until the change lands. Grayed out meanwhile, the row
+        # loses the cursor, so the landing fills it.
+        if number is not None and not self.busy and not self._typing(name):
             self._texts.show(name, self._name(number))
-        changeable = self._writable[instance] and self.refused is None and not self.busy
+        changeable = rows.writable and self.refused is None and not self.busy
         name.set_sensitive(changeable)
         delete.set_sensitive(changeable)
-        save, read = self.save_rows[instance], self._bands[instance] is not None
+        save, read = rows.save, rows.bands is not None
         save.set_visible(read)
-        # Grayed out with the library full, the reason its tooltip, as on the other pages.
-        offer_save_new(save, changeable and read and self.library is not None,
-                       None if self.library is None else self.library.presets, SAVE_NEW_HELP)
+        # Grayed out while a preset of the library plays, whose twin the library refuses
+        # (eq_presets.ALREADY_SAVED), the reason its tooltip: one group line serves two
+        # equalizers on the A50 X's page.
+        held = (None if number is None
+                else capitalized(eq_presets.ALREADY_SAVED.format(number, self._name(number))))
+        save.set_tooltip_text(SAVE_NEW_HELP if held is None else held)
+        # Grayed out with the library full, the reason the group's line (said).
+        offer_save_new(save, changeable and read and self.library is not None and held is None,
+                       None if self.library is None else self.library.presets)
 
     def _name(self, number: int) -> str:
         """The name of the library's preset `number`, one it holds."""
@@ -338,7 +389,7 @@ class LibraryCard[M: Keyed, L: Shelved, B]:
 
     def _loaded(self, model: M, result: Result) -> None:
         self._reading = False
-        self._landed(model, result, NOT_LOADED)
+        self._landed(model, result, LIBRARY_UNREAD)
 
     def _shows(self, model: M) -> bool:
         """Whether `model` is the one shown: the G522's two ids are one model."""
@@ -361,30 +412,24 @@ class LibraryCard[M: Keyed, L: Shelved, B]:
             self.refused = result.left_out or None
         elif isinstance(result, eq_presets.LibraryUnread):
             self.library, self.refused = None, str(result)
-        else:
-            self._say_failure(model, result, failed)
-            if isinstance(result, eq_presets.LibraryPartial):
-                self.refused = str(result)
-        for instance in self._holders:
+        elif (held := say_library_failure(self._toast, self._shelf.path(model), result,
+                                          failed)) is not None:
+            self.refused = held
+        for instance in self.rows:
             self._show_rows(instance)
         self._changed()
-
-    def _say_failure(self, model: M, error: object, failed: str) -> None:
-        """A change to `model`'s library that failed: a save's error with the file's path, or
-        a refusal in words, `failed` the toast's line when it is too long."""
-        if isinstance(error, OSError):
-            toast_not_saved(self._toast, self._shelf.path(model), error)
-        else:
-            toast_note(self._toast, capitalized(str(error)), failed, one_sentence=True)
 
     # -- changing --------------------------------------------------------------
 
     def on_save_new(self, row: Adw.ButtonRow, instance: str) -> None:
         """Ask the new preset's name, what the equalizer's Preset row says it plays to start,
-        then save the bands it plays at the click under it, in the library of the model shown
-        then. The row is on only with its bands and a library read (_show_rows)."""
-        bands, model = cast("B", self._bands[instance]), cast("M", self.model)
-        ask_name(row, self._shown[instance](),
+        then save the bands at the click under it, those `keep` last gave, else the reply's,
+        in the library of the model shown then. The row is on only with its bands, a library
+        read and none of its presets playing (_show_rows). Bands a preset of the file has
+        already as the save reads it are refused (eq_presets.ALREADY_SAVED)."""
+        rows, model = self.rows[instance], cast("M", self.model)
+        bands = cast("B", rows.kept)
+        ask_name(row, rows.shown(),
                  lambda name: self._act(
                      lambda saved: self._shelf.added(saved, name, instance, bands),
                      NOT_SAVED_NEW, model),
@@ -400,7 +445,6 @@ class LibraryCard[M: Keyed, L: Shelved, B]:
             self._toast(refusal)
             return
         shown = self._name(number)
-        self._texts.took(row)
         self._act(lambda saved: saved.named(eq_presets.number_among(
             self._shelf.of(saved, instance), number, shown), name), NOT_RENAMED,
             cast("M", self.model))
@@ -423,17 +467,18 @@ class LibraryCard[M: Keyed, L: Shelved, B]:
         which a dialog's answer can follow after the page shows another or none, since the
         polls go on while a dialog is open."""
         self.busy = True
-        for instance in self._holders:
+        for instance in self.rows:
             self._show_rows(instance)
         self._worker.run(partial(self._shelf.edit, change, model),
                          lambda result: self._acted(model, result, failed))
 
     def _acted(self, model: M, result: Result, failed: str) -> None:
         self.busy = False
-        # Said whichever model shows when it lands, and for a file that does not read:
-        # _landed takes only the one shown's, and holds that refusal for the page's group
-        # (said), which a read's says without a toast.
-        if isinstance(result, Exception) and (not self._shows(model) or isinstance(
-                result, eq_presets.LibraryUnread)):
-            self._say_failure(model, result, failed)
+        if isinstance(result, Exception):
+            self._kept_up()
+            # Said whichever model shows when it lands, and for a file that does not read:
+            # _landed takes only the one shown's, and holds that refusal for the page's group
+            # (said), which a read's says without a toast.
+            if not self._shows(model) or isinstance(result, eq_presets.LibraryUnread):
+                say_library_failure(self._toast, self._shelf.path(model), result, failed)
         self._landed(model, result, failed)

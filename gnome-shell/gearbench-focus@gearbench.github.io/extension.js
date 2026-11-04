@@ -62,15 +62,15 @@ export default class GearbenchFocus extends Extension {
     }
 
     disable() {
-        // GNOME Shell 50.1 (extensionSystem.js _callExtensionDisable) disables and
-        // re-enables every extension enabled after the one it disables, leaving
-        // their state ACTIVE; disabling this one sets DEACTIVATING first. A rebase
-        // sends no Stopped: the enable right after sends Ready and the daemon
-        // subscribes again. Its subscribers still get the Stopped of a disable
-        // that comes before they subscribe again; the Shell keeps this object
-        // from load to unload (_callExtensionInit). From the Shell's source, not
-        // yet seen in a session.
-        const rebase = Main.extensionManager.lookup(this.uuid)?.state === ExtensionState.ACTIVE;
+        // GNOME Shell 50.1 (extensionSystem.js _callExtensionDisable) and 51.1
+        // (_callExtensionDisableWithRebase) disable and re-enable every extension
+        // enabled after the one they disable, leaving their state ACTIVE;
+        // disabling this one sets DEACTIVATING first. A rebase sends no Stopped:
+        // the enable right after sends Ready and the daemon subscribes again. Its
+        // subscribers still get the Stopped of a disable that comes before they
+        // subscribe again; the Shell keeps this object from load to unload
+        // (_callExtensionInit). From the Shell's source, not yet seen in a session.
+        const rebase = Main.extensionManager.lookup(this.uuid).state === ExtensionState.ACTIVE;
         const names = new Set([...this._rebased ?? [], ...this._subscribers.keys()]);
         this._rebased = rebase ? names : null;
         global.display.disconnect(this._handler);
@@ -82,19 +82,23 @@ export default class GearbenchFocus extends Extension {
                 Gio.bus_unwatch_name(watch);
             this._subscribers = null;
             this._exported.unexport();
-            this._exported = null;
         }
     }
 
     SubscribeAsync(_params, invocation) {
         const sender = invocation.get_sender();
-        Gio.DBus.session.call('org.freedesktop.DBus', '/org/freedesktop/DBus',
+        Gio.DBus.session.call_with_unix_fd_list('org.freedesktop.DBus', '/org/freedesktop/DBus',
             'org.freedesktop.DBus', 'GetConnectionCredentials',
             new GLib.Variant('(s)', [sender]), new GLib.VariantType('(a{sv})'),
-            Gio.DBusCallFlags.NONE, -1, null, (bus, result) => {
+            Gio.DBusCallFlags.NONE, -1, null, null, (bus, result) => {
                 let caller = {};
                 try {
-                    [caller] = bus.call_finish(result).recursiveUnpack();
+                    const [reply, fds] = bus.call_with_unix_fd_list_finish(result);
+                    // The reply carries the caller's pidfd (ProcessFD), which the
+                    // call's result would hold open until the next garbage collection.
+                    for (const fd of fds?.steal_fds() ?? [])
+                        GLib.close(fd);
+                    [caller] = reply.recursiveUnpack();
                 } catch {
                     // Gone before its credentials were read.
                 }
@@ -116,7 +120,7 @@ export default class GearbenchFocus extends Extension {
         const watch = Gio.bus_watch_name_on_connection(Gio.DBus.session, name,
             Gio.BusNameWatcherFlags.NONE, null, () => {
                 Gio.bus_unwatch_name(watch);
-                this._subscribers?.delete(name);
+                this._subscribers.delete(name);
             });
         this._subscribers.set(name, watch);
     }

@@ -9,8 +9,9 @@ the ones Solaar's issue 2313 logged off a G502 SE HERO.
 
 The PRO WIRELESS's firmware stores a zone effect to flash unless fn 8 `01` came first, and
 clears that byte at a power-state change (its image, read 2026-10-18). On such a model
-(`claim_each_effect`) every effect write goes right after a claim; the G502 HERO, cabled, is
-claimed once, before its first write after a setup or a release.
+(`claim_each_effect`) every effect write goes right after a claim, a resend after a timeout
+included; a resend after a BUSY, 30 to 90 ms after the device answered, goes without one. The
+G502 HERO, cabled, is claimed once, before its first write after a setup or a release.
 """
 
 from __future__ import annotations
@@ -18,7 +19,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Self
 
-from .hidpp import REQUEST_RETRIES, REQUEST_TIMEOUT, Hidpp
+from .hidpp import (
+    REQUEST_RETRIES,
+    REQUEST_TIMEOUT,
+    Hidpp,
+    HidppTimeout,
+    no_reply,
+    request_name,
+)
 from .lighting import (
     CLUSTERS_MAX,
     EFFECTS_MAX,
@@ -38,7 +46,7 @@ F_COLOR_LED = 0x8070
 # period BE16]; fn 3 [zone, effect, 10 parameter bytes, persistence]; fn 8 [control], 1 the
 # host's, 0 the device's (Solaar's "LED Control", OpenRGB's SET_SW_CTL). fn 4 [setting BE16]
 # reads a setting of the feature's non-volatile configuration and fn 5 [setting BE16, value]
-# writes it, as G HUB reads and writes a G933's startup effect (the Windows captures of
+# writes it, as G HUB reads and writes a G933's startup effect (on Windows,
 # 2026-10-25); neither goes to a mouse, since the PRO WIRELESS's image stores a default at fn 4
 # where it holds none.
 GET_INFO, GET_ZONE_INFO, GET_EFFECT_INFO, SET_EFFECT, SET_CONTROL = 0, 1, 2, 3, 8
@@ -53,7 +61,7 @@ HOST_CONTROL, DEVICE_CONTROL = 0x01, 0x00
 # 15.02.26 never reads it either: whether it stores an effect goes by fn 8.
 RAM_ONLY = 0x00
 #: fn 3's last byte for an effect the device keeps, as G HUB's "effects on device" writes a
-#: G933's (the Windows captures of 2026-10-25); sent to a headset alone (headset_lights).
+#: G933's (on Windows, 2026-10-25); sent to a headset alone (headset_lights).
 STORED = 0x02
 
 
@@ -114,12 +122,25 @@ class ZoneLighting:
 
     def set_effect(self, zone: int, effect: str | int, *, wait: bool = True,
                    **params: int) -> None:
-        """Write one zone's effect, RAM_ONLY, waiting for its reply unless `wait` is False,
-        after its claim, waited for, on a model that claims each effect (_claim_for_effect).
-        `zone` is its index, which is its place in `clusters`."""
+        """Write one zone's effect, RAM_ONLY, waiting for its reply unless `wait` is False.
+        On a model that claims each effect (claim_each_effect) each copy goes right after a
+        claim, waited for: an unanswered write is sent again with its claim, REQUEST_RETRIES
+        times, since a power-state change in the wait clears the claim. A claim refused or
+        unanswered raises, and its effect is not sent. `zone` is its index, which is its
+        place in `clusters`."""
         payload = self._payload(zone, effect, params)
-        self._claim_for_effect()
-        self.dev.request(self._index, SET_EFFECT, payload, long=True, reply=wait)
+        if not self.claim_each_effect:
+            self.dev.request(self._index, SET_EFFECT, payload, long=True, reply=wait)
+            return
+        for _attempt in range(REQUEST_RETRIES + 1):
+            self.dev.request(self._index, SET_CONTROL, self.CLAIM)
+            try:
+                self.dev.request(self._index, SET_EFFECT, payload, long=True, reply=wait,
+                                 retries=0)
+                return
+            except HidppTimeout:
+                continue
+        raise no_reply(request_name(self._index, SET_EFFECT), REQUEST_RETRIES)
 
     def send_effect(self, zone: int, effect: str | int, **params: int) -> tuple[int, int, int]:
         """One zone's effect sent without waiting, for a mouse that may be asleep: the key of
@@ -127,13 +148,6 @@ class ZoneLighting:
         is answered before its effect goes (MouseLighting.send_or_write)."""
         return self.dev.send(self._index, SET_EFFECT, self._payload(zone, effect, params),
                              long=True)
-
-    def _claim_for_effect(self) -> None:
-        """The claim right before an effect write on a model that claims each effect
-        (claim_each_effect), waited for; nothing on another. A claim refused or unanswered
-        raises, and its effect is not sent."""
-        if self.claim_each_effect:
-            self.dev.request(self._index, SET_CONTROL, self.CLAIM)
 
     def _payload(self, zone: int, effect: str | int, params: Mapping[str, int],
                  persistence: int = RAM_ONLY) -> bytes:

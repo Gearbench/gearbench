@@ -26,10 +26,14 @@
 # The grant also crosses accounts. The ACL is checked only when the node is
 # opened, and an open fd is not taken back when another account gets the
 # seat. So a process of an account that was once active can keep a virtual
-# keyboard after a user switch, and after a logout too while logind's
-# KillUserProcesses is off, as it is on Ubuntu, and type into a later
-# account's session, a terminal or a sudo prompt included. The stock
-# root-only node allows none of this. On a machine several people use, the
+# keyboard after a user switch, and after a logout that leaves its
+# processes running, and type into a later account's session, a terminal or
+# a sudo prompt included. logind's KillUserProcesses, off on Ubuntu, ends at
+# a logout only the processes in that session's scope. The account's user
+# services keep running while lingering or another session of the account
+# keeps its user manager, and systemd lets an account turn lingering on for
+# itself (loginctl enable-linger). The stock root-only node allows none of
+# this. On a machine several people use, the
 # group grant above is the alternative: GROUP="<group>", MODE="0660" in place
 # of the tag, with only the owner's account in the group, in a copy of this
 # file in /etc/udev/rules.d/. That copy overrides this file by name, and a
@@ -55,7 +59,7 @@
 #   sudo udevadm control --reload
 #   sudo udevadm trigger --subsystem-match=misc --sysname-match=uinput --action=add
 #
-# install.sh puts this in /usr/local/lib/udev/rules.d/; the .deb puts it in
+# install.sh puts this in /usr/local/lib/udev/rules.d/; the package puts it in
 # /usr/lib/udev/rules.d/. Numbered below 73-seat-late.rules, which turns the
 # uaccess tag into the ACL.
 KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

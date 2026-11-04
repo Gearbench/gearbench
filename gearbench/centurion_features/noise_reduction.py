@@ -14,8 +14,10 @@ from .setting import SWITCH, Setting
 ID = 0x0602
 WORDS = "noise suppression"
 READ, WRITE = 0, 1
+#: Its key, the socket's word for it.
+KEY = "noise_reduction"
 
 
 def setting() -> Setting:
-    return Setting("noise_reduction", WORDS, ID, read=READ, at=0, write=WRITE,
+    return Setting(KEY, WORDS, ID, read=READ, at=0, write=WRITE,
                    before=b"", wire=(0x00, 0x01), names=SWITCH)

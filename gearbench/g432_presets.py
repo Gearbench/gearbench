@@ -15,7 +15,7 @@ from typing import cast
 
 from . import eq_presets, settings_files, wording
 from .eq_presets import EVERYDAY, GAMING, MEDIA, PRESETS_FULL, PRESETS_MAX, preset_name
-from .g432 import BAND_FREQS, G432_MODEL, HeadsetModel
+from .g432 import BAND_FREQS, HeadsetModel
 
 #: G HUB's slider of a band (g432.BAND_FREQS), in whole dB.
 DB_RANGE = (-12, 12)
@@ -162,7 +162,8 @@ class Presets:
 
     def saved_as(self, name: str) -> Presets:
         """These presets with the active one's gains saved as a new preset, `name`, after
-        the last, which becomes the active one; ValueError at PRESETS_MAX."""
+        the last, which becomes the active one; ValueError at PRESETS_MAX, or for a name
+        preset_name refuses."""
         if len(self.presets) >= PRESETS_MAX:
             raise ValueError(PRESETS_FULL)
         return Presets(len(self.presets) + 1,
@@ -176,9 +177,7 @@ def checked(gains: Gains) -> Gains:
         raise ValueError(f"the equalizer has {len(BAND_FREQS)} bands, not {len(gains.bands)}")
     names = ("bass", *(wording.hertz(freq) for freq in BAND_FREQS), "treble")
     for name, gain in zip(names, gains.all(), strict=True):
-        if not wording.whole(gain) or not low <= gain <= high:
-            raise ValueError(f"the {name} gain is a whole number of dB from {low} to "
-                             f"{high}, not {wording.written(gain)}")
+        wording.whole_in(gain, low, high, f"the {name} gain", " of dB")
     return gains
 
 
@@ -188,7 +187,7 @@ def presets_file_name(model: HeadsetModel) -> str:
     return eq_presets.LIBRARY_NAME.format(model.key)
 
 
-def gains_path(*, model: HeadsetModel = G432_MODEL) -> Path:
+def gains_path(*, model: HeadsetModel) -> Path:
     return settings_files.config_dir() / presets_file_name(model)
 
 
@@ -208,11 +207,14 @@ def _gains_of(data: dict) -> Gains:
 
 
 def _preset_of(entry: object, default: Preset) -> Preset:
-    """A saved preset: `default` for one that is not an object, its name for a name
-    eq_presets.is_name refuses."""
+    """A saved preset: `default` for one that is not an object, `default`'s name for a name
+    preset_name refuses."""
     if not isinstance(entry, dict):
         return default
-    name = entry["name"] if eq_presets.is_name(entry.get("name")) else default.name
+    try:
+        name = preset_name(entry.get("name"))
+    except ValueError:
+        name = default.name
     return Preset(name, _gains_of(entry))
 
 
@@ -250,7 +252,7 @@ def presets_of(data: object, path: Path) -> Presets:
                    if left_out else "")
 
 
-def load_presets(*, model: HeadsetModel = G432_MODEL) -> Presets:
+def load_presets(*, model: HeadsetModel) -> Presets:
     """The saved presets, the defaults with no file. A file that does not read, or a link to
     nothing, the file's or a folder's above it, gives the defaults, and one read in part the
     presets it held that read, each refusing a change (Presets.refused)."""
@@ -260,12 +262,12 @@ def load_presets(*, model: HeadsetModel = G432_MODEL) -> Presets:
         return Presets(refused=str(exc))
 
 
-def load_gains(*, model: HeadsetModel = G432_MODEL) -> Gains:
+def load_gains(*, model: HeadsetModel) -> Gains:
     """The active preset's gains, which the chain plays."""
     return load_presets(model=model).current.gains
 
 
-def save_presets(presets: Presets, *, model: HeadsetModel = G432_MODEL) -> None:
+def save_presets(presets: Presets, *, model: HeadsetModel) -> None:
     """The presets to the model's presets file, atomically, each checked first. A version 1
     file's bytes go to the backups first (settings_files.keep_old_version), once."""
     if not len(SHIPPED) <= len(presets.presets) <= PRESETS_MAX:
@@ -285,10 +287,10 @@ def save_presets(presets: Presets, *, model: HeadsetModel = G432_MODEL) -> None:
                      f".{target.stem}-")
 
 
-def edit(change: Callable[[Presets], Presets], *, model: HeadsetModel = G432_MODEL) -> Presets:
+def edit(change: Callable[[Presets], Presets], *, model: HeadsetModel) -> Presets:
     """Save what `change` makes of the saved presets, and set nothing on the chain: for a
     name, or gains that apply at the next start. The presets saved. PresetsRefused for a
-    file that does not read or was read in part (Presets.whole), left as it is."""
-    presets = change(load_presets(model=model).whole())
-    save_presets(presets, model=model)
-    return presets
+    file that does not read or was read in part (Presets.whole), left as it is. The load and
+    the save run under eq_presets.held."""
+    return eq_presets.edit(gains_path(model=model), lambda: load_presets(model=model), change,
+                           lambda presets: save_presets(presets, model=model))

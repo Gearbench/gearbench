@@ -7,7 +7,7 @@ Exec=gearbench-ctl gui
 Icon=io.github.gearbench.Gearbench
 Terminal=false
 Categories=Settings;HardwareSettings;
-Keywords=logitech;g915;g502;g305;keyboard;mouse;rgb;lighting;macro;gkey;dpi;astro;a50;headset;equalizer;microphone;
+Keywords=logitech;g915;g515;g502;g305;keyboard;mouse;rgb;lighting;macro;gkey;dpi;astro;a50;g432;g933;headset;equalizer;microphone;sidetone;
 # A new id leaves a checkout install's files and dock pin under the old one
 # unless install.sh moves them, as it does for the id before 1.1.0.
 # Must match the GTK application_id so the compositor associates the window

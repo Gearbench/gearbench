@@ -12,14 +12,14 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ...evdev import EV_KEY, EventReader, find_event_nodes, group_denied
+from ...evdev import EventReader, find_event_nodes, group_denied
 from ...hidpp import VENDOR_ID as MOUSE_VENDOR, DeviceGone
 from ...mouse import BUTTON_CODES
 from ...spy import decode_mask, edges, tilt as spy_tilt
-from ...uinput import EV_REL, UinputError
+from ...uinput import EV_KEY, EV_REL, UinputError
 from ...wording import reason
-from ..shared import said_once
-from .attached import MOUSE_RETRY, AttachedMouse
+from ..shared import MOUSE_RETRY, said_once
+from .attached import AttachedMouse
 
 if TYPE_CHECKING:
     from .. import Daemon
@@ -214,17 +214,24 @@ class Buttons:
         """Close one mouse's evdev nodes, and let go of what its buttons started; answers the
         DPI under a held shift (drop_spy_state)."""
         held = self.drop_spy_state(found)
+        self.close_readers(found)
+        return held
+
+    def close_readers(self, found: AttachedMouse) -> None:
+        """Close one mouse's evdev nodes; what its buttons hold stays."""
         for reader in found.input:
             self.d.selector.unregister(reader.fileno)
             reader.close()
         found.input = []
-        return held
 
     def pump_mouse_input(self, reader: EventReader, source: AttachedMouse) -> None:
         """Turn what one mouse evdev node has buffered into button actions for `source`.
 
-        A read error closes all of the mouse's nodes, since they are one device. The DPI under a
-        held shift stays owed, as at a link going down: no setup follows to write it.
+        A read error closes all of the mouse's nodes, since they are one device. On a mouse the
+        daemon runs in HOST mode with its spy armed, G4 to G9 come in the spy's masks, which go
+        on, so what the buttons hold stays for those masks' releases. Otherwise a release on the
+        node may be lost, so what they hold is let go of, and the DPI under a held shift stays
+        owed, as at a link going down: no setup follows to write it.
         """
         try:
             events = reader.read()
@@ -232,7 +239,10 @@ class Buttons:
             what = "went away" if isinstance(exc, DeviceGone) else f"failed ({reason(exc)})"
             log.info("%s's event node %s %s; will look for it again", source.name, reader.path,
                      what)
-            source.dpi_before_shift = self.close_mouse_input(source)
+            if self.mice.runs_host(source) and source.armed:
+                self.close_readers(source)
+            else:
+                source.dpi_before_shift = self.close_mouse_input(source)
             return
         # In HOST mode a key code no mouse button sends is a keyboard's on the receiver
         # (saw_keystroke): it says nothing of whether the mouse is on.

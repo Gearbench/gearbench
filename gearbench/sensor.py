@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .hidpp import REQUEST_RETRIES, REQUEST_TIMEOUT, Feature, Hidpp
-from .onboard import DPI_OUTSIDE, DPI_STAGES, dpi_fits, stage_dpi
+from .onboard import DPI_HIGHEST, DPI_LOWEST, DPI_STAGES, dpi_fits, stage_dpi, stage_position
 
 F_DPI = 0x2201               # ADJUSTABLE_DPI
 F_EXTENDED_DPI = 0x2202      # EXTENDED_ADJUSTABLE_DPI
@@ -51,6 +51,10 @@ PAGE_START, PAGE_END = 3, 16
 #: 0x8061's rates in Hz, by bit: 8 ms, 4, 2 and 1 ms, then 500, 250 and 125 µs (Solaar's
 #: ExtendedReportRate; issue 2904's log set bit 6 and read 125 µs back).
 EXTENDED_RATES = (125, 250, 500, 1000, 2000, 4000, 8000)
+#: A DPI a stage slot cannot hold, where no sensor range refuses it first: the DPI, then the
+#: mouse's name.
+DPI_NOT_TAKEN = (f"DPI {{}} is outside what the {{}} takes: a DPI is {DPI_LOWEST} to "
+                 f"{DPI_HIGHEST}")
 
 
 class MouseError(RuntimeError):
@@ -60,7 +64,7 @@ class MouseError(RuntimeError):
 @dataclass(frozen=True)
 class DpiRange:
     """The DPI a sensor takes: `minimum` to `maximum` in steps of `step`, or, where `bands`
-    holds any, each band in its own step, as 0x2202's list gives them."""
+    holds any, each band in its own step, as either feature's list gives them."""
 
     minimum: int
     maximum: int
@@ -105,15 +109,15 @@ def range_words(shown: tuple[int, int, list[int]]) -> str:
 
 
 def stage_index(stages: list[int], wanted: int | None, previous: int | None,
-                previous_index: int, what: str) -> int:
+                previous_index: int, what: str, name: str) -> int:
     """Which stage the default or the shift lands on. A `wanted` that is not a stage raises,
-    since picking another would hide the mistake. `None`, which the window sends when it
-    edits the stage in this slot, keeps the previous value if it is still a stage, else its
-    position, clamped to the list."""
+    naming the mouse, `name`, since picking another would hide the mistake. `None`, which the
+    window sends when it edits the stage in this slot, keeps the previous value if it is
+    still a stage, else its position, clamped to the list."""
     if wanted is not None:
         if wanted not in stages:
             among = "the one stage" if len(stages) == 1 else "one of the stages"
-            raise MouseError(f"{what} DPI {wanted} is not {among}, "
+            raise MouseError(f"the {name}'s {what} DPI {wanted} is not {among}, "
                              f"{', '.join(map(str, stages))}")
         return stages.index(wanted)
     if previous in stages:
@@ -123,42 +127,42 @@ def stage_index(stages: list[int], wanted: int | None, previous: int | None,
 
 def place_stages(stages: list[int], default: int | None, shift: int | None,
                  old: list[int], old_default: int, old_shift: int,
-                 dpi_range: DpiRange | None) -> tuple[list[int], int, int]:
+                 dpi_range: DpiRange | None, name: str) -> tuple[list[int], int, int]:
     """A new stage list, snapped to the sensor's step and put lowest first, and the indices its
     default and shift land on, for profile 1 and a game profile alike. `default` and `shift`
     are DPI values, or None to keep the old one's DPI if it is still a stage, else its index in
     `stages` as entered, clamped (stage_index); `old_default` and `old_shift` index `old`, an
-    index past its end taken as its last stage, as stage_dpi shows it (the owner's decision of
+    index past its end taken as its last stage (stage_position, the owner's decision of
     2026-10-11). A value outside the sensor's range raises MouseError: clamped, a typing slip
-    would be written to flash as the range's end."""
+    would be written to flash as the range's end. Each refusal names the mouse, `name`."""
 
     def snap[V: int | None](value: V) -> V | int:
         if not dpi_range or value is None:
             return value
         if not dpi_range.minimum <= value <= dpi_range.maximum:
-            raise MouseError(f"DPI {value} is outside the sensor's range, "
+            raise MouseError(f"DPI {value} is outside the {name}'s range, "
                              f"{dpi_range.minimum} to {dpi_range.maximum}")
         return dpi_range.clamp(value)
 
     snapped = [snap(s) for s in stages]
     default, shift = snap(default), snap(shift)
     if not 1 <= len(snapped) <= DPI_STAGES:
-        raise MouseError(f"1 to {DPI_STAGES} DPI stages, not {len(snapped)}")
+        raise MouseError(f"the {name} holds 1 to {DPI_STAGES} DPI stages, not {len(snapped)}")
     for value in snapped:
         if not dpi_fits(value):
-            raise MouseError(DPI_OUTSIDE.format(value))
+            raise MouseError(DPI_NOT_TAKEN.format(value, name))
     if len(set(snapped)) != len(snapped):
         typed_twice = len(set(stages)) != len(stages)
         listed = ", ".join(map(str, stages if typed_twice else snapped))
-        raise MouseError(f"DPI stages must be distinct; got {listed}"
+        raise MouseError(f"each of the {name}'s DPI stages is a different DPI, not {listed}"
                          f"{'' if typed_twice else ' after snapping'}")
     if old:
         # A byte naming an unused slot past the stages: the stage it is shown as keeps its
         # place, where the raw index would land on a stage the user never chose.
-        old_default, old_shift = min(old_default, len(old) - 1), min(old_shift, len(old) - 1)
+        old_default, old_shift = stage_position(old, old_default), stage_position(old, old_shift)
     was_default, was_shift = stage_dpi(old, old_default), stage_dpi(old, old_shift)
-    at_default = stage_index(snapped, default, was_default, old_default, "default")
-    at_shift = stage_index(snapped, shift, was_shift, old_shift, "shift")
+    at_default = stage_index(snapped, default, was_default, old_default, "default", name)
+    at_shift = stage_index(snapped, shift, was_shift, old_shift, "shift", name)
     # Lowest first, since DPI up and down move by position (next_stage): the window sends a
     # stage added last. The default and the shift keep their DPI, not their place (the owner's
     # decision of 2026-10-25).
@@ -182,15 +186,9 @@ def next_stage(landed: list[int], current: int, direction: int, wrap: bool) -> i
 
 
 def dpi_range(reply: bytes) -> DpiRange | None:
-    """Decode 0x2201's getSensorDpiList reply: 16-bit values after the sensor index, where one
-    with the top bits 0xe000 is a range marker carrying the step, between the minimum and the
-    maximum; None for a list with no usable value."""
-    values = [int.from_bytes(reply[i:i + 2], "big") for i in range(1, 15, 2)]
-    for i, value in enumerate(values):
-        if value & RANGE_MARKER == RANGE_MARKER and i and i + 1 < len(values):
-            return DpiRange(values[i - 1], values[i + 1], value & 0x1FFF)
-    usable = [v for v in values if v and v & RANGE_MARKER != RANGE_MARKER]
-    return DpiRange(min(usable), max(usable), 1) if usable else None
+    """Decode 0x2201's getSensorDpiList reply: the sensor index, then the list in the form
+    0x2202's holds (banded_range), up to its 0x0000 end; None for a list with no value."""
+    return banded_range(reply[1:])
 
 
 def banded_range(listing: bytes) -> DpiRange | None:

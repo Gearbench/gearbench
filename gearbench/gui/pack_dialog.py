@@ -1,10 +1,9 @@
 """The profiles and macros pack: the game lighting profiles and macros that ship with
 Gearbench, as a checklist with every one ticked, then a review page that writes nothing
 before Import. The checklist's filter, buttons and count, what its check boxes do, and
-the review page are the G HUB import's (`import_dialog.Importer`). Opened from the Game
-profiles dialog's Import pack… button. Load for starts ticked, since the pack chose each
-profile's programs for its game (the owner's decision of 2026-09-28). A name already
-taken defaults to Keep mine.
+the review page are the G HUB import's (`import_dialog.Importer`). Load for starts
+ticked, since the pack chose each profile's programs for its game (the owner's decision
+of 2026-09-28). A name already taken defaults to Keep mine.
 """
 
 from __future__ import annotations
@@ -57,8 +56,8 @@ class PackDialog(Importer):
 
     CLASHES: ClassVar[dict[str, str]] = {import_plan.SKIP: KEEP_MINE,
                                          import_plan.REPLACE: "Use the pack's"}
-    CLASH_HELP = ("Use the pack's replaces your lighting and mouse color, or your macro, and keeps "
-                  "your bindings.")
+    CLASH_HELP = ("Use the pack's: its lighting, mouse color and programs (while Load for is "
+                  "ticked), or its macro, replace yours; your bindings stay")
 
     def __init__(self, window: Window, found: pack.Pack, existing: import_plan.Existing) -> None:
         super().__init__(window, existing, TITLE)
@@ -83,7 +82,8 @@ class PackDialog(Importer):
                 listbox.append(self._row(kind, item))
             group = Adw.PreferencesGroup(title=GROUPS[kind])
             if kind == pack.MACRO and items:
-                group.set_description(pack.MACRO_RISK)
+                # A group's description ends with no period; the CLI prints the sentence.
+                group.set_description(pack.MACRO_RISK.removesuffix("."))
             group.add(listbox)
             body.append(group)
         if self.pack.broken:

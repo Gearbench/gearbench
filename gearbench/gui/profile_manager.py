@@ -12,14 +12,17 @@ from typing import TYPE_CHECKING
 
 from gi.repository import Adw, Gtk
 
-from ..apps import launcher_warning, runs_in, wanted_forms
-from ..config import format_color, layer_color
+from ..apps import MAX_PROGRAM_BYTES, launcher_warning, program_bytes, runs_in, wanted_forms
+from ..config import format_color, layer_color, refuse_controls
 from ..keyboard import shown_lighting
 from ..library_files import unread_reason
-from ..profiles import GameProfile
-from ..wording import GAME_PROFILE_NEEDS_A_NAME, LEFT_OUT, capitalized, word_list
+from ..lighting import OFF
+from ..profiles import MAX_PROCESSES, GameProfile
+from ..settings_files import ConfigError
+from ..wording import GAME_PROFILE_NEEDS_A_NAME, LEFT_OUT, capitalized, quoted, word_list
 from . import pack_dialog
 from .color import ColorPicker, SavedColors
+from .dialogs import unlisted
 from .import_dialog import FILTER_HINT, NO_MATCH, Picker, search_text
 from .style import (
     DELETE_HEADING,
@@ -29,15 +32,19 @@ from .style import (
     LIST_DIALOG_WIDTH,
     EntryTexts,
     LeftOutRows,
+    ask_name,
+    blank,
     confirm,
     holds_focus,
+    in_place,
     name_button,
     plain_row,
     say_in_place,
     say_not_shown,
+    watch_refused,
     weakly,
 )
-from .worker import DaemonWorker, Reply, unreachable
+from .worker import DaemonWorker, Reply
 
 if TYPE_CHECKING:                       # pragma: no cover
     from .lighting_state import ShownOn
@@ -52,8 +59,21 @@ NONE_YET_HINT = ("Save one from the Keyboard tab with Save as…, or import the 
 IMPORT_PACK = "Import pack…"
 IMPORT_PACK_HINT = "Game profiles and macros that come with Gearbench"
 PICK_TITLE = "Add a running program"
+#: The row that asks a program's name to add, its ellipsis for the dialog it opens (the HIG's
+#: writing style); the dialog's heading, by the profile's name, its entry's name for a screen
+#: reader, and the body while the entry is blank.
+ADD_BY_NAME = "Add by name…"
+ADD_BY_NAME_HEADING = "Add a program to {}"
+PROGRAM_NAME = "Program name"
+TYPE_A_PROGRAM = "Type a program name"
+#: What else Add by name refuses before the daemon would (profiles.check_programs).
+PROGRAM_TOO_LONG = f"A program name is {MAX_PROGRAM_BYTES} bytes at most"
+PROGRAM_CONTROL = "A program name cannot hold a tab, a line break or another control character"
+PROGRAMS_FULL = "{} auto-loads for " + f"{MAX_PROCESSES} programs at most; remove one first"
 LOOKING = "Looking at what is running…"
-PICKER_HINT = "A game from a launcher such as Steam is listed by its own name."
+#: The picker's heading for a list the daemon did not give.
+NOT_LISTED = "Could not list what is running"
+PICKER_HINT = "A game from a launcher such as Steam is listed by its own name"
 MOUSE_COLOR = "Mouse color"
 #: The Mouse color row's line while the profile has none of its own: a synced mouse shows the
 #: keyboard's color around its painted keys (the owner's decision of 2026-10-23).
@@ -74,7 +94,7 @@ def keyboard_color(profile: GameProfile, shown_on: ShownOn) -> int:
     effects = shown_on.effects if known else None
     light, own = shown_lighting(profile.lighting, leader, leader, effects,
                                 shown_on.per_key if known else None)
-    if light.effect == "disabled":
+    if light.effect == OFF:
         return 0x000000
     # Its own entry is not cut: the daemon shows an effect it does not report static all the
     # same (Paint.shows_static).
@@ -94,6 +114,29 @@ def still_matching(processes: list[str], program: str) -> list[str]:
     refuses only equal forms, and `profile-programs` or a hand edit none."""
     forms = wanted_forms(program)
     return [p for p in processes if p != program and not forms.isdisjoint(wanted_forms(p))]
+
+
+def program_refusal(profile: GameProfile, program: str) -> str | None:
+    """Why `program`, stripped, is not added to `profile`, in words: blank, a spelling that
+    matches the same running names as one the profile has, or what the daemon refuses
+    (profiles.check_programs): a name longer than a file name or holding a control character,
+    or one past the most a profile loads for; None for one that is added."""
+    if not program:
+        return TYPE_A_PROGRAM
+    if program_bytes(program) > MAX_PROGRAM_BYTES:
+        return PROGRAM_TOO_LONG
+    try:
+        refuse_controls(program, PROGRAM_NAME)
+    except ConfigError:
+        return PROGRAM_CONTROL
+    # Matching ignores case and ".exe", so a spelling that matches the same running names as
+    # one already there adds nothing. Equal forms, not any shared one: two long names sharing
+    # their 15-byte cut are two programs.
+    there = next((p for p in profile.processes if wanted_forms(p) == wanted_forms(program)),
+                 None)
+    if there is not None:
+        return f"{profile.name} already auto-loads for {there}"
+    return PROGRAMS_FULL.format(profile.name) if len(profile.processes) >= MAX_PROCESSES else None
 
 
 def matches_too(others: list[str]) -> str:
@@ -130,13 +173,11 @@ class ProfileManager:
         search_group = Adw.PreferencesGroup()
         search_group.add(self.search)
         self.group = Adw.PreferencesGroup(description=DESCRIPTION)
-        # Dimmed, as no_match: a state, not a profile of that name. A preferences group has
-        # no placeholder of its own.
-        self.none_row = Adw.ActionRow(title=NONE_YET, subtitle=NONE_YET_HINT,
-                                      css_classes=["dimmed"], visible=False)
-        self.group.add(self.none_row)
-        self.no_match = Adw.ActionRow(title=NO_MATCH, css_classes=["dimmed"], visible=False)
-        self.group.add(self.no_match)
+        # A list of its own: a preferences group has no placeholder, and a state drawn as a
+        # row reads as a profile of that name (_filter).
+        self.profile_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE,
+                                        css_classes=["boxed-list"])
+        self.group.add(self.profile_list)
         self.unreadable_group = Adw.PreferencesGroup(title=LEFT_OUT, visible=False)
         # The group's title says Left out.
         self.unreadable = LeftOutRows(self.unreadable_group, unread_reason)
@@ -189,35 +230,33 @@ class ProfileManager:
         names = [p.name for p in library]
         if names != list(self.rows):
             for name, row in self.rows.items():
-                self.group.remove(row.expander)
+                self.profile_list.remove(row.expander)
                 if name not in names:
                     row.drop_mouse_color()
             self.rows = {profile.name: self.rows.get(profile.name) or ProfileRow(self, profile)
                          for profile in library}
             for row in self.rows.values():
-                self.group.add(row.expander)
-        self.none_row.set_visible(not library)
+                self.profile_list.append(row.expander)
         loaded = self.win.game_profile(self.win.overlay)
         for profile in library:
             self.rows[profile.name].show(profile.processes, profile is loaded)
             self.rows[profile.name].show_mouse_color(profile)
         self._filter()
-        self._show_unreadable(self.win.skipped_profiles)
+        skipped = self.win.skipped_profiles
+        self.unreadable.show(skipped)
+        self.unreadable_group.set_visible(bool(skipped))
 
     def _filter(self) -> None:
-        """Show the rows the filter matches. On each refresh too, which
+        """Show the rows the filter matches, and the placeholder the list shows while it
+        shows none: no profile, or none the filter matches. On each refresh too, which
         reads what is typed and changes none of it."""
         picker = Picker(self.win.library, search_text)
         picker.query = self.search.get_text().strip()
         shown = set(picker.visible())
         for name, row in self.rows.items():
             row.expander.set_visible(name in shown)
-        self.no_match.set_visible(bool(self.rows) and not shown)
-
-    def _show_unreadable(self, skipped: list[tuple[str, str]]) -> None:
-        """A dimmed row per profile file left out, as on the tab."""
-        self.unreadable.show(skipped)
-        self.unreadable_group.set_visible(bool(skipped))
+        self.profile_list.set_placeholder(in_place(NO_MATCH) if self.rows
+                                          else in_place(NONE_YET, NONE_YET_HINT))
 
     def expand(self, name: str) -> None:
         """Open the row of the profile `name` finds, by slug as the daemon does."""
@@ -249,36 +288,43 @@ class ProfileManager:
         read again, since the list on screen is out of date."""
         profile = self.win.game_profile(name)
         if profile is None:
-            self.win.toast(f"No game profile named {name}")
+            self.win.toast(f"No game profile named {quoted(name)}")
             self.win.resync()
         return profile
 
-    def add_program(self, name: str, program: str,
-                    then: Callable[[], None] | None = None) -> None:
-        """Add `program` to the profile `name`, asking first when it is a
-        launcher. `then` runs as it is sent."""
-        program = program.strip()
-        if not program:
-            self.win.toast("Type a program name")
-            return
+    def ask_program(self, name: str) -> None:
+        """Ask for a program's name to add to the profile `name` (add_program). Add waits for
+        one program_refusal takes: while it refuses one, its sentence is the body and the
+        entry is red, as in the preset name dialog: both are style.ask_name."""
         profile = self._profile(name)
         if profile is None:
             return
-        # Matching ignores case and ".exe", so a spelling that matches the same running names as
-        # one already there adds nothing. Equal forms, not any shared one: two long names sharing
-        # their 15-byte cut are two programs.
-        there = next((p for p in profile.processes
-                      if wanted_forms(p) == wanted_forms(program)), None)
-        if there is not None:
-            self.win.toast(f"{profile.name} already auto-loads for {there}")
+        # The profile's name at the answer, as a pick's: a rename answered meanwhile changes it.
+        ask_name(self.win, "", lambda program: self.add_program(profile.name, program),
+                 ADD_BY_NAME_HEADING.format(profile.name), response="Add",
+                 refusal=lambda text: program_refusal(profile, text), label=PROGRAM_NAME)
+
+    def add_program(self, name: str, program: str) -> None:
+        """Add `program` to the profile `name`, asking first when it is a
+        launcher; a toast says why for one program_refusal refuses."""
+        program = program.strip()
+        profile = self._profile(name)
+        if profile is None:
+            return
+        refusal = program_refusal(profile, program)
+        if refusal is not None:
+            self.win.toast(refusal)
             return
 
         def add() -> None:
             current = self._profile(profile.name)
             if current is None:
                 return
-            if then is not None:
-                then()
+            # Asked again at the answer: a file read while the launcher's question was up can
+            # list the program by then, which the daemon would take twice.
+            if (late := program_refusal(current, program)) is not None:
+                self.win.toast(late)
+                return
             self.win.send_processes(current, [*current.processes, program],
                                     f"{current.name} auto-loads for {program}")
 
@@ -305,10 +351,12 @@ class ProfileManager:
         others = still_matching(profile.processes, program) if profile is not None else []
         body = (f"{name} still auto-loads for {program}: {matches_too(others)}." if others
                 else f"{name} stops auto-loading for {program}.")
-        # The profile's name at the answer, as delete's: a rename answered meanwhile changes it.
+        # The row's name at the answer, as delete's: a rename answered meanwhile renames the
+        # row, where a file read landing before that reply left `profile` under the old name.
+        row = self.rows.get(name)
         self._ask(f"Remove {program}?", body, "Remove",
-                  lambda: self._do_remove_program(profile.name if profile is not None else name,
-                                                  program), destructive=True)
+                  lambda: self._do_remove_program(name if row is None else row.name, program),
+                  destructive=True)
 
     def _do_remove_program(self, name: str, program: str) -> None:
         profile = self._profile(name)
@@ -320,14 +368,17 @@ class ProfileManager:
         points everything that named it at the new name; the window takes
         the name from the reply and reads the files again. `undo()` runs
         for the caller to put the name back where it was typed, when `new`
-        is empty or unchanged, or the daemon refuses or does not answer."""
+        is unchanged, or the daemon refuses or does not answer; an empty `new`
+        is toasted and left in the row to be fixed."""
         new = new.strip()
         profile = self._profile(name)
         if profile is None:
             return
-        if not new or new == profile.name:
-            if not new:
-                self.win.toast(capitalized(GAME_PROFILE_NEEDS_A_NAME))
+        if not new:
+            # The row is red and keeps the blank to be fixed (watch_refused).
+            self.win.toast(capitalized(GAME_PROFILE_NEEDS_A_NAME))
+            return
+        if new == profile.name:
             undo()
             return
         was = profile.name
@@ -339,16 +390,19 @@ class ProfileManager:
                 return
             now = reply["name"]
             self.win.took_rename(was, now)
-            row = self.rows.pop(was, None)
+            row = self.rows.get(was)
             if row is not None:
                 row.rename(now)
                 # A row the copy still holds under the new name is of a profile renamed or
                 # deleted elsewhere since the last read: taken off with its place in `rows`,
                 # or refresh would never remove it.
                 if (stale := self.rows.get(now)) is not None:
-                    self.group.remove(stale.expander)
+                    self.profile_list.remove(stale.expander)
                     stale.drop_mouse_color()
-                self.rows[now] = row
+                # In its place: refresh takes every row out and back, the cursor with them,
+                # when the order of `rows` is not the library's, which a rename leaves as is.
+                self.rows = {now if key == was else key: kept
+                             for key, kept in self.rows.items() if key != now}
             self.win.refresh()
             self.win.toast(f"Renamed {was} to {now}")
             self.win.resync()
@@ -360,11 +414,14 @@ class ProfileManager:
         profile = self._profile(name)
         if profile is None:
             return
-        body = "The file is removed. This cannot be undone."
+        body = "The file is removed."
         if self.win.game_profile(self.win.overlay) is profile:
             body += " It is loaded now, and deleting it unloads it."
+        body += " This cannot be undone."
+        row = self.rows.get(profile.name)
         self._ask(DELETE_HEADING.format(profile.name), body, DELETE_RESPONSE,
-                  lambda: self._do_delete(profile.name), destructive=True)
+                  lambda: self._do_delete(profile.name if row is None else row.name),
+                  destructive=True)
 
     def _do_delete(self, name: str) -> None:
         """Say it once the daemon has, with the name it deleted, so a
@@ -402,8 +459,9 @@ class ProfileRow:
         # Every handler through weakly: the row holds the manager, which
         # holds the dialog (ProfileManager.__init__).
         self.name_row = Adw.EntryRow(title="Name", text=name, show_apply_button=True)
-        #: Puts text in the Name and Add by name rows with the apply button left unarmed:
-        #: with the cursor in a row, set_text arms it (EntryTexts.show).
+        watch_refused(self.name_row, blank)
+        #: Puts text in the Name row with the apply button left unarmed: with the cursor in
+        #: the row, set_text arms it (EntryTexts.show).
         self._texts = EntryTexts()
         self.name_row.connect("apply", weakly(self._on_rename))
         self.pick = Adw.ActionRow(title=PICK_TITLE, activatable=True)
@@ -412,8 +470,10 @@ class ProfileRow:
         self.pick.add_suffix(Gtk.Image(icon_name="go-next-symbolic",
                                        accessible_role=Gtk.AccessibleRole.PRESENTATION))
         self.pick.connect("activated", weakly(self._on_pick))
-        self.entry = Adw.EntryRow(title="Add by name", show_apply_button=True)
-        self.entry.connect("apply", weakly(self._on_add))
+        # A button row that asks the name in a dialog: an entry row looked like Name, which
+        # renames.
+        self.add_row = Adw.ButtonRow(title=ADD_BY_NAME, start_icon_name="list-add-symbolic")
+        self.add_row.connect("activated", weakly(self._on_add))
         self.delete = Adw.ActionRow(title="Delete profile", subtitle="Removes its file")
         # Plain: the red is on the confirmation's Delete, which does it.
         remove = Gtk.Button(label=DELETE_OPENER, valign=Gtk.Align.CENTER)
@@ -433,7 +493,7 @@ class ProfileRow:
     def _rows(self) -> list[Gtk.Widget]:
         """Its rows in the order they show."""
         own = [] if self.mouse_color is None else [self.mouse_color.picker.row]
-        return [self.name_row, *self.program_rows, self.pick, self.entry, *own, self.delete]
+        return [self.name_row, *self.program_rows, self.pick, self.add_row, *own, self.delete]
 
     def show(self, processes: list[str], loaded: bool) -> None:
         """Put the profile's programs on the row, rebuilding its rows only
@@ -498,9 +558,8 @@ class ProfileRow:
     def _on_pick(self, _row: Adw.ActionRow) -> None:
         self._manager.pick(self.name)
 
-    def _on_add(self, entry: Adw.EntryRow) -> None:
-        self._manager.add_program(self.name, entry.get_text(),
-                                  then=lambda: self._texts.show(entry, ""))
+    def _on_add(self, _row: Adw.ButtonRow) -> None:
+        self._manager.ask_program(self.name)
 
     def _on_delete(self, _button: Gtk.Button) -> None:
         self._manager.delete(self.name)
@@ -519,7 +578,7 @@ class ProfileRow:
         row = Adw.ActionRow(title=process, use_markup=False)
         others = still_matching(processes, process)
         tip = (f"Remove {process}. The profile still auto-loads for it: {matches_too(others)}"
-               if others else f"Stop auto-loading for {process}")
+               if others else f"Remove {process}")
         remove = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER,
                             css_classes=["flat"], tooltip_text=tip)
         remove.update_property([Gtk.AccessibleProperty.LABEL], [f"Remove {process}"])
@@ -530,9 +589,9 @@ class ProfileRow:
 
 class MouseColorRow:
     """A profile's Mouse color: the window's color picker with its Saved colors, and Use the
-    keyboard's color, which takes the profile's own color away. A release, an applied Hex
-    and a saved color clicked send the color (ProfileManager.set_mouse_color); a drag shows
-    nothing on the mouse before then, since the profile need not be the loaded one."""
+    keyboard's color, which takes the profile's own color away. Each commit of the picker sends
+    the color (ProfileManager.set_mouse_color); a preview sends nothing, since the profile need
+    not be the loaded one."""
 
     def __init__(self, manager: ProfileManager, row: ProfileRow) -> None:
         self._manager, self._row = manager, row
@@ -548,7 +607,7 @@ class MouseColorRow:
 
     def show(self, profile: GameProfile) -> None:
         """`profile`'s mouse color, or the keyboard's with the line saying so, on the picker
-        unless a color is being picked or typed, which its release or Enter sends."""
+        unless a color is being picked or typed, which the picker's commit sends."""
         own = profile.mouse_color
         self.picker.row.set_subtitle(KEYBOARDS_COLOR if own is None else format_color(own))
         self.keyboards.set_sensitive(own is not None)
@@ -567,7 +626,7 @@ class ProgramPicker:
     """The programs running now, as a page pushed over the profile list.
 
     Lists what is running rather than asking for an executable name nobody can see; Add by
-    name covers a program not running yet. `gone()` says the dialog has closed, since the
+    name… covers a program not running yet. `gone()` says the dialog has closed, since the
     `apps` command scans /proc and can answer after that.
     """
 
@@ -595,15 +654,16 @@ class ProgramPicker:
         if self._gone():
             return
         if isinstance(reply, Exception):
-            self._say("Could not list what is running", unreachable(reply))
+            say_in_place(self.listbox, NOT_LISTED, unlisted(reply))
             return
         if not reply.get("ok"):
-            self._say("Could not list what is running", str(reply.get("error") or ""))
+            # The daemon's errors start lowercase.
+            say_in_place(self.listbox, NOT_LISTED, capitalized(str(reply.get("error") or "")))
             return
         apps = reply.get("apps") or []
         if not apps:
-            self._say("Nothing running to pick",
-                      "Start the program, or type its name in Add by name")
+            say_in_place(self.listbox, "Nothing running to pick",
+                         f"Start the program, or add it with {ADD_BY_NAME}")
             return
         self.listbox.set_placeholder(None)
         # Not self: a row holding the picker that holds its rows is a cycle
@@ -616,8 +676,3 @@ class ProgramPicker:
             row = plain_row(Adw.ActionRow, title, subtitle, activatable=True)
             row.connect("activated", lambda _r, p=process: on_pick(p))
             self.listbox.append(row)
-
-    def _say(self, title: str, subtitle: str) -> None:
-        """The list's placeholder in place of its rows. The subtitle is capitalized, as the tabs'
-        status rows are: unreachable's words and the daemon's errors start lowercase."""
-        say_in_place(self.listbox, title, capitalized(subtitle))

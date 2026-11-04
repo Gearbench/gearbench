@@ -29,7 +29,6 @@ from .holds import Holds
 from .input_meter_row import NOT_FOUND, NOT_READ as PIPEWIRE_UNREAD
 from .style import (
     NOT_READ,
-    page_of,
     percent,
     plain_row,
     spoken_scale,
@@ -42,12 +41,10 @@ from .worker import LIVE_MS, SETTLE_MS, DaemonWorker, LoadingGuard, Result
 #: microphone's.
 TITLES = {**{word: f"{name} output" for word, name in system_volume.OUTPUT_NAMES.items()},
           system_volume.MIC: "Mic input"}
-#: The words of the output rows, which the A50s' pages put under Balance.
-OUTPUT_WORDS = tuple(system_volume.OUTPUT_NAMES)
 #: Each slider's name for a screen reader.
 NAMES = {word: f"{title} volume" for word, title in TITLES.items()}
 #: A row's line once read: whose volume it is, beside the headset's own, and its level.
-LEVEL = "GNOME's volume: {}"
+LEVEL = "System volume: {}"
 #: A set that failed: the toast's line, by the row's title, with the cause after it.
 NOT_SET = "The {}'s volume did not change"
 
@@ -55,28 +52,30 @@ NOT_SET = "The {}'s volume did not change"
 class VolumeRows:
     """The rows (`rows`) and their sliders (`scales`) of `words`, by each one's word, for the
     headset `show_headset` names; `inset` is the room each slider leaves at its right, to line
-    up with the page's other sliders. Every read and set runs programs with `run`."""
+    up with the page's other sliders. Every read and set runs programs with `run`; `kept_up`
+    is told of a set that failed (Window.kept_up)."""
 
     def __init__(self, worker: DaemonWorker, toast: Callable[..., object],
-                 run: pipewire_client.Run = subprocess.run, inset: int = 0,
-                 words: Sequence[str] = tuple(TITLES)) -> None:
+                 kept_up: Callable[[], None], run: pipewire_client.Run = subprocess.run,
+                 inset: int = 0, words: Sequence[str] = tuple(TITLES)) -> None:
         self._worker = worker
         self._toast = toast
+        self._kept_up = kept_up
         self._run = run
         self._loading = LoadingGuard()
         self._holds = Holds()
         #: The headset the page names, a key of system_volume.VOLUMES; None for none.
         self.key: str | None = None
         self._reading = self._closed = False
-        #: Each row's level as last read or set, while it is known.
+        #: Each slider's level as last read, at its end for a level past it, or as last set,
+        #: while it is known.
         self._levels: dict[str, int] = {}
         self.rows: dict[str, Adw.ActionRow] = {}
         self.scales: dict[str, Gtk.Scale] = {}
         for word in words:
             row = plain_row(Adw.ActionRow, TITLES[word], NOT_READ, visible=False,
                             sensitive=False)
-            scale = spoken_scale(0, system_volume.LEVEL_MAX, NAMES[word],
-                                 page=page_of(0, system_volume.LEVEL_MAX))
+            scale = spoken_scale(0, system_volume.LEVEL_MAX, NAMES[word])
             scale.set_margin_end(inset)
             scale.connect("value-changed", self.on_slider, word)
             watch_pointer(scale, partial(self.on_press, word), partial(self.on_release, word))
@@ -138,8 +137,11 @@ class VolumeRows:
                 row.set_subtitle(NOT_FOUND if not isinstance(result, Exception)
                                  else PIPEWIRE_UNREAD.format(reason(result)))
             elif not self._holds.held(word):
-                self._levels[word] = found.level
-                self._loading.put_value(self.scales[word], found.level)
+                # The slider's level, at its end for a level past its top, so a release with
+                # no move sets nothing and a poll takes the loading guard only for a change.
+                shown = min(found.level, system_volume.LEVEL_MAX)
+                self._levels[word] = shown
+                self._loading.put_value(self.scales[word], shown)
                 row.set_subtitle(LEVEL.format(percent(found.level)))
 
     def _let_go(self, *words: str) -> None:
@@ -191,6 +193,7 @@ class VolumeRows:
         if self._closed:
             return
         if isinstance(result, Exception):
+            self._kept_up()
             # one_sentence: pw-cli's words can hold ". ".
             line = NOT_SET.format(TITLES[word])
             toast_note(self._toast, f"{line}: {reason(result)}", line, one_sentence=True)

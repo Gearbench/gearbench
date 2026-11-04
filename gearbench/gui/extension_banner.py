@@ -7,7 +7,7 @@ and its one read of GNOME Shell's settings, for a copy in the home folder the Sh
 loaded.
 Its window builds it, places the banner, hands it each `status` reply and closes it. It asks
 the Shell for the extension's state when status's focus source changes to one that is not
-the extension, and again each time the Shell says that state changed.
+the extension, after each Turn on, and again each time the Shell says that state changed.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from pathlib import Path
 
 from gi.repository import Adw, Gio, GLib
 
-from ..dbusloop import said
+from ..dbusloop import peer_words, said
 from ..desktop import EXTENSION_NAME, EXTENSION_UUID, SHELL_EXTENSIONS, SHELL_EXTENSIONS_PATH
 from ..focus import PROCESSES, XWAYLAND
 from ..sni import SHELL
@@ -72,8 +72,10 @@ class ShellExtensions:
             SHELL, SHELL_EXTENSIONS, "ExtensionStateChanged", SHELL_EXTENSIONS_PATH,
             EXTENSION_UUID, Gio.DBusSignalFlags.NONE, lambda *_signal: changed())
 
-    def _call(self, method: str, finished: Callable[[GLib.Variant | None, str | None], None]
-              ) -> None:
+    def _call(self, method: str, reply_type: str,
+              finished: Callable[[GLib.Variant | None, str | None], None]) -> None:
+        """Calls `method` for EXTENSION_UUID; `finished` gets its reply, or None and the words
+        of the error, a reply not of `reply_type` included, which GDBus refuses."""
         def answered(bus: Gio.DBusConnection, result: Gio.AsyncResult) -> None:
             try:
                 reply = bus.call_finish(result)
@@ -83,18 +85,19 @@ class ShellExtensions:
             finished(reply, None)
 
         self._bus.call(SHELL, SHELL_EXTENSIONS_PATH, SHELL_EXTENSIONS, method,
-                       GLib.Variant("(s)", (EXTENSION_UUID,)), None,
+                       GLib.Variant("(s)", (EXTENSION_UUID,)), GLib.VariantType(reply_type),
                        Gio.DBusCallFlags.NO_AUTO_START, SHELL_CALL_MS, None, answered)
 
     def info(self, done: Callable[[dict | None], None]) -> None:
         """Calls `done` with GetExtensionInfo's dict, or None when no Shell answers."""
         def finished(reply: GLib.Variant | None, error: str | None) -> None:
             if reply is None:
-                # Not GNOME Shell, or one too old for the interface: nothing to turn on.
+                # Not GNOME Shell, one too old for the interface, or one stalled past
+                # SHELL_CALL_MS.
                 log.debug("GNOME Shell's extension interface did not answer: %s", error)
             done(None if reply is None else dict(reply.unpack()[0]))
 
-        self._call("GetExtensionInfo", finished)
+        self._call("GetExtensionInfo", "(a{sv})", finished)
 
     def enable(self, done: Callable[[str | None], None]) -> None:
         """Calls `done` with None once the Shell turned the extension on, else why not."""
@@ -104,21 +107,11 @@ class ShellExtensions:
             else:
                 done(None if reply.unpack()[0] else NO_REASON)
 
-        self._call("EnableExtension", finished)
+        self._call("EnableExtension", "(b)", finished)
 
     def close(self) -> None:
         """Stops hearing the Shell's ExtensionStateChanged."""
         self._bus.signal_unsubscribe(self._subscription)
-
-
-def shell_for(app: Gio.Application | None
-              ) -> Callable[[Callable[[], None]], ShellExtensions | None]:
-    """ExtensionBanner's `connect` for the window's application: its session bus
-    connection, which it has once registered, or no Shell without one."""
-    def connect(changed: Callable[[], None]) -> ShellExtensions | None:
-        bus = app.get_dbus_connection() if app is not None else None
-        return None if bus is None else ShellExtensions(bus, changed)
-    return connect
 
 
 def installed() -> str | None:
@@ -142,13 +135,12 @@ def loads_home_extensions() -> bool:
     return Gio.Settings.new_full(schema, None, None).get_boolean(HOME_EXTENSIONS)
 
 
-def banner_text(source: str | None, info: dict | None, refused: str | None,
-                there: str | None, loads_home: Callable[[], bool]
+def banner_text(source: str | None, info: dict | None, refused: str | None
                 ) -> tuple[str | None, str | None]:
     """The banner's title and button, (None, None) for no banner. `source` is status's
-    focus source, `info` the Shell's last answer, `refused` why the last Turn on failed,
-    `there` where the extension's files are (installed()), and `loads_home` whether the
-    Shell loads extensions from the home folder, asked only when it has not loaded this one."""
+    focus source, `info` the Shell's last answer and `refused` why the last Turn on failed.
+    It reads where the extension's files are, and GNOME Shell's settings for a copy in the
+    home folder, only when the Shell has not loaded the extension."""
     without = WITHOUT.get(source or "")
     if without is None or info is None or info.get("state") == ACTIVE:
         return None, None
@@ -156,21 +148,26 @@ def banner_text(source: str | None, info: dict | None, refused: str | None,
         # The Shell reads its extensions at login, those in the home folder only while its
         # settings allow them: installed after this login, or in a folder it skips. That it
         # answers {} for a skipped copy is read from its source, not yet seen in a session.
+        there = installed()
         if there is None:
             return None, None
-        if there == HOME and not loads_home():
+        if there == HOME and not loads_home_extensions():
             return HOME_SKIPPED.format(without=without), None
         return NOT_LOADED.format(without=without), None
     state = info.get("state")
     if state == ERROR:
-        return FAILED.format(without=without, error=info.get("error") or NO_REASON), None
+        # The Shell's words, escaped as said() writes EnableExtension's: whoever owns its name
+        # wrote them.
+        error = peer_words(str(info.get("error") or ""))
+        return FAILED.format(without=without, error=error or NO_REASON), None
     if state == OUT_OF_DATE:
         return TOO_OLD.format(without=without), None
     if info.get("canChange") is False:
         # GNOME Shell 50.1 clears canChange and enabled while GNOME's extensions are off, and
-        # EnableExtension then changes nothing (ui/extensionSystem.js, _updateCanChange; read
-        # from its source, not yet seen in a session). It clears canChange too where the
-        # machine's settings lock enabled-extensions: the title names the likelier cause.
+        # EnableExtension then changes nothing (ui/extensionSystem.js, _updateCanChange, read
+        # in its source; in a session on 2026-10-30, gnome-extensions info said Enabled: No
+        # after an enable). It clears canChange too where the machine's settings lock
+        # enabled-extensions: the title names the likelier cause.
         return USER_OFF.format(without=without), None
     if refused:
         return REFUSED.format(without=without, error=refused), TURN_ON
@@ -181,18 +178,18 @@ class ExtensionBanner:
     """The banner, up while game profiles cannot follow every window because the extension
     is installed and not running, with Turn on while it is off.
 
-    `connect` makes the Shell, given the call to make when its state changes, or gives
-    None where no session bus is, which keeps the banner down.
+    `app` is the window's application: the banner asks the Shell over its session bus
+    connection, which it has once registered, and stays down without one.
     """
 
-    def __init__(self, connect: Callable[[Callable[[], None]], ShellExtensions | None]
-                 ) -> None:
+    def __init__(self, app: Gio.Application | None) -> None:
         self.banner = Adw.Banner(use_markup=False)
         self.banner.connect("button-clicked", self._turn_on)
-        self._shell = connect(self._changed)
+        bus = app.get_dbus_connection() if app is not None else None
+        self._shell = None if bus is None else ShellExtensions(bus, self._changed)
         #: Status's focus source, None while there is no daemon.
         self._source: str | None = None
-        #: The Shell's last GetExtensionInfo, None before one or without a Shell.
+        #: The Shell's last answer to GetExtensionInfo, None before one.
         self._info: dict | None = None
         #: Why the last Turn on failed, until the next or a change of the extension's state.
         self._refused: str | None = None
@@ -218,6 +215,10 @@ class ExtensionBanner:
         self.ask()
 
     def _answered(self, info: dict | None) -> None:
+        if info is None:
+            # A failed ask, as one past SHELL_CALL_MS while the Shell stalls, says nothing
+            # new of the extension: the last answer stands.
+            return
         self._info = info
         self._show()
 
@@ -232,8 +233,7 @@ class ExtensionBanner:
         self._show()
 
     def _show(self) -> None:
-        title, button = banner_text(self._source, self._info, self._refused, installed(),
-                                    loads_home_extensions)
+        title, button = banner_text(self._source, self._info, self._refused)
         self.banner.set_title(title or "")
         self.banner.set_button_label(button)
         self.banner.set_revealed(title is not None)

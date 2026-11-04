@@ -23,14 +23,15 @@ from .style import SLIDER_WIDTH, displayable, percent, plain_row
 from .worker import DaemonWorker, Result
 
 TITLE = "Input level"
-#: The bar's name for a screen reader: what it measures.
-BAR_NAME = "Microphone input level"
+#: The bar's name for a screen reader: what it measures, by the title of the Mic input
+#: slider above it.
+BAR_NAME = "Mic input level"
 #: The row's line where it cannot read: the node not in PipeWire, pw-dump failed (the cause
 #: goes in), and pw-record ended on its own (its words in the tooltip). pw-record missing or
 #: not starting says so in pipewire_client.not_run's words. NOT_FOUND is also the volume
 #: rows' line, Mic input's above this one.
 NOT_FOUND = "Not in PipeWire"
-NOT_READ = "PipeWire could not be read: {}"
+NOT_READ = "PipeWire could not be read ({})"
 STOPPED = f"{input_meter.PROGRAM} stopped"
 #: What the pipe's watch wakes for: samples, or pw-record's end of it closed.
 WOKEN_BY = GLib.IOCondition.IN | GLib.IOCondition.HUP | GLib.IOCondition.ERR
@@ -45,9 +46,9 @@ class InputMeterRow:
         self._worker = worker
         self._run = run
         self._spawn = spawn
-        #: The headset the page names, a key of spatial.HEADSET_KEYED; None for none.
+        #: The headset the page names, a key of pipewire_headsets.HEADSET_KEYED; None for none.
         self.key: str | None = None
-        self._looking = self._closed = False
+        self._looking = False
         #: The window the row is on while mapped, None while it is not, and its
         #: notify::suspended handler.
         self._window: Gtk.Window | None = None
@@ -81,14 +82,13 @@ class InputMeterRow:
 
     def close(self) -> None:
         """The window's close: stopped, and never started again."""
-        self._closed = True
         self._let_go_of_window()
         self._stop()
 
     def _wanted(self) -> str | None:
         """The headset whose microphone the row reads now: none while it is off screen, its
         window suspended or closed."""
-        if self._window is None or self._closed or self._window.is_suspended():
+        if self._window is None or self._window.is_suspended():
             return None
         return self.key
 

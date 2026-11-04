@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from ...mouse import CABLED_IDS as MOUSE_CABLED, find_attached_mice
 from ..shared import CABLE_LOOK, look_due, node_denied
-from .attached import AttachedMouse, dpi_keys, other_route
+from .attached import AttachedMouse, kept_routes, other_route
 
 if TYPE_CHECKING:
     from .. import Daemon
@@ -60,12 +60,11 @@ class Routes:
         if not look_due(now, self._look_at) or not self.waits_for_cable():
             return
         self._look_at = now + self.d.plugs.pace(CABLE_LOOK)
-        ids = {key for m in self.mice.attached if m.product not in MOUSE_CABLED
-               for key in dpi_keys(m.product)}
+        ids = {route for m in self.mice.attached if m.product not in MOUSE_CABLED
+               for route in kept_routes(m.product)[1:]}
         covered = self.mice.attached_models()
         cables = [found for found in find_attached_mice()
-                  if found[1] in MOUSE_CABLED and f"{found[1]:04x}" in ids
-                  and found[1] not in covered]
+                  if found[1] in ids and found[1] not in covered]
         self._tried &= {found[0] for found in cables}
         for found in cables:
             if found[0] in self._tried:
@@ -76,7 +75,7 @@ class Routes:
                 self._tried.add(found[0])
 
     def look_now(self) -> None:
-        """Have the next pass look for the cables (look_for_cables): a node came (Plugs)."""
+        """Have the next pass look for the cables (look_for_cables)."""
         self._look_at = time.monotonic()
 
     def left_route(self, product: int, path: Path) -> list[AttachedMouse]:
@@ -90,17 +89,16 @@ class Routes:
         the G102 LIGHTSYNC's cable id beside the G203 LIGHTSYNC's, which is not asked. The
         dropped entry's state passes to the new one through Mice._mouse_kept.
         """
-        cabled = product in MOUSE_CABLED
+        others = kept_routes(product)[1:]
         left = []
-        for other in [m for m in self.mice.attached
-                      if (m.product in MOUSE_CABLED) != cabled
-                      and f"{m.product:04x}" in dpi_keys(product)]:
+        for other in [m for m in self.mice.attached if m.product in others]:
             if not other.silent and self.mice.mouse_answers(other, gone=False):
                 continue
             # Marked first, so the teardown sends no release to a route that will not answer;
             # not through mark_silent, whose line promises a recheck of an entry dropped here.
             other.silent = True
-            log.info("%s moved from %s to %s", other.name, other.dev.path, path)
+            log.info("%s moved from its receiver (%s) to its cable (%s)", other.name,
+                     other.dev.path, path)
             self.mice.teardown_mouse(other)
             left.append(other)
         return left

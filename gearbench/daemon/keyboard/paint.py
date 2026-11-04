@@ -18,7 +18,7 @@ from ...keyboard_zones import KeyboardLights, KeyboardZones, paints_areas, paint
 from ...keycodes import LOGO, ZONE_NAMES, by_zone
 from ...lighting import (
     EFFECT_IDS,
-    MAX_ZONE,
+    OFF,
     STATIC_EFFECTS,
     Cluster,
     Lighting,
@@ -80,8 +80,8 @@ class Paint:
         #: (model, effect) of each effect write_lit has said hides the painted keys at info.
         self._keys_hidden_said: set[tuple[str, str]] = set()
         #: The brightness the keyboard holds, where it is known: the level read off it at its
-        #: setup (read_brightness), then the level written last, or the one its own key
-        #: reported (Keyboard.take_brightness_key). None from each setup until one of them, and
+        #: setup (read_brightness), then the level written last, or the one it reported last,
+        #: its own key's or a write's (hold_reported). None from each setup until one of them, and
         #: while a write is out, so that one that fails is sent again.
         self.held_brightness: int | None = None
         #: Whether a brightness the `brightness` command saved has not reached the keyboard
@@ -152,6 +152,12 @@ class Paint:
                         effect_name)
                 self._keys_hidden_said.add(said)
 
+    def hold_reported(self, level: int) -> bool:
+        """Hold `level`, the level the keyboard reported (0x8040 event 0); whether it held
+        that level already, as after a write of the daemon's own that changed it."""
+        held, self.held_brightness = self.held_brightness, level
+        return level == held
+
     def read_brightness(self) -> None:
         """At each setup, on a model that keeps its brightness (KeyboardModel.keeps_brightness)
         or is read all the same (reads_brightness, the G515 generation's untested relatives),
@@ -167,7 +173,7 @@ class Paint:
         known, so its apply writes the saved one; any other failure goes to the caller."""
         self.held_brightness = None
         lighting = self.keyboard.lighting
-        model = self.keyboard.key_control.model()
+        model = self.keyboard.keyboard_model()
         if (not (model.keeps_brightness or model.reads_brightness) or lighting is None
                 or not lighting.brightness_levels):
             return
@@ -205,7 +211,7 @@ class Paint:
         level is the one Gearbench last left its model at (PerKeyboard.written_brightness)."""
         floored = snap_brightness(lighting.brightness_levels, level)
         shown = level if self.held_brightness == level else floored
-        if not (self.keyboard.key_control.model().keeps_brightness
+        if not (self.keyboard.keyboard_model().keeps_brightness
                 and self.held_brightness == shown):
             self.held_brightness = None
             # 0x8071's: each caller checks for brightness levels first, which 0x8070's zones lack.
@@ -227,7 +233,7 @@ class Paint:
         three more on its effect (lighting.SIGNATURES), or wave or ripple where a counted
         cluster lacks it, is one write on it and nothing on the clusters, Disabled included, as
         G HUB writes Pulsar Point. G HUB's static after Pulsar Point was static on clusters 0
-        and 1 alone (Windows capture G2, 2026-10-23), and the same static after a wave and a
+        and 1 alone (on Windows, 2026-10-23), and the same static after a wave and a
         ripple on the G915 X LIGHTSPEED's whole board took its keys and its logo back
         (measured 2026-10-24)."""
         board = lighting.whole_board
@@ -247,7 +253,7 @@ class Paint:
         modifiers = self.keyboard.modifiers
         if modifiers is None or not modifiers.fn_held:
             return {}
-        model = self.keyboard.key_control.model()
+        model = self.keyboard.keyboard_model()
         return dict.fromkeys(model.fn_keys, FN_WHITE)
 
     def write_fn(self, lighting: Lighting, effect_name: str, color: int,
@@ -292,7 +298,7 @@ class Paint:
     def disable_cluster(self, lighting: KeyboardLights, cluster: Cluster) -> None:
         """Write Disabled to one cluster. A cluster without it is left as it is."""
         try:
-            lighting.set_effect(cluster.index, "disabled")
+            lighting.set_effect(cluster.index, OFF)
         except LightingError as exc:
             log.debug("  cluster %d: disabled failed: %s", cluster.index, exc)
 
@@ -337,7 +343,8 @@ class Paint:
                 if said not in self._params_said:
                     self._params_said.add(said)
                     log.warning("profile %d's lighting params do not fit their effect (%s); "
-                                "the %s shows static", self.d.config.active, exc,
+                                "the %s shows static: fix them in config.json and run "
+                                "`gearbench-ctl reload`", self.d.config.active, exc,
                                 self.keyboard.model_name())
 
     def board_zones(self, zones: Mapping[int, int]) -> Mapping[int, int]:
@@ -345,7 +352,7 @@ class Paint:
         board (KeyboardModel.cut_to_board), so that a write naming one, which its firmware
         might refuse whole, is never sent. Said at info the first time for each model, and at
         debug after that."""
-        model = self.keyboard.key_control.model()
+        model = self.keyboard.keyboard_model()
         if not model.cut_to_board:
             return zones
         cut = sorted(zone for zone in zones if zone not in model.board.zones)
@@ -365,42 +372,35 @@ class Paint:
         any other."""
         if not paints_areas(lighting):
             return {}
-        board = self.keyboard.key_control.model().board
+        board = self.keyboard.keyboard_model().board
         return dict(zip(lighting.area_zones, board.area_colors(overrides, color), strict=True))
-
-    @staticmethod
-    def fill_last(lighting: Lighting, unlisted: int = MAX_ZONE) -> int:
-        """The last zone of a fill: the highest the keyboard's zone bitmap sets
-        (Lighting.listed_last), whatever its model, or `unlisted` where the bitmap was not
-        read. A fill ending on a zone the keyboard does not set may be refused whole."""
-        return unlisted if lighting.listed_last is None else lighting.listed_last
 
     def preview_last(self) -> int:
         """The last zone of a preview's fill where the keyboard's zone bitmap was not read
-        (fill_last): the logo, as on the G915, or, on a model cut to its board that has no
+        (Lighting.fill_and_paint): the logo, as on the G915, or, on a model cut to its board that has no
         logo, its own highest zone below it. The G515 TKL refused a range ending at the logo
         whole, invalid argument, and took one ending at 254 (measured once, 2026-10-18)."""
-        model = self.keyboard.key_control.model()
+        model = self.keyboard.keyboard_model()
         if not model.cut_to_board or LOGO in model.board.zones:
             return LOGO
         return max(zone for zone in model.board.zones if zone < LOGO)
 
     def write_frame(self, lighting: Lighting, fill: int, zones: Mapping[int, int],
                     dim: bool = False) -> None:
-        """One per-key frame of the whole board: `fill` over every zone to fill_last, or to
-        preview_last where the zone bitmap was not read, with `zones` and the FN keys held
+        """One per-key frame of the whole board: `fill` over every zone to the last the zone
+        bitmap sets, or to preview_last where it was not read (Lighting.fill_and_paint), with `zones` and the FN keys held
         (fn_zones) over it, cut to the board (board_zones), every color halved with `dim`.
         A failed write goes to the caller."""
         overrides = self.board_zones({**zones, **self.fn_zones()})
         if dim:
             fill, overrides = dimmed(fill, overrides)
-        lighting.fill_and_paint(fill, overrides, last=self.fill_last(lighting, self.preview_last()))
+        lighting.fill_and_paint(fill, overrides, unlisted=self.preview_last())
 
     def write_static(self, lighting: KeyboardLights, color: int, overrides: Mapping[int, int],
                      effect_name: str = "static", *, extra_params: Mapping[str, int],
                      dim: bool) -> None:
-        """A flat color over the whole board, its fill to fill_last, or to MAX_ZONE where the
-        zone bitmap was not read, then the per-key overrides with the FN keys held over them
+        """A flat color over the whole board, its fill to the last zone the zone bitmap sets, or
+        to MAX_ZONE where it was not read (Lighting.fill), then the per-key overrides with the FN keys held over them
         (fn_zones), every color halved with `dim`. Shared by a static apply and `paint`, so
         the two cannot drift. The overrides are cut to the keyboard's board first
         (board_zones).
@@ -412,14 +412,11 @@ class Paint:
         disabled too, as a per-key board shows its painted keys over black: the whole board's
         zone `color`, then each area's zone its area's color of the overrides (area_colors).
         """
-        per_key = lighting.per_key
         overrides = self.board_zones({**overrides, **self.fn_zones()})
         areas = self.area_colors(lighting, color, overrides)
-        # Painted areas show as static under disabled too, as a per-key board's painted keys
-        # show over its black.
         zone_effect = "static" if areas and overrides else effect_name
         for cluster in lighting.clusters:
-            if overrides and per_key:
+            if overrides and lighting.per_key:
                 self.disable_cluster(lighting, cluster)
             else:
                 self.write_zone_effect(lighting, cluster, zone_effect,
@@ -430,6 +427,6 @@ class Paint:
             # A zonal board: the zone effect is all that renders.
             return
         log.debug("  per-key fill #%06x and %s", color, counted(len(overrides), "override"))
-        lighting.fill(color, last=self.fill_last(lighting))
+        lighting.fill(color)
         if overrides:
             lighting.paint(overrides)

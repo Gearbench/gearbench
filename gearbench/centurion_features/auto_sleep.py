@@ -2,7 +2,7 @@
 idle, before it sleeps, read with function 0 and set with function 1, in minutes, 0 for
 never.
 
-Version 3, the A50 X's, measured on it (G HUB's captures of 2026-10-21, B4-08): the read
+Version 3, the A50 X's, measured on it against G HUB on 2026-10-21: the read
 and the event answer `3c MM`, MM the minutes, and G HUB wrote `3c 00` for Never, then `3c
 0f`, `3c 1e` and `3c 3c` for its 15, 30 and 60 minutes, the first byte 0x3c in each, which
 is sent as G HUB sent it (Solaar's _AutoSleepRangeValidator keeps that byte as read).
@@ -23,6 +23,8 @@ from .setting import Setting
 ID = 0x0108
 WORDS = "auto sleep"
 READ, WRITE = 0, 1
+#: Its key, the socket's word for it.
+KEY = "auto_sleep"
 #: The byte before the minutes in each of G HUB's writes to the A50 X.
 A50_X_FIRST = 0x3C
 
@@ -35,6 +37,6 @@ KEPT = 3
 def setting(minutes: tuple[int, ...], version: int) -> Setting:
     """The auto sleep in version `version`'s layout, which takes `minutes`."""
     at, before = (1, bytes([A50_X_FIRST])) if version == 3 else (0, b"")
-    return Setting("auto_sleep", "auto sleep time", ID, read=READ, at=at, write=WRITE,
+    return Setting(KEY, "auto sleep time", ID, read=READ, at=at, write=WRITE,
                    before=before, wire=minutes, kept=KEPT if version >= 4 else 0,
                    unit="minute", never="never")

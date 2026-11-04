@@ -20,12 +20,13 @@ root feature, never taken from the index one firmware gave.
 
 Every write is refused with nothing sent (not_tested) until it is let through by its model's
 writes_tested: the owner's rule of 2026-10-17 for a model not tested on this hardware. The
-A50 X keeps each setting it was sent through a power cycle (the captures, B6), so its writes
-waited for the write test with the owner, which lets each through (the owner's decision of
-2026-10-21); the A50 Gen 5's stay refused. That test passed on 2026-10-22, so the A50 X is
-`tested` too (the owner's decision of 2026-10-22). A write to a feature the lookup found at
-another version than its record's is refused with nothing sent too (A50X.layout_refused, the
-owner's decision of 2026-10-25), since that version's layout may differ.
+A50 X keeps each setting it was sent through a power cycle (measured against G HUB,
+2026-10-21), so its writes waited for the write test with the owner, which lets each through
+(the owner's decision of 2026-10-21); the A50 Gen 5's stay refused. That test passed on
+2026-10-22, so the A50 X is `tested` too (the owner's decision of 2026-10-22). A write to a
+feature the lookup found at another version than its record's is refused with nothing sent
+too (A50X.layout_refused, the owner's decision of 2026-10-25), since that version's layout
+may differ.
 """
 
 from __future__ import annotations
@@ -68,7 +69,7 @@ from .wording import word_list, written
 
 #: The A50s' prefix, report 0x02 and the byte 0x0C: the A50 X's report descriptor declares
 #: report 0x02 alone, on usage page 0xFF32, and every reply starts `02 0c` (2026-10-21, sysfs
-#: and the captures); HeadsetControl PR 531 gives the Gen 5's ("byte[1] = 0x0c constant
+#: and G HUB's traffic); HeadsetControl PR 531 gives the Gen 5's ("byte[1] = 0x0c constant
 #: marker"; the 0x50 variant's address byte stands there in Solaar's). PR 531's report 0x51
 #: for the A50 X is not the A50 X's.
 FRAMING = Framing(0x02, 0x0C)
@@ -85,7 +86,7 @@ INTERFACE = 8
 
 #: The slot each A50 instance plays, the one fn 1 reads and G HUB writes; PR 531 wrote the
 #: Gen 5's headphones there too. Slots 0 to 2 hold G HUB's three presets of the instance, and
-#: choosing one copies its bands into this slot (B4-06).
+#: choosing one copies its bands into this slot (G HUB on the A50 X, 2026-10-21).
 PLAYING_SLOT = 3
 #: The A50s' instances, G HUB's `unifiedEqualizer` names for 0 and 1: the A50 X's 0 has the
 #: microphone's bands, 80 Hz to 19 kHz, and 1 the headphones', 20 Hz to 20 kHz.
@@ -94,7 +95,7 @@ INSTANCE_NAMES = {"microphone": "Microphone", "headphones": "Headphones"}
 #: The equalizer 0x0636 holds on a model with `onboard_eq`: the headphones'.
 ONBOARD = "headphones"
 #: The presets in slots 0, 1 and 2, by G HUB's names for them: the bands G HUB wrote for
-#: Gaming and Broadcast are the A50 X's slot 1 and slot 2 (B4-06), and its slot 0 is flat.
+#: Gaming and Broadcast are the A50 X's slot 1 and slot 2 (2026-10-21), and its slot 0 is flat.
 PRESETS = {"microphone": ("default", "competition", "broadcast"),
            "headphones": ("default", "gaming", "media")}
 #: The writes that are no setting: an instance's ten bands, and the whole stream mix.
@@ -125,6 +126,7 @@ class Model:
     interface: int
     framings: tuple[Framing, ...]
     settings: tuple[Setting, ...]
+    versions: Mapping[int, int]
     presets: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     writes_tested: frozenset[str] = frozenset()
     tested: bool = False
@@ -132,14 +134,13 @@ class Model:
     slot: int = PLAYING_SLOT
     onboard_eq: bool = False
     mixer: bool = False
-    versions: Mapping[int, int] = field(default_factory=dict)
     bridged: bool = False
     dongle: str = "base station"
     charge: str = BASE_CHARGE
 
     def framing_for(self, reports: Mapping[int, int]) -> Framing | None:
         """The first of `framings` whose report id the node's report descriptor declares on a
-        vendor page, `reports` being report.Descriptor's: each id with its collection's
+        vendor page, `reports` being hidpp.Descriptor's: each id with its collection's
         usage page. None for none."""
         return next((framing for framing in self.framings
                      if reports.get(framing.report_id, 0) >= VENDOR_PAGES), None)
@@ -204,8 +205,8 @@ class Model:
         return frozenset(sent)
 
 
-#: The versions the A50 X lists, by feature id (its table, the Linux reads' step 4 and the
-#: captures' B3, the same before firmware 1.3.21 and on it).
+#: The versions the A50 X lists, by feature id (its table, the Linux reads' step 4 and G HUB's
+#: traffic of 2026-10-21, the same before firmware 1.3.21 and on it).
 A50_X_VERSIONS = {battery.ID: 4, sidetone.ID: 2, volume.ID: 4, mix.ID: 2, noise_gate.ID: 1,
                   equalizer.ID: 1, auto_sleep.ID: 3, power_mode.ID: 1, led_brightness.ID: 1,
                   tones.ID: 1, mixer.ID: 1}
@@ -213,26 +214,25 @@ A50_X_VERSIONS = {battery.ID: 4, sidetone.ID: 2, volume.ID: 4, mix.ID: 2, noise_
 #: PR 531's on the Gen 5).
 SHARED_SETTINGS = (sidetone.setting(7, A50_X_VERSIONS[sidetone.ID]), volume.setting(),
                    mix.setting())
-#: The settings the A50 X's captures measured after the noise gate, in G HUB's order on its
+#: The settings measured on the A50 X after the noise gate, in G HUB's order on its
 #: Settings page: the auto sleep, then the deep sleep mode, then these. G HUB gives the A50
 #: Gen 5 all but the deep sleep mode too (its record's autoSleep, ledBrightness and
 #: hasHeadsetTones; it has no hasEuPowerModeControl), whose published frames give none of
 #: them: there they are the A50 X's, assumed, as is its stream mix (its record's
 #: hasAudioMixingMatrix).
 LATER_SETTINGS = (led_brightness.setting("base station's brightness"), tones.setting())
-#: The A50s' auto sleep, in minutes: G HUB's four choices for the A50 X, never, 15, 30 and
-#: 60 (B4-08).
-A50_SLEEP_MINUTES = (0, 15, 30, 60)
+#: The A50s' auto sleep: G HUB's four choices for the A50 X, never, 15, 30 and 60 minutes
+#: (2026-10-21).
+A50_AUTO_SLEEP = auto_sleep.setting((0, 15, 30, 60), A50_X_VERSIONS[auto_sleep.ID])
 
 #: The A50 X's noise gate: off 00, home 01, night 02, tournament 04 (G HUB's writes and the
-#: base's events, B4-07, and its fn 3, which lists 00 01 02 04).
+#: base's events, 2026-10-21, and its fn 3, which lists 00 01 02 04).
 A50_X_SETTINGS = (*SHARED_SETTINGS, noise_gate.setting((0x00, 0x02, 0x01, 0x04)),
-                  auto_sleep.setting(A50_SLEEP_MINUTES, A50_X_VERSIONS[auto_sleep.ID]),
-                  power_mode.setting(), *LATER_SETTINGS)
+                  A50_AUTO_SLEEP, power_mode.setting(), *LATER_SETTINGS)
 #: Its writes, every setting, the equalizer and the stream mix, let through by its write test
 #: with the owner, which passed on 2026-10-22.
-A50_X = Model("a50x", "Astro A50 X", 0x0B0B, INTERFACE, (FRAMING,), A50_X_SETTINGS, PRESETS,
-              mixer=True, versions=A50_X_VERSIONS, tested=True,
+A50_X = Model("a50x", "Astro A50 X", 0x0B0B, INTERFACE, (FRAMING,), A50_X_SETTINGS,
+              presets=PRESETS, mixer=True, versions=A50_X_VERSIONS, tested=True,
               writes_tested=frozenset({*(setting.key for setting in A50_X_SETTINGS),
                                        EQUALIZER_WRITE, MIXER_WRITE}))
 #: The Gen 5's: off 00, night 01 and tournament 04 as PR 531 sent them, home 02 as
@@ -241,8 +241,7 @@ A50_X = Model("a50x", "Astro A50 X", 0x0B0B, INTERFACE, (FRAMING,), A50_X_SETTIN
 #: A50 X's are assumed.
 A50_GEN5 = Model("a50gen5", "Astro A50 Gen 5", 0x0B1C, INTERFACE, (FRAMING,),
                  (*SHARED_SETTINGS, noise_gate.setting((0x00, 0x01, 0x02, 0x04)),
-                  auto_sleep.setting(A50_SLEEP_MINUTES, A50_X_VERSIONS[auto_sleep.ID]),
-                  *LATER_SETTINGS), mixer=True, versions=A50_X_VERSIONS)
+                  A50_AUTO_SLEEP, *LATER_SETTINGS), mixer=True, versions=A50_X_VERSIONS)
 #: The receivers' framings: report 0x51 with no byte after it on the PRO X 2 LIGHTSPEED's
 #: (Solaar's; HeadsetControl's), report 0x50 and the address 0x23 on the G522's and the
 #: G325's (HeadsetControl's G522 driver; the G325's owner, HeadsetControl issue 581; Solaar
@@ -264,11 +263,15 @@ RECEIVER_INTERFACE = 3
 #: their versions: the record's are not published. Its sidetone is 0 to 100 in version 1's
 #: layout (HeadsetControl's 100 steps, Solaar's 101; the listing read 55), and its auto
 #: sleep one byte of minutes, 0 to 255 (HeadsetControl's range; the listing read 10).
+#: The versions those layouts are, so a unit that lists another is read in them, said in
+#: the journal and written nothing to (A50X.layout_refused).
+PRO_X_2_VERSIONS = {sidetone.ID: 1, auto_sleep.ID: 1}
 PRO_X_2 = Model("pro_x_2", "PRO X 2 LIGHTSPEED", 0x0AF7, RECEIVER_INTERFACE, (PLAIN,),
-                (sidetone.setting(101, version=1),
-                 auto_sleep.setting(tuple(range(256)), version=1), noise_reduction.setting()),
-                instances={}, onboard_eq=True, bridged=True, dongle="receiver",
-                charge=CABLE_CHARGE)
+                (sidetone.setting(101, PRO_X_2_VERSIONS[sidetone.ID]),
+                 auto_sleep.setting(tuple(range(256)), PRO_X_2_VERSIONS[auto_sleep.ID]),
+                 noise_reduction.setting()),
+                instances={}, onboard_eq=True, versions=PRO_X_2_VERSIONS, bridged=True,
+                dongle="receiver", charge=CABLE_CHARGE)
 #: The headphones' equalizer, instance 0, slot 0, of the G522 and the G325 (G HUB's
 #: `unifiedEqualizer` names instance 0 HEADPHONES_LABEL on both; the G325's getCustomEQ of
 #: slot 0 answered and of slot 1 error 0x0b, and its function 3 said slot 0; Solaar: the
@@ -327,6 +330,19 @@ SEARCH_ORDER = tuple(sorted(MODELS, key=lambda product: (
 #: means one setting on each model, which only its ranges and bytes tell apart.
 SETTING_OF = {setting.key: setting for model in reversed(MODELS.values())
               for setting in model.settings}
+#: The settings the window's Microphone group shows; Settings shows the rest. Each takes
+#: the model record's order, one order on every model (the owner's decision of 2026-10-22).
+MIC_SETTINGS = frozenset({sidetone.KEY, noise_gate.KEY, noise_reduction.KEY})
+#: The command line's read of the headset again, the next step of a refusal for what
+#: Gearbench has not read (cli/a50x.py's `audio --read`).
+AUDIO_READ = "`gearbench-ctl audio --read`"
+
+
+def reply_model(reply: dict) -> Model | None:
+    """The model an `a50x` reply names by its product id; None where it names none this
+    install knows."""
+    product = reply.get("product")
+    return MODELS.get(int(product, 16)) if isinstance(product, str) else None
 
 
 def not_tested(name: str, what: str) -> str:
@@ -420,24 +436,24 @@ class A50X:
 
     @property
     def fileno(self) -> int:
-        return self.dev.fileno
+        return self.receiver.fileno
 
     def close(self) -> None:
-        self.dev.close()
+        self.receiver.close()
 
     @property
     def framing(self) -> Framing:
-        return self.dev.framing
+        return self.receiver.framing
 
     @property
     def pending(self) -> bool:
         """Whether events a request read while it waited are queued (Centurion.pending)."""
-        return self.dev.pending
+        return self.receiver.pending
 
     def pump(self) -> None:
         """Read what the node has queued, sending nothing: events kept, late replies
         dropped."""
-        self.dev.pump()
+        self.receiver.pump()
 
     def next_event(self) -> Message | Link | None:
         """The next event queued, the bridge's connection event among them on a bridged
@@ -518,8 +534,25 @@ class A50X:
             return not_tested(self.model.name, words)
         return None
 
-    def _refuse(self, feature_id: int, write: str, words: str) -> None:
-        if (refused := self.write_refused(feature_id, write, words)) is not None:
+    def setting_refused(self, key: str) -> str | None:
+        """Why a write of the model's setting `key` is refused before anything is sent
+        (write_refused, in the setting's words); None for one that may go."""
+        setting = self.model.setting(key)
+        return self.write_refused(setting.feature, key, setting.words)
+
+    def equalizer_write_refused(self, instance: str) -> str | None:
+        """Why a write of `instance`'s bands is refused before anything is sent
+        (write_refused); None for one that may go."""
+        return self.write_refused(equalizer.ID, EQUALIZER_WRITE, f"{instance} equalizer")
+
+    def mix_refused(self) -> str | None:
+        """Why a write of the stream mix is refused before anything is sent (write_refused);
+        None for one that may go."""
+        return self.write_refused(mixer.ID, MIXER_WRITE, mixer.WORDS)
+
+    @staticmethod
+    def _refuse(refused: str | None) -> None:
+        if refused is not None:
             raise ValueError(refused)
 
     # -- reads -------------------------------------------------------------
@@ -564,7 +597,7 @@ class A50X:
                     bytes([self.model.instances[instance], slot])), start=0)
                 for slot, name in enumerate(self.model.presets.get(instance, ()))}
 
-    # -- writes, each refused until its model's writes_tested names it ---------------
+    # -- writes ------------------------------------------------------------
 
     def write(self, key: str, value: object) -> None:
         """Write the model's setting `key`, its `value` checked first (Setting.checked), and
@@ -572,22 +605,22 @@ class A50X:
         bytes of its feature's reads them first, as HeadsetControl's G522 driver does for
         its auto sleep."""
         setting = self.model.setting(key)
-        setting.checked(value)
-        self._refuse(setting.feature, key, setting.words)
+        raw = setting.checked(value)
+        self._refuse(self.setting_refused(key))
         read = self.request(setting.feature, setting.read) if setting.kept else b""
-        self.request(setting.feature, setting.write, setting.params(value, read))
+        self.request(setting.feature, setting.write, setting.params(raw, read))
 
     def write_equalizer(self, instance: str, bands: tuple[Band, ...]) -> None:
         """Write an instance's bands into the slot it plays, refused (write_refused) with
-        nothing sent, each gain checked first (G HUB's setCustomEQ, B4-04)."""
-        self._refuse(equalizer.ID, EQUALIZER_WRITE, f"{instance} equalizer")
+        nothing sent, each gain checked first (G HUB's setCustomEQ on the A50 X, 2026-10-21)."""
+        self._refuse(self.equalizer_write_refused(instance))
         self.request(equalizer.ID, equalizer.FN_SET, equalizer.written_bands(
             self.model.instances[instance], self.model.slot, bands))
 
     def write_mix(self, mix: Mix) -> None:
-        """Write the whole stream mix, as G HUB does (B4-12), refused (write_refused) with
+        """Write the whole stream mix, as G HUB does (2026-10-21), refused (write_refused) with
         nothing sent."""
-        self._refuse(mixer.ID, MIXER_WRITE, mixer.WORDS)
+        self._refuse(self.mix_refused())
         self.request(mixer.ID, mixer.FN_WRITE, mixer.written(mix))
 
     # -- events ------------------------------------------------------------
@@ -599,12 +632,12 @@ class A50X:
 
     def event(self, message: Message) -> tuple[int, int | str | dict | Mix | bool | None] | None:
         """What an event says, as (the feature id, its value): the battery's and each
-        setting's function 0 event, in its read's layout (the A50 X's, captures B4 and B5,
-        the noise gate's too, which is read with function 1; PR 531's battery event); the
-        stream mix's function 2 event, its Mix, and its function 0, whether the microphone is
-        live. Any other event of a listed feature gives (the feature id, None): something
-        changed that a read would tell. None for an event of an index the lookups did not
-        give. Raises UnreadableAnswer."""
+        setting's function 0 event, in its read's layout (the A50 X's, measured against G HUB
+        on 2026-10-21, the noise gate's too, which is read with function 1; PR 531's battery
+        event); the stream mix's function 2 event, its Mix, and its function 0, whether the
+        microphone is live. Any other event of a listed feature gives (the feature id, None):
+        something changed that a read would tell. None for an event of an index the lookups
+        did not give. Raises UnreadableAnswer."""
         feature_id = self.feature_at(message.index)
         if feature_id is None:
             return None

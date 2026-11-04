@@ -49,7 +49,7 @@ CALL_TIMEOUT = 10.0
 RETRY = 10.0
 RETRY_MAX = 120.0
 
-#: The most of a peer's error message `said` keeps.
+#: The most of a peer's words `peer_words` keeps, an error's message in `said` included.
 SAID_MAX = 500
 
 
@@ -99,7 +99,14 @@ def said(err: GLib.Error) -> str:
     message = err.message[:SAID_MAX + 300]
     if message.startswith("GDBus.Error:") and ": " in message:
         message = message.split(": ", 1)[1]
-    return escaped(message)[:SAID_MAX]
+    return peer_words(message)
+
+
+def peer_words(message: str) -> str:
+    """Words a D-Bus peer wrote, escaped and cut at SAID_MAX characters, as `said` writes an
+    error's message. They are cut before they are escaped too, since a peer's words can fill
+    a bus message and each character escapes to one or more."""
+    return escaped(message[:SAID_MAX])[:SAID_MAX]
 
 
 def trying_again() -> str:
@@ -141,9 +148,6 @@ class Bus:
     watchers: list[int] = field(default_factory=list)
     #: Well-known name -> its unique owner; absent or None while it has none.
     owners: dict[str, str | None] = field(default_factory=dict)
-    #: Whether a connect failed or the connection closed since the last success, so the
-    #: next success is said.
-    failed: bool = False
 
     def halt(self) -> None:
         """Drop the reconnect still waiting, and cancel the connect on its way and every call
@@ -251,8 +255,10 @@ class Loop:
                 else:
                     log.error("another D-Bus callback failed in the same dispatch: %r", exc,
                               exc_info=exc)
-                # False stands in for what `fn` did not return: it ends Loop.timeout's source.
-                return cast("R", False)
+                # None stands in for what `fn` did not return: Loop.timeout's source reads it
+                # as False and ends, and GDBus answers a property read with an error. PyGObject
+                # cannot make False a Variant and prints a TypeError of its own.
+                return cast("R", None)
         return guarded
 
     def say(self, topic: str, message: str, level: int = logging.WARNING) -> None:
@@ -365,11 +371,12 @@ class Loop:
 
     def subscribe(self, bus: Bus, sender: str, interface: str, member: str, path: str,
                   handler: Callable[[tuple], None], arg0: str | None = None,
-                  signature: str | None = None) -> int:
+                  signature: str | None = None, namespace: bool = False) -> int:
         """Subscribe to one signal from the owner of `sender`; `handler` gets its arguments.
         GDBus checks the sender against the name's current owner, so another client cannot
         send these, though anything in the Shell's process, another extension among them,
-        sends as the Shell. With `signature`, one of another type is dropped and said, at debug
+        sends as the Shell. With `namespace`, an `arg0` of a name in the namespace `arg0`
+        matches too. With `signature`, one of another type is dropped and said, at debug
         when it is the type dropped last: its handler would raise out of dispatch(), which
         stops the daemon. A handler that reads its arguments needs `signature`."""
         def received(_conn: object, _sender: str, _path: str, _iface: str, _member: str,
@@ -385,30 +392,53 @@ class Loop:
             # On a live connection: a connect sets it before the setup that subscribes, and
             # `call` runs `then` only while its connection is current.
             subscription = cast("Gio.DBusConnection", bus.conn).signal_subscribe(
-                sender, interface, member, path, arg0, self.gio.DBusSignalFlags.NONE,
-                self.guard(received))
+                sender, interface, member, path, arg0,
+                self.gio.DBusSignalFlags.MATCH_ARG0_NAMESPACE if namespace
+                else self.gio.DBusSignalFlags.NONE, self.guard(received))
         bus.subscriptions.append(subscription)
         return subscription
+
+    def unsubscribe(self, bus: Bus, subscription: int) -> None:
+        """Take back `subscribe`'s `subscription`, made on `bus`'s live connection."""
+        cast("Gio.DBusConnection", bus.conn).signal_unsubscribe(subscription)
+        bus.subscriptions.remove(subscription)
 
     def watch(self, bus: Bus, name: str, appeared: Callable[[str], object] | None = None,
               vanished: Callable[[], None] | None = None) -> None:
         """Follow who owns `name`, in bus.owners, and call back on a change."""
-        def on_appeared(_conn: object, _name: str, owner: str) -> None:
+        def on_appeared(owner: str) -> None:
             bus.owners[name] = owner
             if appeared is not None:
                 appeared(owner)
 
-        def on_vanished(_conn: object, _name: str) -> None:
+        def on_vanished() -> None:
             had = bus.owners.get(name)
             bus.owners[name] = None
             if had is not None and vanished is not None:
                 vanished()
+        self.follow(bus, name, on_appeared, on_vanished)
+
+    def follow(self, bus: Bus, name: str, appeared: Callable[[str], object],
+               vanished: Callable[[], None]) -> int:
+        """Watch `name` as GDBus does, `vanished` for a name no one owns at the start too, and
+        keep no owner in bus.owners. The watch's id, for `unwatch`."""
+        def on_appeared(_conn: object, _name: str, owner: str) -> None:
+            appeared(owner)
+
+        def on_vanished(_conn: object, _name: str) -> None:
+            vanished()
         with self.home():
             # As in `subscribe`: a connect sets the connection before the setup that watches.
             watcher = self.gio.bus_watch_name_on_connection(
                 cast("Gio.DBusConnection", bus.conn), name, self.gio.BusNameWatcherFlags.NONE,
                 self.guard(on_appeared), self.guard(on_vanished))
         bus.watchers.append(watcher)
+        return watcher
+
+    def unwatch(self, bus: Bus, watcher: int) -> None:
+        """Take back `follow`'s `watcher`, made on `bus`'s live connection."""
+        self.gio.bus_unwatch_name(watcher)
+        bus.watchers.remove(watcher)
 
     def call(self, bus: Bus, destination: str, path: str, interface: str, method: str,
              args: GLib.Variant | None, reply: str | None,
@@ -442,3 +472,22 @@ class Loop:
                       self.gio.DBusCallFlags.NONE, round(CALL_TIMEOUT * 1000),
                       bus.cancellable, self.guard(finish))
         return True
+
+    def call_with_fds(self, bus: Bus, destination: str, path: str, interface: str,
+                      method: str, args: GLib.Variant, reply: str,
+                      then: Callable[[tuple, list[int]], None],
+                      failed: Callable[[GLib.Error], None]) -> None:
+        """`call` on `bus`'s live connection for a reply that carries fds: `then` gets the
+        unpacked reply and every fd that came with it, each of which it keeps or closes."""
+        def finish(source: Gio.DBusConnection, result: Gio.AsyncResult) -> None:
+            try:
+                value, fds = source.call_with_unix_fd_list_finish(result)
+            except self.glib.Error as err:
+                failed(err)
+                return
+            then(value.unpack(), fds.steal_fds() if fds is not None else [])
+        with self.home():
+            cast("Gio.DBusConnection", bus.conn).call_with_unix_fd_list(
+                destination, path, interface, method, args, self.glib.VariantType(reply),
+                self.gio.DBusCallFlags.NONE, round(CALL_TIMEOUT * 1000), None, bus.cancellable,
+                self.guard(finish))

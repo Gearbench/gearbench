@@ -80,7 +80,7 @@ APP_SUMMARY = ("Lighting, G keys, DPI and macros for Logitech G keyboards and mi
 #: Gearbench's notices a switch in Settings > Notifications.
 DESKTOP_ENTRY = "io.github.gearbench.Gearbench"
 #: The notification spec's urgency byte: 0 low, 1 normal, 2 critical.
-URGENCY_NORMAL = 1
+URGENCY_NORMAL, URGENCY_CRITICAL = 1, 2
 
 #: The delay inhibitor's Why, as `systemd-inhibit --list` shows it; its Who is APP_NAME.
 INHIBIT_WHY = "Turning the keyboard lights off before the machine sleeps"
@@ -90,6 +90,11 @@ INHIBIT_NO_FD = "logind's Inhibit reply lacked its fd, so a suspend may not wait
 #: Said at debug when GetIdletime fails, unless halt() canceled it or its bus closed under
 #: it: the session reads again a wait later.
 IDLE_TIME_UNANSWERED = "Mutter's IdleMonitor did not answer GetIdletime: %s"
+#: Said, with the cause and the retry after it, when the IdleMonitor did not add a watch.
+WATCH_NOT_ADDED = ("Mutter's IdleMonitor did not add a watch, so input may not bring the "
+                   "lights back")
+#: Said, with the cause after it, when the window's Activate failed.
+OPEN_FAILED = "could not open the window"
 
 #: What is off while logind's Active is not followed: Session.why_inactive takes unknown for
 #: active.
@@ -185,6 +190,9 @@ class Desktop:
         self._loop = Loop()
         self._system = Bus("system", system_address)
         self._session = Bus("session", session_address)
+        #: The buses, by name, whose connect failed or whose connection closed since their
+        #: last success, so the next success is said.
+        self._lost: set[str] = set()
         self._tray_export = TrayExport(self._loop, self._session)
         #: The last LockedHint, Active and ScreenSaver state passed on; None
         #: before the first reading, so that one always goes through.
@@ -200,8 +208,9 @@ class Desktop:
         self._inhibitor_fd: int | None = None
         self._inhibiting = False
         #: The groups that want a user-active watch, each watch's group by its IdleMonitor id,
-        #: and the groups whose Add is on its way. A group's epoch moves on at remove_watches(),
-        #: so an Add answered after that is taken back.
+        #: and the groups whose Add is on its way. A group's epoch moves on at each Add and at
+        #: remove_watches(), so an Add answered after that is taken back, and an Add's retry
+        #: does not run once a later ask has replaced that Add.
         self._wanted: set[str] = set()
         self._watches: dict[int, str] = {}
         self._adding: set[str] = set()
@@ -290,9 +299,9 @@ class Desktop:
 
     def _connected(self, bus: Bus) -> None:
         self._loop.quiet(f"connect {bus.name}")
-        if bus.failed:
+        if bus.name in self._lost:
             log.info("connected to the %s bus again", bus.name)
-            bus.failed = False
+            self._lost.discard(bus.name)
         else:
             log.debug("connected to the %s bus at %s", bus.name, bus.address)
         if bus is self._system:
@@ -309,7 +318,7 @@ class Desktop:
 
     def _retry(self, bus: Bus) -> None:
         """Connect again after the backoff, and double it for next time."""
-        bus.failed = True
+        self._lost.add(bus.name)
         self._loop.backoff(bus, lambda: self._connect(bus))
 
     def _drop(self, bus: Bus) -> Gio.DBusConnection | None:
@@ -372,8 +381,7 @@ class Desktop:
     def _forget_session(self) -> None:
         if self._session_sub is not None:
             # A subscription outlasts no connection: _drop forgets it with the one it was on.
-            cast("Gio.DBusConnection", self._system.conn).signal_unsubscribe(self._session_sub)
-            self._system.subscriptions.remove(self._session_sub)
+            self._loop.unsubscribe(self._system, self._session_sub)
         self._session_sub = self._session_path = None
 
     def _got_display(self, reply: tuple) -> None:
@@ -477,58 +485,60 @@ class Desktop:
                 or bus.conn is None or bus.owners.get(LOGIN1) is None):
             return
         self._inhibiting = True
-        owner = bus.owners.get(LOGIN1)
+        conn, owner = bus.conn, bus.owners.get(LOGIN1)
 
-        def finish(source: Gio.DBusConnection, result: Gio.AsyncResult) -> None:
+        def current() -> bool:
             # A call to a logind that went away or was replaced, or on a connection since
             # closed, is not current: _login1_gone or _drop reset the flag, and the next
             # logind may hold a call _login1_appeared made. Relies on the bus sending
             # NameOwnerChanged before the NoReply for the call it dropped (dbus-daemon 1.16.2).
-            current = source is self._system.conn and self._system.owners.get(LOGIN1) == owner
-            if current:
+            ours = conn is self._system.conn and self._system.owners.get(LOGIN1) == owner
+            if ours:
                 self._inhibiting = False
-            try:
-                value, fds = source.call_with_unix_fd_list_finish(result)
-            except self._loop.glib.Error as err:
-                if not current or self._loop.benign(err):
-                    return
-                gio = self._loop.gio
-                if err.matches(gio.io_error_quark(), gio.IOErrorEnum.TIMED_OUT):
-                    # No answer is no refusal: unlike one, it is asked again from here.
-                    # _inhibit's guards make the retry nothing once released or held.
-                    self._loop.say("inhibit", f"logind did not answer the request for a sleep "
-                                              f"delay inhibitor within {CALL_TIMEOUT:g} s, so a "
-                                              f"suspend may not wait for the lights; asking "
-                                              f"again in {RETRY:g} s")
-                    self._loop.timeout(RETRY, self._inhibit)
-                    return
-                self._loop.say("inhibit", f"logind refused a sleep delay inhibitor, so a "
-                                          f"suspend may not wait for the lights: {said(err)}")
+            return ours
+
+        def failed(err: GLib.Error) -> None:
+            # Released while the call was on its way: the next take_inhibitor asks again and
+            # says its own failure.
+            if not current() or self._loop.benign(err) or not self._want_inhibitor:
                 return
-            stolen = fds.steal_fds() if fds is not None else []
-            (index,) = value.unpack()
-            keep = stolen[index] if current and 0 <= index < len(stolen) else None
+            gio = self._loop.gio
+            if err.matches(gio.io_error_quark(), gio.IOErrorEnum.TIMED_OUT):
+                # No answer is no refusal: unlike one, it is asked again from here.
+                # _inhibit's guards make the retry nothing once released or held.
+                self._loop.say("inhibit", f"logind did not answer the request for a sleep "
+                                          f"delay inhibitor within {CALL_TIMEOUT:g} s, so a "
+                                          f"suspend may not wait for the lights; asking "
+                                          f"again in {RETRY:g} s")
+                self._loop.timeout(RETRY, self._inhibit)
+                return
+            self._loop.say("inhibit", f"logind refused a sleep delay inhibitor, so a "
+                                      f"suspend may not wait for the lights: {said(err)}")
+
+        def answered(reply: tuple, stolen: list[int]) -> None:
+            ours = current()
+            (index,) = reply
+            keep = stolen[index] if ours and 0 <= index < len(stolen) else None
             for fd in stolen:
                 if fd != keep:
                     os.close(fd)
-            if not current:
+            if not ours:
                 return
-            if keep is None:
-                self._loop.say("inhibit", INHIBIT_NO_FD)
-            elif not self._want_inhibitor or self._inhibitor_fd is not None:
+            if not self._want_inhibitor or self._inhibitor_fd is not None:
                 # Released while the call was on its way, or a logind that gave up its name
                 # and took it back answered its first call first.
-                os.close(keep)
+                if keep is not None:
+                    os.close(keep)
+            elif keep is None:
+                self._loop.say("inhibit", INHIBIT_NO_FD)
             else:
                 self._loop.quiet("inhibit")
                 self._inhibitor_fd = keep
                 log.debug("holding a sleep delay inhibitor")
-        with self._loop.home():
-            bus.conn.call_with_unix_fd_list(
-                LOGIN1, LOGIN1_PATH, MANAGER, "Inhibit",
-                self._loop.glib.Variant("(ssss)", ("sleep", APP_NAME, INHIBIT_WHY, "delay")),
-                self._loop.glib.VariantType("(h)"), self._loop.gio.DBusCallFlags.NONE,
-                round(CALL_TIMEOUT * 1000), None, bus.cancellable, self._loop.guard(finish))
+        self._loop.call_with_fds(
+            bus, LOGIN1, LOGIN1_PATH, MANAGER, "Inhibit",
+            self._loop.glib.Variant("(ssss)", ("sleep", APP_NAME, INHIBIT_WHY, "delay")), "(h)",
+            answered, failed)
 
     # ------------------------------------------------ GNOME, the session bus
 
@@ -548,6 +558,8 @@ class Desktop:
                              lambda _args: self._set_focus(None))
         self._loop.subscribe(bus, SHELL, FOCUS, "Ready", FOCUS_PATH,
                              lambda _args: self._subscribe_focus(bus))
+        # watch, not follow: the Shell's owner kept in bus.owners is the tray's rule for who
+        # may be the tray.
         self._loop.watch(bus, SHELL, appeared=lambda _owner: self._shell_appeared(bus),
                          vanished=lambda: self._set_focus(None))
         self._tray_export.connected()
@@ -559,7 +571,8 @@ class Desktop:
     def _subscribe_focus(self, bus: Bus) -> None:
         """Ask the extension for the focus and its changes. A Shell without it answers
         UnknownMethod, and one that takes this process for another program, AccessDenied:
-        focus then stays with Xwayland."""
+        focus then comes from Xwayland, or from the running programs with no X display
+        (focus.py)."""
         signals = self._focus_signals
 
         def got(reply: tuple) -> None:
@@ -572,7 +585,7 @@ class Desktop:
             if self._loop.gio.DBusError.get_remote_error(err) == ACCESS_DENIED:
                 self._loop.say("focus refused", "Gearbench's GNOME Shell extension refused "
                                f"this daemon: it answers the {SERVICE}.service unit alone, so a "
-                               "daemon run by hand follows focus on Xwayland", logging.INFO)
+                               "daemon run by hand gets no focus from it", logging.INFO)
             else:
                 log.debug("Subscribe to Gearbench's GNOME Shell extension failed: %s",
                           said(err))
@@ -593,22 +606,27 @@ class Desktop:
             self._on_blanked(value)
 
     def notify(self, summary: str, body: str, icon: str, replaces_id: int = 0,
-               done: Callable[[int | None], None] | None = None,
-               transient: bool = False) -> bool:
-        """Post a notice; `done` gets its id, or None when the call failed. False, and `done`
-        is not called, without a session bus.
+               done: Callable[[int | None, bool], None] | None = None,
+               transient: bool = False, urgent: bool = False) -> bool:
+        """Post a notice; `done` gets its id and False, or None and whether the server refused
+        it: False for a call canceled or cut off with its connection (Loop.benign). False, and
+        `done` is not called, without a session bus.
 
         `replaces_id` is a previous notice's id: while the server still holds it, this one
         updates its banner in place and restarts its time; once it has gone, the server hands
         out a new id. The body is escaped, as the server reads markup; `icon` is an icon name
         for the image-path hint. With `transient`, GNOME Shell 50.1 (notificationDaemon.js,
-        messageTray.js) drops the notice from its list when the banner goes. The urgency
-        stays normal: GNOME shows no banner for a low one, only the list entry.
+        messageTray.js) drops the notice from its list when the banner goes. The urgency is
+        normal, since GNOME shows no banner for a low one, only the list entry, and with
+        `urgent` critical, whose banner GNOME Shell 50.1 shows over a full-screen window, and
+        with banners off for the app, expanded and with no timeout (messageTray.js, read
+        2026-10-28).
         """
         if not self.available:
             return False
         hints = {"desktop-entry": self._loop.glib.Variant("s", DESKTOP_ENTRY),
-                 "urgency": self._loop.glib.Variant("y", URGENCY_NORMAL),
+                 "urgency": self._loop.glib.Variant(
+                     "y", URGENCY_CRITICAL if urgent else URGENCY_NORMAL),
                  "category": self._loop.glib.Variant("s", "device"),
                  "image-path": self._loop.glib.Variant("s", icon)}
         if transient:
@@ -620,19 +638,19 @@ class Desktop:
         def sent(reply: tuple) -> None:
             self._loop.quiet("notify")
             if done is not None:
-                done(reply[0])
+                done(reply[0], False)
 
         def refused(err: GLib.Error) -> None:
-            if not self._loop.benign(err):
+            benign = self._loop.benign(err)
+            if not benign:
                 self._loop.say("notify", f"the notification server did not take a notice: "
                                          f"{said(err)}")
             if done is not None:
-                done(None)
+                done(None, not benign)
         return self._loop.call(self._session, NOTIFICATIONS, NOTIFICATIONS_PATH, NOTIFICATIONS,
                                "Notify", args, "(u)", sent, refused)
 
     def close_notification(self, notice: int) -> None:
-        """Take a notice down."""
         if self.available:
             self._loop.call(self._session, NOTIFICATIONS, NOTIFICATIONS_PATH, NOTIFICATIONS,
                             "CloseNotification", self._loop.glib.Variant("(u)", (notice,)),
@@ -683,7 +701,7 @@ class Desktop:
         if owner is None or group in self._adding or group in self._watches.values():
             return
         self._adding.add(group)
-        epoch = self._watch_epochs.get(group, 0)
+        epoch = self._watch_epochs[group] = self._watch_epochs.get(group, 0) + 1
 
         def added(reply: tuple) -> None:
             (watch_id,) = reply
@@ -704,14 +722,12 @@ class Desktop:
                 return          # that owner is gone, or the group's watch was removed since
             self._adding.discard(group)
             if not self._loop.benign(err):
-                self._loop.say("watch", f"Mutter's IdleMonitor did not add a watch, so input "
-                                        f"may not bring the lights back: {said(err)}; asking "
-                                        f"again in {RETRY:g} s")
+                self._loop.say("watch", f"{WATCH_NOT_ADDED}: {said(err)}; asking again in "
+                                        f"{RETRY:g} s")
                 # The daemon may not ask for this group's watch again: a synced
                 # mouse's is asked for once, as the desktop goes idle.
                 self._loop.timeout(RETRY, lambda: self.add_user_active_watch(group)
-                                   if group in self._wanted
-                                   and epoch == self._watch_epochs.get(group, 0) else None)
+                                   if epoch == self._watch_epochs.get(group, 0) else None)
         self._loop.call(self._session, owner, IDLE_MONITOR_PATH, IDLE_MONITOR,
                         "AddUserActiveWatch", None, "(u)", added, refused)
 
@@ -756,8 +772,8 @@ class Desktop:
 
         def failed(err: GLib.Error) -> None:
             if not self._loop.benign(err):
-                self._loop.say("open", f"could not open the window: {said(err)}; D-Bus starts "
-                                       f"it from {DESKTOP_ENTRY}.service")
+                self._loop.say("open", f"{OPEN_FAILED}: {said(err)}; D-Bus starts it from "
+                                       f"{DESKTOP_ENTRY}.service")
         return self._loop.call(self._session, DESKTOP_ENTRY, APP_PATH, APPLICATION, "Activate",
                                self._loop.glib.Variant("(a{sv})", (platform,)), None,
                                lambda _reply: self._loop.quiet("open"), failed)

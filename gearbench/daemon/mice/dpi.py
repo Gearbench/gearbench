@@ -19,11 +19,11 @@ from typing import TYPE_CHECKING, cast
 
 from ...config import RATE_CHOICES, REPORT_RATES, entry_under, keep_under
 from ...library_files import slug
-from ...mouse import PROFILE_SECTOR, MouseError, live_rate_note, profile_words
+from ...mouse import PROFILE_SECTOR, live_rate_note, profile_words
 from ...onboard import DPI_HIGHEST, DPI_LOWEST, dpi_fits, stage_dpi
 from ...profiles import GameProfile, MouseTuning
-from ...sensor import place_stages
-from ...wording import escaped
+from ...sensor import MouseError, place_stages
+from ...wording import escaped, printable
 from ..shared import MOUSE_PROBE, whole_number
 from .attached import (
     TUNING_HOST_ONLY,
@@ -134,12 +134,10 @@ class Dpi:
         return self.kept_for(self.d.config.mouse_dpi, attached)
 
     def known_dpi(self, attached: AttachedMouse) -> int | None:
-        """The DPI a mouse is on as far as the daemon knows, with nothing sent: the last reading,
-        which its own writes keep up to date, else the DPI it last put the mouse on or read
-        (AttachedMouse.on_dpi), else the one remembered for it (remembered_dpi)."""
-        dpi = (attached.reading or {}).get("dpi")
-        if dpi is None:
-            dpi = attached.dpi_on
+        """The DPI a mouse is on as far as the daemon knows, with nothing sent: the DPI it last
+        put the mouse on or read (AttachedMouse.on_dpi), else the one remembered for it
+        (remembered_dpi)."""
+        dpi = attached.dpi_on
         return dpi if dpi is not None else self.remembered_dpi(attached)
 
     def remember_dpi(self, dpi: int, found: AttachedMouse) -> None:
@@ -357,14 +355,14 @@ class Dpi:
                      attached.name, slot + 1)
             return
         if running != PROFILE_SECTOR or mouse.profile is None or mouse.flash_unknown:
-            log.info("%s moved to DPI stage %d by itself; it runs %s, whose stages the daemon "
-                     "does not know, so it is not taken", attached.name, slot + 1,
+            log.info("%s moved to DPI stage %d by itself; not taken, since it runs %s, whose "
+                     "stages the daemon does not know", attached.name, slot + 1,
                      profile_words(running))
             return
         dpi = mouse.profile.dpi_slot(slot)
         if dpi is None:
-            log.info("%s moved to DPI stage %d by itself, which profile 1 does not have "
-                     "(stages %s); ignored", attached.name, slot + 1,
+            log.info("%s moved to DPI stage %d by itself; not taken, since profile 1 has no "
+                     "such stage (stages %s)", attached.name, slot + 1,
                      ", ".join(map(str, mouse.profile.dpi_stages)))
             return
         if dpi == self.known_dpi(attached):
@@ -394,19 +392,21 @@ class Dpi:
     def tuning_for(self, attached: AttachedMouse) -> MouseTuning | None:
         """The loaded game profile's own stages and rate for this mouse's model, or None. Stages
         from a hand edit are clamped to the sensor's range and snapped to its step, as set_dpi
-        takes a DPI (tune_stages snaps the same way, but refuses one outside the range): the
-        mouse takes only a DPI on its step, and a choice is told from the stages by that DPI."""
+        lands a DPI (Mouse.landing; tune_stages snaps the same way, but refuses one outside the
+        range): the mouse takes only a DPI on its step, and a choice is told from the stages by
+        that DPI."""
         overlay = self.d.games.overlay
         tuning = overlay.tuning(dpi_keys(attached.product)) if overlay is not None else None
         span = attached.mouse.dpi_range
         if tuning is None or tuning.dpi_stages is None or span is None:
             return tuning
-        stages = tuple(span.clamp(dpi) for dpi in tuning.dpi_stages)
+        land = attached.mouse.landing
+        stages = tuple(land(dpi) for dpi in tuning.dpi_stages)
         if len(set(stages)) != len(stages):
             return tuning      # two stages on one step: left as written
         # A tuning with stages names its default and shift among them (MouseTuning.from_json).
-        return replace(tuning, dpi_stages=stages, default=span.clamp(cast(int, tuning.default)),
-                       shift=span.clamp(cast(int, tuning.shift)))
+        return replace(tuning, dpi_stages=stages, default=land(cast(int, tuning.default)),
+                       shift=land(cast(int, tuning.shift)))
 
     def in_force(self, attached: AttachedMouse) -> MouseTuning | None:
         """The game profile's own stages and rate the mouse is on while the daemon runs it in
@@ -471,6 +471,20 @@ class Dpi:
         target.dpi_before_load, target.dpi_before_tuning = (
             same_place(dpi, before, after) if dpi in before else dpi
             for dpi in (target.dpi_before_load, target.dpi_before_tuning))
+
+    def follow_remembered(self, target: AttachedMouse, before: list[int],
+                          after: list[int]) -> None:
+        """Follow the remembered DPI through a profile 1 edit (same_place) with nothing read,
+        as follow_kept follows the kept ones: one that is no stage of `before` stays, one whose
+        place is past the end of `after` is forgotten."""
+        remembered = self.remembered_dpi(target)
+        if remembered not in before:
+            return
+        moved = same_place(remembered, before, after)
+        if moved is None:
+            self.forget_dpi(target)
+        else:
+            self.keep_for(self.d.config.mouse_dpi, target, moved)
 
     def take_tuning(self, attached: AttachedMouse, tuning: MouseTuning | None) -> None:
         """Note that the mouse is on `tuning` now, under the load in force (Games.loads). A
@@ -668,6 +682,10 @@ class Dpi:
             if moved is not None and (attached.dpi_before_edit is not None
                                       or was.index(have) < len(now)):
                 wanted, why = moved, "the stage it was on"
+            elif attached.dpi_before_edit is not None:
+                # One that neither holds it nor reaches its place leaves it (same_place), but
+                # the move may have landed.
+                wanted, why = have, "the DPI it was on before the edit"
         return wanted, why, read, edited
 
     @staticmethod
@@ -746,7 +764,8 @@ class Dpi:
         (kept_rate), in force in HOST mode in place of profile 1's once the profile's own is
         dropped. One sentence: the Mouse tab toasts a long one as a fixed line
         (style.short_note's `one_sentence`), since the name can hold ". "."""
-        name = overlay.name
+        # Printable: a name keeps a bidi override, which would reverse the window's note.
+        name = printable(overlay.name)
         again = (f"(see the journal), which is sent again at the mouse's next setup or "
                  f"{name}'s next load")
         refused = f"the mouse refused the change {again}"
@@ -787,7 +806,8 @@ class Dpi:
                 old_default = profile.default_dpi_index if profile is not None else 0
                 old_shift = profile.shift_dpi_index if profile is not None else 0
             stages, at_default, at_shift = place_stages(
-                *stage_request(request), old, old_default, old_shift, mouse.dpi_range)
+                *stage_request(request), old, old_default, old_shift, mouse.dpi_range,
+                target.name)
             tuning = replace(own, dpi_stages=tuple(stages), default=stages[at_default],
                              shift=stages[at_shift])
         self.save_tuning(overlay, target, tuning)

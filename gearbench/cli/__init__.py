@@ -1,10 +1,9 @@
 """Command line for Gearbench.
 
-Most commands go through the daemon's control socket: the daemon holds the 0x8071
-claim, and a second process writing lighting would fight it. The man page's DESCRIPTION
-names the commands that need no daemon. `headset-spatial` runs systemctl, pw-dump and
-pw-cli in this process, and `headset-volume` pw-dump and pw-cli, so the daemon's sandbox
-never has to allow them.
+Most commands go through the daemon's control socket: the daemon holds the lighting
+claims, and a second process writing lighting would fight them. The man page's
+DESCRIPTION names the commands that need no daemon. A command that runs systemd's or PipeWire's
+programs runs them in this process, so the daemon's sandbox never has to allow them.
 
 This module has `build_parser` and `main`. A group of subcommands is a module with its
 handlers and the functions that add its subcommands to the parser:
@@ -16,9 +15,13 @@ handlers and the functions that add its subcommands to the parser:
 - `a50x`: `audio` and the commands after it, for the Astro A50 X and A50 Gen 5 and the
   PRO X 2, G522 and G325 LIGHTSPEED headsets.
 - `headset`: the A50 Gen 4.
-- `headset_spatial`: `headset-spatial`, for every headset in spatial.HEADSETS.
+- `headset_spatial`: `headset-spatial`, for every headset in pipewire_headsets.HEADSETS.
+- `headset_outputs`: `headset-outputs`, Gearbench Game, Chat and Media, for every headset in
+  pipewire_headsets.HEADSETS.
 - `headset_volume`: `headset-volume`, the volume of each headset's microphone and of the
   Game and Chat outputs of the headsets in system_volume.OUTPUTS.
+- `headset_noise`: `headset-noise`, the noise suppression of every headset in
+  headset_mic.HEADSETS.
 - `g432`: the Logitech G432 and the other headsets of its family.
 - `keyboard`: the M profile, the lighting, the leader (`sync-keyboard`), `bind`, `keys` and
   `probe`.
@@ -26,7 +29,8 @@ handlers and the functions that add its subcommands to the parser:
 - `mouse`: the mouse.
 - `report`: `report`, the device report.
 - `service`: `daemon` and `gui`.
-- `status`: `status`, `save`, `reload`, the lock and tray switches, `idle` and `config`.
+- `status`: `status`, `save`, `reload`, the lock and tray switches, `idle`, `battery-notices`
+  and `config`.
 """
 
 from __future__ import annotations
@@ -40,14 +44,26 @@ import traceback
 from typing import NoReturn, cast
 
 from .. import __version__
-from ..daemon import BUSY, DOWN, NOT_REACHED, REPLY_UNREAD, UNREAD, failure, socket_path
+from ..daemon import (
+    BUSY,
+    DOWN,
+    NOT_IN_TIME,
+    NOT_REACHED,
+    REPLY_UNREAD,
+    UNREAD,
+    failure,
+    socket_path,
+)
 from ..desktop import APP_SUMMARY
 from ..keyboard import MODEL_OF as KEYBOARDS
-from ..wording import escaped, reason, word_list
+from ..settings_files import backup_dir, shown_path
+from ..wording import SERVICE_JOURNAL, escaped, reason, word_list
 from . import (
     a50x,
     g432,
     headset,
+    headset_noise,
+    headset_outputs,
     headset_spatial,
     headset_volume,
     keyboard,
@@ -92,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
                "sent through a power-off"
                + (f", as a {word_list(taken)} is taken to" if taken else "") + ". "
                "The mouse-* commands that say so rewrite onboard profile 1, backed up first "
-               "to ~/.config/gearbench/backup/. The G432's adapter kept the level "
+               f"to {escaped(shown_path(backup_dir()))}/. The G432's adapter kept the level "
                "g432-sidetone wrote through an unplug when tested; g432-auto-off and "
                "g432-lights --startup and --store write what a headset of its family keeps, "
                "refused on a model not tested on its hardware. Only headset-save writes the "
@@ -117,7 +133,9 @@ def build_parser() -> argparse.ArgumentParser:
     mouse.add_mouse_switches(sub)
     headset.add_headset(sub)
     headset_spatial.add_headset_spatial(sub)
+    headset_outputs.add_headset_outputs(sub)
     headset_volume.add_headset_volume(sub)
+    headset_noise.add_headset_noise(sub)
     g432.add_g432(sub)
     a50x.add_audio(sub)
     status.add_switches_and_idle(sub)
@@ -207,6 +225,13 @@ def _from_daemon(exc: BaseException) -> bool:
                for frame, _line in traceback.walk_tb(exc.__traceback__))
 
 
+#: The kernel's reset or broken pipe that send_command lets through with no answer: the
+#: daemon's end closed with the request not all read, and serve_one reads a request whole
+#: before it acts on it.
+REQUEST_NOT_READ = ("the daemon stopped or crashed before reading the whole request, so nothing "
+                    f"was done; `{SERVICE_JOURNAL}`, or the terminal it ran in, says why")
+
+
 def _daemon_error(exc: OSError | json.JSONDecodeError) -> str:
     """What went wrong with a request to the daemon, as `_run` says it."""
     kind = failure(exc)
@@ -216,14 +241,13 @@ def _daemon_error(exc: OSError | json.JSONDecodeError) -> str:
     # Each kind but UNREAD is an OSError (failure).
     error = cast(OSError, exc)
     if kind == DOWN:
-        # send_command's own are sentences; the kernel's (a reset, a broken pipe) carry an
-        # errno and name nothing.
-        return (reason(error) if error.errno is None
-                else f"{NOT_REACHED}: {reason(error)}")
+        # send_command's own are sentences. The kernel's, a reset or a broken pipe, carry an
+        # errno and come only once connect() took.
+        return reason(error) if error.errno is None else REQUEST_NOT_READ
     if kind == BUSY:
         # connect() to a full backlog, so unlike a timeout the request never left.
         return ("the daemon is busy, so the request was not sent; try again in a moment"
                 if isinstance(error, BlockingIOError)
-                else "the daemon did not answer in time; it may be busy")
+                else NOT_IN_TIME)
     # connect()'s error names no path.
     return f"{NOT_REACHED} at {socket_path()}: {reason(error)}"

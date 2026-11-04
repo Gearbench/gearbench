@@ -3,13 +3,18 @@ library's: the shipped presets' names, a preset's name, the most presets a file 
 an action finds the preset a page read, a file's version and its atomic write, each preset
 read on its own, and the words for a file that does not read or was read in part; and a
 library's, a50-eq.json's and a model's (LIBRARY_NAME), a Centurion headset's or a G432
-family model's with an equalizer of its own: its presets and their changes (Saved), its read
-and its checked write. Standard library only.
+family model's with an equalizer of its own: its presets and their changes (Saved), its read,
+its checked write, the lock an edit holds from one to the other and the edit that holds it.
+Standard library only.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import fcntl
+import os
+import time
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar, Protocol, Self, cast
@@ -27,6 +32,10 @@ LIBRARY_NAME = "{}-eq.json"
 PRESETS_MAX = 16
 #: Why no more presets can be saved.
 PRESETS_FULL = f"the limit is {PRESETS_MAX} presets: delete one, or change one instead"
+#: Why a library refuses a preset of bands one of its presets has, by that one's number and
+#: name: the bands playing show as the first preset of them, so a second could never be shown,
+#: renamed or deleted from the window while the first is there.
+ALREADY_SAVED = "preset {} ({}) has these bands already"
 #: Why a number names no preset of a library, by how many there are: none, one, or more.
 NO_PRESETS = "your library has no presets yet"
 NOT_THE_PRESET = "your library has one preset, number 1, not {}"
@@ -42,6 +51,16 @@ PARTIAL = ("{} has presets Gearbench leaves out ({}), so Gearbench changes nothi
 #: so it is never written over. The file's path, then the cause.
 UNREAD = ("{} could not be read ({}), so Gearbench leaves it as it is: fix it, or move it "
           "away to start the library over")
+#: The most seconds an edit waits for another hold of its library's folder (held): an edit
+#: holds it a few ms, so a hold this long is a process stopped mid-edit, or another account's
+#: open of a folder an older Gearbench made under the login umask, and waiting on would stall
+#: the window's one thread to the daemon. A bound of Gearbench's own.
+LOCK_WAIT = 5.0
+#: The seconds between tries of the lock while another hold keeps it.
+LOCK_STEP = 0.05
+#: Why an edit is refused when its folder stays held past LOCK_WAIT: the folder, the seconds.
+LOCK_HELD = ("another program held {} for {:g} seconds, so nothing was changed: try again "
+             "once it lets go")
 
 
 class LibraryUnread(settings_files.ConfigError):
@@ -53,11 +72,22 @@ class LibraryPartial(settings_files.ConfigError):
     """A library read with presets left out, which refuses a change: PARTIAL's sentence."""
 
 
+class LibraryHeld(settings_files.ConfigError):
+    """An edit's library folder held past LOCK_WAIT: LOCK_HELD's sentence."""
+
+
 class Named(Protocol):
     """A preset of any file, which number_named finds by its name."""
 
     @property
     def name(self) -> str: ...
+
+
+class Whole(Protocol):
+    """Presets an edit changes: `whole` refuses them while their file was read in part or not
+    at all."""
+
+    def whole(self) -> Self: ...
 
 
 class Record(Named, Protocol):
@@ -159,15 +189,6 @@ def preset_name(name: object) -> str:
     return cast("str", name)
 
 
-def is_name(name: object) -> bool:
-    """Whether preset_name takes `name`."""
-    try:
-        preset_name(name)
-    except ValueError:
-        return False
-    return True
-
-
 def entries(data: object, version: int) -> list | None:
     """The `presets` of a preset file's `data` at `version`, [] where it holds no list of
     them, or None for data that is no object or of another version: true is no version,
@@ -186,26 +207,24 @@ def unread_why(data: object, version: int) -> str:
         return f"it holds {wording.kind_of(data)}, not an object"
     if "version" not in data:
         return "it has no version"
-    return f"version {wording.written(data['version'])} is not {version}"
-
-
-def not_a_list(data: object) -> list[str]:
-    """The reason for PARTIAL's list when the `presets` of a file's `data`, which entries
-    read, are of another kind than a list, else none. Null holds none to lose, and entries
-    gives no presets for another kind, so none is left out beside it."""
-    held = cast("dict", data).get("presets")
-    if held is None or isinstance(held, list):
-        return []
-    return [f"its presets are {wording.kind_of(held)}, not a list"]
+    held = data["version"]
+    # written() gives a list or an object by its kind, which "version ... is not" can't hold.
+    if isinstance(held, (list, dict)):
+        return f"its version is {wording.written(held)}, not {version}"
+    return f"version {wording.written(held)} is not {version}"
 
 
 def read_each[T](data: object, saved: list, read: Callable[[dict], T], skip: int = 0
                  ) -> tuple[list[tuple[int, T]], list[str]]:
     """Each preset of `saved`, the entries' list of `data`, past its first `skip`, as `read`
-    takes it, with its number in the file, and what was left out, for PARTIAL: not_a_list's
-    reason, each preset that is no object, each `read` refuses with a ValueError, in its
-    words, and those read past PRESETS_MAX, the first `skip` counted."""
-    left_out = not_a_list(data)
+    takes it, with its number in the file, and what was left out, for PARTIAL: presets of
+    another kind than a list or null, each preset that is no object, each `read` refuses
+    with a ValueError, in its words, and those read past PRESETS_MAX, the first `skip`
+    counted."""
+    # Null holds no presets to lose, and entries gave none for another kind.
+    held = cast("dict", data).get("presets")
+    left_out = ([] if held is None or isinstance(held, list)
+                else [f"its presets are {wording.kind_of(held)}, not a list"])
     taken: list[tuple[int, T]] = []
     for number, entry in enumerate(saved[skip:], skip + 1):
         if not isinstance(entry, dict):
@@ -269,6 +288,38 @@ def load_library[L](path: Path, of: Callable[[object, Path], L], empty: L,
     return of(data, path)
 
 
+@contextmanager
+def held(path: Path) -> Iterator[None]:
+    """The block, which reads the library at `path` and saves it, run while an exclusive
+    flock(2) on its folder keeps another Gearbench front end's edit out, so one edit's save
+    cannot land between another's read and its save. With no folder there yet, or something
+    other than a folder in its place, the block runs unheld: the load reads no library there
+    or says what is wrong. LibraryHeld, with the block not run, where another hold of the
+    folder lasts past LOCK_WAIT. Raises the OSError of a folder that cannot be opened."""
+    try:
+        folder = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    except (FileNotFoundError, NotADirectoryError):
+        folder = None
+    if folder is None:
+        # Out of the except clause, so an error of the block is not chained to the open's.
+        yield
+        return
+    try:
+        deadline = time.monotonic() + LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(folder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise LibraryHeld(wording.both_ends(LOCK_HELD.format(
+                        settings_files.shown_path(path.parent), LOCK_WAIT))) from None
+                time.sleep(LOCK_STEP)
+        yield
+    finally:
+        os.close(folder)
+
+
 def save_library[T](path: Path, version: int, presets: Sequence[T], entry: Callable[[T], dict],
                     read: Callable[[dict], object], prefix: str) -> None:
     """A library's `presets` to `path` atomically (write), each one's `entry` read back by
@@ -277,3 +328,14 @@ def save_library[T](path: Path, version: int, presets: Sequence[T], entry: Calla
     for each in saved:
         read(each)
     write(path, version, {}, saved, prefix)
+
+
+def edit[L: Whole](path: Path, load: Callable[[], L], change: Callable[[L], L],
+                   save: Callable[[L], None]) -> L:
+    """Save what `change` makes of the presets `load` reads from `path`, and answer them:
+    `load`'s refusal of a file that does not read, and `whole`'s of one read in part, each
+    left as it is. The load and the save run under `held`."""
+    with held(path):
+        changed = change(load().whole())
+        save(changed)
+    return changed

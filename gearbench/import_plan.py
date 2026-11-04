@@ -6,8 +6,9 @@ what it leaves out. `ghub_plan.make_plan` and `pack.make_plan` each build one, w
 `take_programs` (`programs_for` and `keepers_last`) for a program another game profile
 already loads. `requests` turns a plan into control socket commands, the one place they are
 built, so the daemon writes every file and its hand-edit protection covers an import;
-`held_back` and `reply_lines` are for the front end that sends them. Nothing here reads
-G HUB's settings or the pack, and nothing here writes a profile, macro or setting.
+`failed_saves`, `held_back` and `reply_lines` are for the front end that sends them.
+Nothing here reads G HUB's settings or the pack, and nothing here writes a profile, macro or
+setting.
 """
 
 from __future__ import annotations
@@ -16,18 +17,24 @@ from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
 from itertools import groupby
-from typing import cast
 
 from .apps import wanted_forms
-from .config import MOUSE_ACTIONS, Config, macro_name
+from .config import KEY_WORDS, MOUSE_WORDS, Config, layer_binding, macro_name
 from .keyboard import own_entry, own_named_keys
 from .library_files import slug
 from .macros import KEY_STEPS, MacroLibrary, step_summary
-from .mouse import MODEL_IDS, MODEL_OF, bindings_of
+from .mouse import MODEL_IDS, MODEL_OF, bindings_of, shift_bindings_of
 from .profiles import MAX_PROCESSES, GameProfile, Library, layers_of
 from .settings_files import ConfigError
 from .uinput import MODIFIER_KINDS, parse_binding
-from .wording import NO_REASON, RESTART_DAEMON, counted, without_controls, word_list
+from .wording import (
+    NO_REASON,
+    RESTART_DAEMON,
+    UNKNOWN_COMMAND,
+    counted,
+    without_controls,
+    word_list,
+)
 
 #: What to do with an imported name Gearbench already has: write the import over it, keep
 #: both (the import under a new name), or keep it and import nothing for it.
@@ -44,13 +51,11 @@ ON_CLASH = {REPLACE: REPLACE, "keep-both": KEEP, "keep-mine": SKIP, KEEP: KEEP, 
 class Existing:
     """The game profiles, macros and M profile names Gearbench has now."""
 
-    profiles: list[str] = field(default_factory=list)
     #: Macro name to (repeat, steps).
     macros: dict[str, tuple[str, list[dict]]] = field(default_factory=dict)
     m_names: dict[int, str] = field(default_factory=dict)
-    #: The game profiles themselves by name, as the library reads their
-    #: files, for telling an import from one already there. A name in
-    #: `profiles` with none here is a clash whatever it holds.
+    #: The game profiles by name, as the library reads their files, for telling an import
+    #: from one already there.
     games: dict[str, GameProfile] = field(default_factory=dict)
     #: By name, each macro of yours as `form_of` worked it out.
     _forms: dict[str, tuple[str, list[dict]]] = field(default_factory=dict, init=False,
@@ -78,7 +83,7 @@ class Existing:
 
     @cached_property
     def _profile_slugs(self) -> dict[str, str]:
-        return _first_by_slug(self.profiles)
+        return _first_by_slug(self.games)
 
     @cached_property
     def _macro_slugs(self) -> dict[str, str]:
@@ -107,7 +112,6 @@ def existing_from_disk() -> Existing:
     # MacroLibrary.all keeps one file per name, the one get plays.
     macros = {macro.name: (macro.repeat, macro.steps) for macro in MacroLibrary().all()}
     return Existing(
-        profiles=list(games),
         macros=macros,
         m_names=m_names,
         games=games,
@@ -138,26 +142,37 @@ def macro_form(repeat: str, steps: list[dict]) -> tuple[str, list[dict]]:
 def game_form(game: GameProfile, macro: Callable[[str], object],
               models: Collection[str]) -> tuple:
     """What a game profile does, for telling an import from one already
-    there: its G keys, MR layer and each mouse model's buttons as they are
-    in force, a macro binding by what `macro` says the macro it names does,
-    and the lighting as it is saved for each keyboard model of `models`,
-    those the import has lighting for, which a replace writes. Not its name,
-    and not its programs."""
-    def does(spec: str | None, actions: tuple[str, ...] = ()) -> object:
-        if spec is None or spec in actions:
+    there: its G keys on both layers as saved, each mouse model's buttons on
+    both layers as the daemon runs them, a macro binding by what `macro` says
+    the macro it names does, and the lighting as it is saved for each keyboard
+    model of `models`, those the import has lighting for, which a replace
+    writes. Not its name, and not its programs."""
+    def does(spec: str | None, words: frozenset[str] = KEY_WORDS) -> object:
+        if spec is None or spec in words:
             return spec
         name = macro_name(spec)
         return ("macro", macro(name)) if name is not None else _keys(spec)
 
-    # A model with no entry, as Use factory bindings… leaves it, runs its defaults, and the import
-    # writes each model it has in full; an id no model has keeps its entry.
-    mice = {model: bindings_of(game.mouse, model) for model in MODEL_IDS}
-    mice |= {key: entry for key, entry in game.mouse.items() if int(key, 16) not in MODEL_OF}
+    def by_model(entries: dict[str, dict[str, str]],
+                 read: Callable[[dict[str, dict[str, str]], str], Mapping[str, str | None]]
+                 ) -> dict:
+        # A model with no entry, as Use factory bindings… leaves it, runs its defaults, and the
+        # import writes each model it has in full; an id no model has keeps its entry.
+        mice = {model: read(entries, model) for model in MODEL_IDS}
+        mice |= {key: entry for key, entry in entries.items() if int(key, 16) not in MODEL_OF}
+        return {model: {k: does(v, MOUSE_WORDS) for k, v in entry.items()}
+                for model, entry in mice.items()}
+
+    def shifted(entries: dict[str, dict[str, str]], model: str) -> dict[str, str | None]:
+        # What each button sends while G-Shift is held, as the daemon runs it (layer_binding).
+        base, own = bindings_of(game.mouse, model), shift_bindings_of(entries, model)
+        return {name: layer_binding(base, own, name, True) for name in base}
+
     return (
         {k: does(v) for k, v in game.bindings.items()},
         {k: does(v) for k, v in game.shift.items()},
-        {model: {k: does(v, MOUSE_ACTIONS) for k, v in entry.items()}
-         for model, entry in mice.items()},
+        by_model(game.mouse, bindings_of),
+        by_model(game.mouse_shift, shifted),
         [own_entry(game.lighting, model) for model in sorted(models)],
     )
 
@@ -321,31 +336,21 @@ def programs_for(taking: list[tuple[list[str], str, str | None]], existing: Exis
     A program the import goes without because your profiles load it stays with the first of
     them, one the import leaves alone before one it replaces (`_owner`), even when the import
     replaces that profile with programs of its own: the replace keeps each such program after
-    the import's. Its name, and that of a replace taking a program another the import
+    the import's. It keeps none that one the import leaves alone meets, which the daemon
+    leaves out of it (`_yours`). An imported program that meets one a replace keeps stays
+    with that replace's profile, even where its own replace would take it. The name of a
+    replace that keeps, and that of an imported profile taking a program another the import
     replaces loads too, is a key of the mapping returned, with the other such replaces it
     waits for: those that replace a profile of yours loading a program it keeps or takes
-    (`keepers_last`). The import's programs past MAX_PROCESSES with those are left out (the
-    owner's decision of 2026-10-02), and said unless one it takes or keeps loads for them too
-    (the owner's decision of 2026-10-06).
+    (`keepers_last`). The import's programs past MAX_PROCESSES with those are
+    left out (the owner's decision of 2026-10-02), and said unless one it takes or keeps
+    loads for them too (the owner's decision of 2026-10-06).
 
     Past `limit` characters of those sentences, each profile from the one that passes it
     has one in place of its own (`_said_within`)."""
-    owners, given = _Programs(), _Programs()
-    if taking:
-        # Those the import leaves alone first: a program one of them loads stays with it, as
-        # the daemon writes a replace's program only while no other profile loads it.
-        replaced = {replacing for _programs, _name, replacing in taking}
-        for other, game in sorted(existing.games.items(), key=lambda item: item[0] in replaced):
-            for program in game.processes:
-                owners.add(program, other)
-    # By the profile of yours each stays with, the forms of the programs
-    # the import goes without for it.
-    held: dict[str, set[str]] = {}
-    for programs, _name, replacing in taking:
-        for program in programs:
-            owner = _owner(owners, program, replacing)
-            if owner is not None:
-                held.setdefault(owner, set()).update(wanted_forms(program))
+    owners, loading, stays = _yours(taking, existing)
+    given = _Programs()
+    keeps, kept_by = _kept(taking, owners, stays)
     out: dict[str, tuple[list[str], list[str]]] = {}
     #: By each replace keeping a program of yours or taking one another of yours loads, their forms.
     keeping: dict[str, set[str]] = {}
@@ -354,10 +359,8 @@ def programs_for(taking: list[tuple[list[str], str, str | None]], existing: Exis
     loaded_by: dict[str, list[str]] = {}
     left_to_say = limit or 0
     for programs, name, replacing in taking:
-        keep = [p for p in existing.games[replacing].processes
-                if not held[replacing].isdisjoint(wanted_forms(p))] if replacing in held else []
-        free, said = _programs_left(programs, name, owners, replacing, given)
-        left, cut, kept = _fitted(free, keep)
+        free, said = _programs_left(programs, name, owners, kept_by, replacing, given)
+        left, cut, kept = _fitted(free, keeps.get(name, []))
         # A cut program the profile still loads for, through one it takes or keeps, is not said.
         loads = set().union(*map(wanted_forms, [*left, *kept]))
         said += [f'Game profile "{name}" is imported without {program}: with the programs '
@@ -367,21 +370,76 @@ def programs_for(taking: list[tuple[list[str], str, str | None]], existing: Exis
             said, left_to_say = _said_within(said, name, left_to_say, limit)
         for program in left:
             given.add(program, name)
-        # Taken from the profile it replaces while another the import replaces loads it too.
+        # Taken while a profile of yours the import replaces, other than the one it replaces,
+        # loads it.
         waits = set().union(*(wanted_forms(p) for p in left
-                              if owners.first(p, but=replacing) is not None))
+                              if loading.first(p, but=replacing) is not None))
         if kept or waits:
             keeping[name] = waits.union(*map(wanted_forms, kept))
-            # A name: `kept` and `waits` are empty while `replacing` is None.
-            yours = existing.games[cast(str, replacing)]
-            for form in set().union(*map(wanted_forms, yours.processes)):
-                loaded_by.setdefault(form, []).append(name)
+            if replacing is not None:
+                yours = existing.games[replacing]
+                for form in set().union(*map(wanted_forms, yours.processes)):
+                    loaded_by.setdefault(form, []).append(name)
         out[name] = [*left, *kept], said
     # Sorted: a set of text iterates in an order PYTHONHASHSEED picks, and the keepers' order
     # is the plan's.
     return out, {name: list(dict.fromkeys(other for form in sorted(forms)
                                           for other in loaded_by.get(form, ()) if other != name))
                  for name, forms in keeping.items()}
+
+
+def _kept(taking: list[tuple[list[str], str, str | None]], owners: _Programs,
+          stays: Mapping[str, list[str]]) -> tuple[dict[str, list[str]], _Programs]:
+    """By the name it comes in under, the programs of yours each replace of `taking` keeps:
+    those of `stays` for the profile it replaces that meet an imported program staying with
+    that profile (`_owner`). And each such program with that profile, since the daemon leaves
+    out of another profile a program one of them meets."""
+    # By the profile of yours each stays with, the forms of the programs
+    # the import goes without for it.
+    held: dict[str, set[str]] = {}
+    for programs, _name, replacing in taking:
+        for program in programs:
+            owner = _owner(owners, program, replacing)
+            if owner is not None:
+                held.setdefault(owner, set()).update(wanted_forms(program))
+    keeps: dict[str, list[str]] = {}
+    kept_by = _Programs()
+    for _programs, name, replacing in taking:
+        if replacing in held:
+            keeps[name] = [p for p in stays[replacing]
+                           if not held[replacing].isdisjoint(wanted_forms(p))]
+            for program in keeps[name]:
+                kept_by.add(program, replacing)
+    return keeps, kept_by
+
+
+def _yours(taking: list[tuple[list[str], str, str | None]], existing: Existing
+           ) -> tuple[_Programs, _Programs, dict[str, list[str]]]:
+    """Your game profiles' programs, none while `taking` is empty: those an imported program
+    stays with (`_owner`), each program with its profile (`loading`), and by each profile
+    `taking` replaces, the programs of it its replace may keep (`stays`).
+
+    Those the import leaves alone come first, each program of theirs staying with them, as the
+    daemon writes a replace's program only while no other profile loads it. So a replaced
+    profile's program that one of theirs meets is in neither `owners` nor `stays`: an imported
+    program that meets it may still meet none of theirs, since two names can meet through
+    their 15-byte cut alone, and is then the import's to take."""
+    owners, loading = _Programs(), _Programs()
+    stays: dict[str, list[str]] = {}
+    if not taking:
+        return owners, loading, stays
+    replaced = {replacing for _programs, _name, replacing in taking}
+    for other, game in sorted(existing.games.items(), key=lambda item: item[0] in replaced):
+        for program in game.processes:
+            loading.add(program, other)
+            if other not in replaced:
+                owners.add(program, other)
+                continue
+            first = owners.first(program)
+            if first is None or first in replaced:
+                owners.add(program, other)
+                stays.setdefault(other, []).append(program)
+    return owners, loading, stays
 
 
 def _fitted(free: list[str], keep: list[str]) -> tuple[list[str], list[str], list[str]]:
@@ -456,23 +514,24 @@ class _Programs:
 def _owner(owners: _Programs, program: str, replacing: str | None) -> str | None:
     """The profile of yours `program` stays with, or None for one the import may take: the
     first `owners` has with it, unless that is `replacing`, whose replace then takes it. Those
-    the import leaves alone come first (programs_for), so any after `replacing` is another
+    the import leaves alone come first (`_yours`), so any after `replacing` is another
     the import replaces, and two of yours that load one program do not each keep it for the
     other."""
     owner = owners.first(program)
     return None if owner == replacing else owner
 
 
-def _programs_left(programs: list[str], name: str, owners: _Programs,
+def _programs_left(programs: list[str], name: str, owners: _Programs, kept_by: _Programs,
                    replacing: str | None, given: _Programs) -> tuple[list[str], list[str]]:
-    """`programs` less each that stays with a game profile of yours (`_owner`), or that
-    `given` gave another profile of the import, with a sentence for
-    each: the scan takes the first match by filename, so the import would take the
-    program from the user's profile or load two of its own for it."""
+    """`programs` less each that stays with a game profile of yours (`_owner`), or meets one
+    that `kept_by` has another replace keep, or that `given` gave another profile of the
+    import, with a sentence for each: the scan takes the first match by filename, so the
+    import would take the program from the user's profile or load two of its own for it, and
+    the daemon leaves out a program another profile loads."""
     left: list[str] = []
     said: list[str] = []
     for program in programs:
-        owner = _owner(owners, program, replacing)
+        owner = _owner(owners, program, replacing) or kept_by.first(program, but=replacing)
         taker = given.first(program)
         if owner is not None:
             said.append(f'Game profile "{name}" is imported without {program}, which stays '
@@ -561,7 +620,7 @@ def m_profile_parts(keys: Collection[str], mouse: bool, lighting: bool) -> list[
     and a keyboard that binds under their names comes in with them; a keyboard with names of its
     own (own_named_keys), or a mouse model, the import has nothing for keeps the M profile's.
     G HUB's lighting is read for the G915 alone (ghub_plan)."""
-    return ["G keys", *own_named_keys(keys), "MR layer", *(["mouse buttons"] if mouse else []),
+    return ["G keys", *own_named_keys(keys), "G-Shift layer", *(["mouse buttons"] if mouse else []),
             *(["G915's lighting"] if lighting else [])]
 
 
@@ -576,23 +635,29 @@ def plan_summary(plan: Plan, verb: str = "Writes") -> str:
     return f"{verb} {word_list(parts, 'and')}" if parts else "Nothing to write"
 
 
-def held_back(request: Mapping, sent: list[tuple[dict, dict]]) -> dict | None:
-    """The reply to take instead of sending `request`, a profile that binds a macro whose
-    macro_save in `sent` failed, or None to send it. Sent, it would play the user's own
+def failed_saves(sent: Iterable[tuple[Mapping, Mapping]]) -> dict[str, bool]:
+    """By slug, each macro whose macro_save in `sent` failed, and whether it went unanswered
+    as against refused: what `held_back` holds a profile back for. A sender keeps them as
+    the replies come, since a file can carry thousands of each."""
+    return {slug(r["value"]): bool(reply.get("unanswered")) for r, reply in sent
+            if r["command"] == "macro_save" and not reply.get("ok")}
+
+
+def held_back(request: Mapping, failed: Mapping[str, bool]) -> dict | None:
+    """The reply to take instead of sending `request`, a profile that binds a macro of
+    `failed` (`failed_saves`), or None to send it. Sent, it would play the user's own
     macro of that name, or none.
 
     A failed reply marked `unanswered` (a save the window timed out on or lost the
     connection for) may still have been saved, since the daemon reads a request it was too
     busy to take in time; the error says so. The CLI stops at a save with no answer and
     never hands one here."""
-    # By slug: whether the save went unanswered, as against refused.
-    failed = {slug(r["value"]): bool(reply.get("unanswered")) for r, reply in sent
-              if r["command"] == "macro_save" and not reply.get("ok")}
     # Only a profile's body binds a macro.
     if not failed or "profile" not in request:
         return None
     body = request["profile"]
-    for binding in (spec for layer in layers_of(body["bindings"], body["shift"], body["mouse"])
+    for binding in (spec for layer in layers_of(body["bindings"], body["shift"], body["mouse"],
+                                                body["mouse_shift"])
                     for spec in layer.values()):
         name = macro_name(binding)
         if name is not None and slug(name) in failed:
@@ -616,7 +681,7 @@ def reply_lines(sent: list[tuple[dict, dict]]) -> tuple[list[str], list[str]]:
         what = _what(request)
         if reply.get("ok"):
             done.append(what)
-        elif reply.get("error") == f"unknown command {request['command']!r}":
+        elif reply.get("error") == UNKNOWN_COMMAND.format(request["command"]):
             failed.append(f"{what}: {OLDER_DAEMON}")
             older = True
         else:

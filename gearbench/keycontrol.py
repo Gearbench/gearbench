@@ -1,14 +1,14 @@
 """Custom assignments on the G515 generation (0x1B05), the layer files that carry them, written
-through 0x8101, and Game Mode's state (0x4523): from G HUB 39.1.2's USB captures of a wired
-G515 TKL, firmware U1 67.01.B0008, on 2026-10-21. No published specification covers these
-features, so each function, byte and frame here is what those captures show, or is marked
-assumed.
+through 0x8101, and Game Mode's state (0x4523): from G HUB 39.1.2's USB traffic with a wired
+G515 TKL, firmware U1 67.01.B0008, captured on 2026-10-21. No published specification covers
+these features, so each function, byte and frame here is what that traffic shows, or is
+marked assumed.
 
 0x1B05: fn 1 reads whether custom assignments are on (01) or off (00), fn 2 reads the eight
 shortcuts that can turn them on and off, as pairs of key ids, and fn 3 reads the one chosen,
 `01 NN`, NN counting from 1 in fn 2's list. Gearbench writes none of them: the keyboard keeps
 the shortcut and the on/off state across a replug, and the G915 X LIGHTSPEED kept both, on and
-FN+F1, across a power loss (on Linux and in Windows capture G5c, 2026-10-23). The keyboard
+FN+F1, across a power loss (on Linux and on Windows, 2026-10-23). The keyboard
 sends event 0 for its keys set to report to the host, naming each one held by its trigger
 number (TriggeredKeys), and event 6 when its shortcut turns custom assignments on (01) or off
 (00).
@@ -17,7 +17,7 @@ number (TriggeredKeys), and event 6 when its shortcut turns custom assignments o
 keeps until it loses power (write_layer). A file is `00 NN`, NN entries, then 11 bytes an
 entry, the key id first: a remap, which the keyboard then types itself (remap_entry), or a key
 that reports to the host (report_entry). 0x8101 fn 6 switches the keyboard between its on-board
-mode, which it powers up in, as the G915 X LIGHTSPEED did (Windows capture G5c, 2026-10-23),
+mode, which it powers up in, as the G915 X LIGHTSPEED did (on Windows, 2026-10-23),
 and host mode (read_host_mode, write_mode, FN_MODE). The BASE layer's file took effect with no
 fn 6 in the mode the owner's wired G515 TKL powered up in, on 2026-10-22.
 
@@ -66,10 +66,10 @@ FN_COMMIT = 9           # 1b 05, the layer, 02 00, the length, the CRC-32
 #: The bytes of the file each fn 3 frame carries: a long report's sixteen.
 DATA_FRAME = 16
 #: fn 6, the mode: with no parameter it reads it, and HOST_MODE or ONBOARD_MODE sets it, each
-#: as G HUB 39.1.2 sent it to the owner's G515 TKL (A2, A5, A5c and A5d) and the owner's script
+#: as G HUB 39.1.2 sent it to the owner's G515 TKL (2026-10-21) and the owner's script
 #: to the G915 X LIGHTSPEED (2026-10-23). Its reply, read or set, starts IN_HOST_MODE in host
 #: mode, `00 00 01` on the G515 TKL, and on the G915 X LIGHTSPEED `00 01 01` read from Linux and
-#: `00 00 01` from Windows (capture G5c), what its second byte says not known, and `03` in the
+#: `00 00 01` from Windows, what its second byte says not known, and `03` in the
 #: on-board mode.
 FN_MODE = 6
 HOST_MODE, ONBOARD_MODE = 0x05, 0x0F
@@ -137,7 +137,7 @@ def commit_params(layer: int, data: bytes) -> bytes:
 
 def write_layer(dev: Hidpp, files: Feature, layer: int, data: bytes) -> None:
     """Write file `data` for `layer` through 0x8101 at `files`: begin, the data, the commit,
-    each frame of the data and the commit sent once.
+    each frame of the data and the commit not sent again once its answer is lost.
 
     Every file captured fitted one frame; files of three, sent in order, took effect on the
     owner's wired G515 TKL on 2026-10-22. fn 3's answer, `00 01` to each one-frame file
@@ -240,6 +240,15 @@ class TriggeredKeys:
         self.assigned = None
         write_layer(self.dev, self._files, LAYER_BASE, data)
         self.assigned, self._held = assigned, frozenset()
+
+    def let_go(self) -> None:
+        """Forget which keys are held, whose releases will not come."""
+        self._held = frozenset()
+
+    def lost(self) -> None:
+        """The keyboard lost power: the file written last is gone, so the next assign is owed
+        whatever it sets."""
+        self.assigned = None
 
     def handles(self, event: Event) -> bool:
         return event.feature_index == self._control.index and event.address == TRIGGER_EVENT

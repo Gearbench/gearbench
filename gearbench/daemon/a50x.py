@@ -9,12 +9,13 @@ model's `features` when it attaches, then only what the model's `sent` names: fi
 of each feature it lists. After that it reads a feature again when asked (`a50x` with `read`),
 after a resume or a headset's return to its receiver, after a write to it, and where an
 event leaves it unknown. G HUB reads the base when it starts and takes its events after
-(the A50 X's captures, B4-13): an event that carries a value is taken as its read, and any
+(on the A50 X, 2026-10-21): an event that carries a value is taken as its read, and any
 other event of a listed feature, or one it cannot read, has that feature read at the next
 pass. A read the base refuses or answers with what Gearbench cannot read forgets the value
-it had. The A50 X's base answers for its headset switched off (the captures, B3); a pass
-still stops at the first read with no answer, since a base that does not answer leaves each
-read to wait out its tries.
+it had. The A50 X's base answers for its headset switched off (measured against G HUB,
+2026-10-21); a pass still stops at the first read with no answer, since a base that does not
+answer leaves each read to wait out its tries. A receiver whose headset stops answering is let
+go as for its connection event saying the headset went away, since none may come.
 
 A write to a model whose writes are not tested is refused before anything is sent
 (a50x.not_tested). The value each setting's first read found is kept by model, across a
@@ -38,8 +39,7 @@ from typing import TYPE_CHECKING, cast
 
 from ..a50x import (
     A50X,
-    EQUALIZER_WRITE,
-    MIXER_WRITE,
+    AUDIO_READ,
     MODELS,
     ONBOARD,
     PRODUCTS,
@@ -72,16 +72,18 @@ from ..hidpp import (
     HidppFailure,
     HidppTimeout,
     UnreadableAnswer,
+    describe,
     descriptor_of,
 )
-from ..report import describe, untested_note
-from ..tray import Battery
-from ..wording import counted, given_count, reason, route, whole, word_list, written
+from ..report import SEND_REPORT, untested_note
+from ..tray import A50X_HEADSET_AWAY_CODE, Battery
+from ..wording import NO_SETTING, counted, given_count, reason, route, whole_in, word_list, written
 from .shared import (
     CABLE_LOOK,
     DEVICE_NOT_SET_UP,
     DEVICE_OFF,
     NODE_DENIED,
+    SET_UP_FAILED,
     AttachNotes,
     BatteryNotices,
     Lookout,
@@ -102,13 +104,13 @@ log = logging.getLogger("gearbench")
 #: No headset found, each model named once in the records' order, with what to plug in.
 NO_A50X = (f"no {word_list(list(dict.fromkeys(PRODUCTS.values())))} found; plug in its base "
            "station, receiver or cable")
-#: A receiver whose headset did not answer through its bridge at the attach, or that said its
-#: headset went away later, in the words every other device takes.
+#: A receiver whose headset is away from it (_headset_away), in the words every other device
+#: takes.
 HEADSET_AWAY = DEVICE_OFF.format("{}'s headset") + "; switch it on, or bring it near"
 #: The journal's warning of a node this user may not open: the node, the model, its dongle,
 #: why.
 CANNOT_OPEN = "a50x: cannot open {}, the {}'s {}: {}; " + NO_RULE
-#: What `a50x` gives of a headset away with no reply kept (_away_reply).
+#: What `a50x` gives of the base's readings with none kept (_readings, _away_reply).
 NOTHING_KEPT: dict[str, object] = {
     "device": None, "framing": None, "bridge": None, "listed": [], "battery": None,
     "battery_at": None, "settings": {}, "equalizer": {}, "presets": {}, "mix": None,
@@ -118,22 +120,26 @@ NOTHING_KEPT: dict[str, object] = {
 #: a descriptor that declares none.
 NO_FRAMING = "its report descriptor declares no report Gearbench knows on a vendor page, only {}"
 NO_REPORT = "its report descriptor declares no report"
+#: A base whose report descriptor has none of its model's framings (NO_FRAMING, NO_REPORT): a
+#: replug reads the same descriptor, so the next step is a device report, which carries it.
+FRAMING_UNKNOWN = SET_UP_FAILED + "; " + SEND_REPORT
 NOT_READ = ("the {}'s {} equalizer has not been read, so Gearbench has no bands to change: "
-            "read it with `gearbench-ctl audio --read`")
+            "read it with " + AUDIO_READ)
 NO_PRESETS = ("the presets of the {}'s {} equalizer have not been read, so Gearbench has none "
-              "to copy: read them with `gearbench-ctl audio --read`")
+              "to copy: read them with " + AUDIO_READ)
 NOTHING_TO_RESET = "no setting of the {} was read before any write, so none is put back"
-#: An equalizer write that asks more than one way.
+#: An equalizer write that asks no way or more than one.
 ONE_OF = "give the equalizer ten gains, one of its presets or ten bands, one of the three"
 #: A model whose equalizer is 0x0636's, which Gearbench reads and does not write.
 EQUALIZER_READ_ONLY = ("Gearbench reads the {}'s equalizer and does not change it: a change "
                        "rewrites the sound filters saved in the headset")
 NO_MIX = "the {} has no stream mix that Gearbench drives"
 MIX_NOT_READ = ("the {}'s stream mix has not been read, so Gearbench has no mix to change: "
-                "read it with `gearbench-ctl audio --read`")
+                "read it with " + AUDIO_READ)
 MIX_UNLISTED = "the {}'s stream mix lists no {} source, so Gearbench has none to change"
-#: The stream mix's sources and the stream port, by the words a request names them.
-MIX_SOURCES = (mixer.STREAM, *mixer.SOURCES)
+#: The stream port and the stream mix's sources, by the words a request names them, in
+#: mixer.ORDER.
+MIX_SOURCES = (mixer.STREAM, *mixer.ORDER)
 
 
 class A50XHeadset(BatteryNotices):
@@ -150,11 +156,11 @@ class A50XHeadset(BatteryNotices):
         #: A node refused to this user and why a found base could not be set up, for
         #: problems() and the journal (AttachNotes).
         self._notes = AttachNotes()
-        #: A bridged model whose headset is away from its receiver (_headset_away), for
-        #: problems() and `a50x`, and the last reply of one that went away, its readings kept
-        #: while it does not answer, as a mouse's are (_away_reply).
+        #: A bridged model whose headset is away from its receiver (_headset_away), named and
+        #: keyed while it is as an attached one, and the readings of one that went away, by its
+        #: product id, kept while it does not answer, as a mouse's are (_away_reply).
         self._away: Model | None = None
-        self._kept: dict | None = None
+        self._kept: tuple[int, dict] | None = None
         #: The value each setting's first read found, by the model's key, kept across a replug
         #: and a move between the G522's cable and its receiver: what `reset` writes back. And
         #: the settings written before any read found them, whose read after it finds the
@@ -166,9 +172,6 @@ class A50XHeadset(BatteryNotices):
         #: attach did not go through, left alone while each stays.
         self._cable_look_at = 0.0
         self._cable_tried: set[Path] = set()
-        #: The model the battery notices were last armed for, by its key, which the G522's
-        #: cable and receiver share: another's attach arms them again.
-        self._battery_of: str | None = None
         self._clear()
 
     def _clear(self) -> None:
@@ -214,13 +217,18 @@ class A50XHeadset(BatteryNotices):
         away behind its receiver, with the reading kept; None with none."""
         if self.dev is None and self._away is not None:
             kept = self._kept_of(self._away)
-            return attached_entry(self._away.name, None, route(self._away.dongle),
-                                  kept.get("battery"), kept.get("battery_at"), answering=False)
+            entry = attached_entry(self._away.name, None, route(self._away.dongle),
+                                   kept.get("battery"), kept.get("battery_at"), self,
+                                   answering=False)
+            # The level warned of is the one of the model the notices were last armed for,
+            # which may be another's (battery_ids).
+            warned = self.battery_warned if self.battery_of == self._away.key else None
+            return {**entry, "battery_warned": warned}
         if self.dev is None:
             return None
         model = self.dev.model
         return attached_entry(model.name, str(self.path), route(model.dongle), self.battery,
-                              self.battery_wall)
+                              self.battery_wall, self)
 
     def tray_battery(self) -> Battery | None:
         """The tray's line for the headset: its last reading while a base is attached, and
@@ -228,11 +236,11 @@ class A50XHeadset(BatteryNotices):
         if self.dev is None and self._away is not None:
             kept = self._kept_of(self._away)
             battery = kept.get("battery")
-            return None if battery is None else Battery.of(
+            return None if battery is None else self.tray_line(
                 "a50x", self._away.name, battery, answering=False, read_at=kept.get("battery_at"))
         if self.name is None or self.battery is None:
             return None
-        return Battery.of("a50x", self.name, self.battery)
+        return self.tray_line("a50x", self.name, self.battery)
 
     def deadlines(self) -> list[float]:
         """The look for a base (Lookout.deadlines), or with one attached through a receiver
@@ -245,13 +253,14 @@ class A50XHeadset(BatteryNotices):
 
     def recheck(self) -> None:
         """After a resume: a missing base looked for at once, and an attached one's features
-        read at the next pass, since the headset may have charged or been switched off."""
+        read at the next pass, since the headset may have charged or been switched off: a
+        bridged one that no longer answers its receiver lets the receiver go (_call)."""
         self._lookout.recheck()
         if self.dev is not None:
             self._owed |= set(self.dev.features)
 
     def look_now(self) -> None:
-        """Have the next pass look for the cable (_look_for_cable): a node came (Plugs)."""
+        """Have the next pass look for the cable (_look_for_cable)."""
         self._cable_look_at = time.monotonic()
 
     # -- attaching ---------------------------------------------------------
@@ -281,7 +290,7 @@ class A50XHeadset(BatteryNotices):
         try:
             found = find_each_a50x()
         except OSError as exc:
-            log.debug("a50x: could not look for a base station: %s", exc)
+            log.debug("a50x: could not look for a headset: %s", exc)
             return
         for path, product in found:
             if self._attach(path, MODELS[product]):
@@ -291,14 +300,14 @@ class A50XHeadset(BatteryNotices):
         """Move a headset attached through its receiver to its cable once the cable's node is
         there, looked for through sysfs at the looks' pace (Plugs.pace), or at the next pass
         after look_now: the cable is preferred, as a keyboard's and a mouse's are, though the
-        headset may still answer through its receiver. One this
-        user may not open yet is not tried: its refusal is warned
-        of and a problem while the node stays refused (_refused), as a mouse's cable's is, the
-        receiver stays attached, and udev's grant brings the look forward. The connect
+        headset may still answer through its receiver. One this user may not open yet is not
+        tried: its refusal is warned of and a problem while the node stays refused and is its
+        cable's (_refused), as a mouse's cable's is, the receiver stays attached, and udev's
+        grant brings the look forward. The connect
         tries the cable first; one that does not attach leaves the receiver attached again,
         and is left alone while its node stays. Where neither attaches, the next look is timed
         from this one, and a headset away keeps what it last said, as maybe_connect and
-        _linked have it."""
+        _let_go_away have it."""
         dev = cast("A50X", self.dev)
         cable, now = cable_of(dev.model), time.monotonic()
         if cable is None or not look_due(now, self._cable_look_at):
@@ -311,6 +320,9 @@ class A50XHeadset(BatteryNotices):
             return
         nodes = {path for path, product in found if product == cable.product}
         self._cable_tried &= nodes
+        if self._notes.denied is not None and self._notes.denied[0] not in nodes:
+            # The refused cable unplugged: the kernel may give its number to another node.
+            self._notes.denied = None
         node = min(nodes - self._cable_tried, default=None)
         if node is None:
             return
@@ -319,7 +331,7 @@ class A50XHeadset(BatteryNotices):
             # at every look.
             self._refused(node, cable, os.strerror(errno.EACCES))
             return
-        receiver, kept = self.path, self.reply()
+        receiver, kept = self.path, (dev.model.product, self._readings())
         self.teardown()
         self.connect()
         if self.path == node:
@@ -332,9 +344,9 @@ class A50XHeadset(BatteryNotices):
             self._lookout.looked()
 
     def _attach(self, path: Path, model: Model) -> bool:
-        """connect's attach of one node; True once it attached, though a node gone at its
-        first read lets it go again. A failure is the problem said, until a node tried after
-        it in the same look attaches."""
+        """connect's attach of one node; True once it attached, though a node gone or a
+        headset that does not answer at its first read lets it go again. A failure is the
+        problem said, until a node tried after it in the same look attaches."""
         try:
             reports = describe(descriptor_of(path)).reports
         except OSError as exc:
@@ -344,8 +356,8 @@ class A50XHeadset(BatteryNotices):
         if framing is None:
             declared = ", ".join(f"0x{report:02x} on page 0x{page:04x}"
                                  for report, page in sorted(reports.items()))
-            self._set_up_failed(path, model,
-                                NO_FRAMING.format(declared) if declared else NO_REPORT)
+            why = NO_FRAMING.format(declared) if declared else NO_REPORT
+            self._set_up_failed(path, model, why, FRAMING_UNKNOWN.format(model.name, why))
             return False
         started = time.monotonic()
         dev = self._open(path, model, framing)
@@ -356,24 +368,29 @@ class A50XHeadset(BatteryNotices):
         except HidppFailure as exc:
             dev.close()
             quiet = isinstance(exc, HidppTimeout)
-            self._lookout.unanswered = path if quiet else None
+            if quiet:
+                # Only set: connect cleared it as the look began, and a later node's other
+                # failure leaves this one's wait to double (Lookout.looked).
+                self._lookout.unanswered = path
             if isinstance(exc, HeadsetAway):
                 self._headset_away(path, model,
                                    "headset did not answer its receiver at the attach")
             # A node gone is no base found.
             elif not isinstance(exc, DeviceGone):
-                self._set_up_failed(path, model, "no answer" if quiet else failure_reason(exc))
+                why = "no answer" if quiet else failure_reason(exc)
+                self._set_up_failed(path, model, why, DEVICE_NOT_SET_UP.format(
+                    model.name, why, f"its {model.dongle}"))
             self.d.note_slow(started, f"{model.name} connect on {path}", repeats="a50x")
             return False
         self._notes.attached()
         self._lookout.unanswered = self._away = None
         self.dev, self.path, self._kept = dev, path, None
         self.BATTERY_BODY = model.charge
-        if model.key != self._battery_of:
-            self._battery_of = model.key
-            self.battery_rearmed(f"the headset read before the {model.name} is no longer attached")
+        # By its key, which the G522's cable and receiver share.
+        self.armed_for(model.key,
+                       f"the headset read before the {model.name} is no longer attached")
         self.d.selector.register(dev.fileno, selectors.EVENT_READ, "a50x")
-        listed = [f"0x{feature_id:04x}" for feature_id, found in dev.features.items() if found]
+        listed = [f"0x{feature_id:04x}" for feature_id in dev.features if dev.listed(feature_id)]
         route = "" if dev.bridge is None else f", through its receiver's bridge at {dev.bridge}"
         log.info("a50x: %s connected on %s, frames %s%s, features %s%s", model.name, path,
                  framing.words(), route, ", ".join(listed) or "none",
@@ -408,9 +425,10 @@ class A50XHeadset(BatteryNotices):
         self._notes.refused(path, NODE_DENIED.format(path, f"{model.name}'s {model.dongle}"),
                             CANNOT_OPEN.format(path, model.name, model.dongle, why))
 
-    def _set_up_failed(self, path: Path, model: Model, why: str) -> None:
-        """A found base that could not be set up: a problem, said at info once."""
-        self._notes.not_set_up = DEVICE_NOT_SET_UP.format(model.name, why, f"its {model.dongle}")
+    def _set_up_failed(self, path: Path, model: Model, why: str, problem: str) -> None:
+        """A found base that could not be set up, `why` in words: `problem` for problems(),
+        said at info once."""
+        self._notes.not_set_up = problem
         self._notes.failed(path, f"a50x: the {model.name} on {path} could not be set up: {why}")
 
     def _headset_away(self, path: Path, model: Model, why: str) -> None:
@@ -467,14 +485,18 @@ class A50XHeadset(BatteryNotices):
         heard = False
         while (message := dev.next_event()) is not None:
             if isinstance(message, Link):
-                if not self._linked(dev, message):
+                # The bridge's connection event: a headset back is read again at the next
+                # pass, and one gone lets the receiver go, to be looked for again.
+                if not message.connected:
+                    self._let_go_away("receiver said its headset went away")
                     return
+                self._owed |= set(dev.features)
                 continue
             heard = True
             try:
                 said = dev.event(message)
             except UnreadableAnswer as exc:
-                log.info("a50x: an event could not be read: %s", exc)
+                log.info("a50x: an event of the %s could not be read: %s", dev.model.name, exc)
                 # It says the feature changed: its read at the next pass tells to what. Raised
                 # only for an index the lookups gave (A50X.event).
                 self._owed.add(cast("int", dev.feature_at(message.index)))
@@ -486,17 +508,14 @@ class A50XHeadset(BatteryNotices):
         if heard:
             self._owed |= self._unknown()
 
-    def _linked(self, dev: A50X, link: Link) -> bool:
-        """The bridge's connection event: a headset back is read again at the next pass, and
-        one gone lets the receiver go, to be looked for again; False for that."""
-        if link.connected:
-            self._owed |= set(dev.features)
-            return True
-        model, path, kept = dev.model, cast("Path", self.path), self.reply()
+    def _let_go_away(self, why: str) -> None:
+        """Let the receiver go with its headset away (_headset_away, `why`), keeping its last
+        readings for `a50x` and the tray."""
+        model, path = cast("A50X", self.dev).model, cast("Path", self.path)
+        kept = model.product, self._readings()
         self.teardown()
         self._kept = kept
-        self._headset_away(path, model, "receiver said its headset went away")
-        return False
+        self._headset_away(path, model, why)
 
     def _take(self, feature_id: int, value: int | str | dict | Mix | bool | None) -> None:
         """What an event said of a feature: its value, or None for a read owed."""
@@ -537,7 +556,7 @@ class A50XHeadset(BatteryNotices):
         if (denied := self._notes.denied_problem()) is not None:
             found.append(("a50x_no_permission", denied))
         if self._away is not None:
-            found.append(("a50x_headset_away", HEADSET_AWAY.format(self._away.name)))
+            found.append((A50X_HEADSET_AWAY_CODE, HEADSET_AWAY.format(self._away.name)))
         if self._notes.not_set_up is not None:
             found.append(("a50x_not_set_up", self._notes.not_set_up))
         return found
@@ -566,13 +585,14 @@ class A50XHeadset(BatteryNotices):
                 self._try(f"{instance} equalizer", partial(self._read_equalizer, dev, instance),
                           partial(self.equalizers.pop, instance, None))
                 if instance in dev.model.presets and instance not in self.presets:
-                    self._try(f"presets of the {instance}", partial(self._read_presets, dev, instance))
+                    self._try(f"{instance} equalizer presets",
+                              partial(self._read_presets, dev, instance))
         if onboard_eq.ID in wanted:
             self._try(onboard_eq.WORDS, partial(self._read_onboard_equalizer, dev),
                       partial(self.equalizers.pop, ONBOARD, None))
         if mixer.ID in wanted:
             self._try(mixer.WORDS, partial(self._read_mix, dev), self._forget_mix)
-            self._try("microphone's boom", partial(self._read_boom, dev), self._forget_boom)
+            self._try("microphone boom", partial(self._read_boom, dev), self._forget_boom)
 
     def _try(self, what: str, read: Callable[[], None],
              forget: Callable[[], object] = lambda: None) -> None:
@@ -587,7 +607,8 @@ class A50XHeadset(BatteryNotices):
         except HidppFailure as exc:
             forget()
             said_once(self._read_said, what,
-                      f"a50x: its {what} could not be read: {failure_reason(exc)}", logging.INFO)
+                      f"a50x: the {self.name}'s {what} could not be read: {failure_reason(exc)}",
+                      logging.INFO)
         else:
             self._read_said.pop(what, None)
 
@@ -632,9 +653,20 @@ class A50XHeadset(BatteryNotices):
     def battery_names(self) -> tuple[str, str]:
         return cast("str", self.name), "the headset"
 
+    def battery_ids(self) -> tuple[str, ...]:
+        """The key of the model whose headset is away behind its receiver while one is, which
+        no attach may have armed the notices for; else of the model they were last armed for,
+        which an attach sets."""
+        key = self.battery_of if self._away is None else self._away.key
+        return () if key is None else (key,)
+
+    def battery_node(self) -> Path | None:
+        return self.path
+
     def _call(self, work: Callable[[], object]) -> dict | None:
         """Run `work` on the base: None when it went through, else the refusal. A node gone
-        tears the base down."""
+        tears the base down, and a headset that does not answer its receiver lets the
+        receiver go (_let_go_away)."""
         name = cast("str", self.name)
         try:
             work()
@@ -643,6 +675,14 @@ class A50XHeadset(BatteryNotices):
             log.info("a50x: the %s went away: %s", dongle, failure_reason(exc))
             self.teardown()
             return hidpp_refusal(f"{name}'s {dongle}", exc)
+        except HeadsetAway as exc:
+            # No connection event may come for it, as for a headset switched off across a
+            # suspend. One that answers its lookups and not a read backs off as one that
+            # answers neither, or each look would attach it again.
+            path = self.path
+            self._let_go_away("headset stopped answering its receiver")
+            self._lookout.unanswered = path
+            return hidpp_refusal(name, exc)
         except HidppFailure as exc:
             if not isinstance(exc, HidppTimeout | UnreadableAnswer):
                 log.info("a50x: a request failed: %s", failure_reason(exc))
@@ -653,25 +693,44 @@ class A50XHeadset(BatteryNotices):
 
     def reply(self) -> dict:
         """`a50x`'s answer from what the base last said."""
+        return {"ok": True, "answering": True, **self._about(cast("A50X", self.dev).model),
+                **self._readings()}
+
+    def _about(self, model: Model) -> dict:
+        """What `a50x` says of `model` whether its headset answers or not: its names, each
+        setting's first read, its battery notices as config.json and its node have them now,
+        and why its writes are refused."""
+        return {
+            "name": model.name,
+            # Its key, which a set of its battery notices names it by.
+            "model": model.key,
+            "product": f"{model.product:04x}",
+            **self.notices_reply(),
+            "first": dict(self.first.get(model.key, {})),
+            # Why every write is refused, for the front ends to say before a click; None where
+            # none is.
+            "writes_refused": writes_refused(model),
+            # Not yet run on this hardware: the front ends ask for a device report.
+            "untested": not model.tested,
+        }
+
+    def _readings(self) -> dict:
+        """What the attached base said, NOTHING_KEPT's keys: kept while its headset is away
+        (_kept)."""
         dev = cast("A50X", self.dev)
         model = dev.model
         return {
-            "ok": True,
-            "answering": True,
-            "name": model.name,
             "device": str(self.path),
-            "product": f"{model.product:04x}",
             # How each frame starts, as "02 0c": the first connect checks it.
             "framing": dev.framing.words(),
             # The receiver's bridge's index, null for a model on its own node.
             "bridge": dev.bridge,
-            "listed": [f"0x{feature_id:04x}" for feature_id, found in dev.features.items()
-                       if found is not None],
+            "listed": [f"0x{feature_id:04x}" for feature_id in dev.features
+                       if dev.listed(feature_id)],
             "battery": self.battery,
             "battery_at": self.battery_wall,
             "settings": {s.key: self.values[s.key] for s in model.settings
                          if s.key in self.values},
-            "first": dict(self.first.get(model.key, {})),
             "equalizer": {instance: equalizer_reply(self.equalizers[instance],
                                                     self.presets.get(instance, {}))
                           for instance in model.equalizers if instance in self.equalizers},
@@ -680,28 +739,20 @@ class A50XHeadset(BatteryNotices):
                         if instance in self.presets},
             "mix": None if self.mix is None else mixer.reply(self.mix),
             "mic_live": self.mic_live,
-            # Why every write is refused, for the front ends to say before a click; None where
-            # none is.
-            "writes_refused": writes_refused(model),
-            # Not yet run on this hardware: the front ends ask for a device report.
-            "untested": not model.tested,
         }
 
     def _kept_of(self, model: Model) -> dict:
-        """The kept reply of `model`'s headset, or none for another model's."""
-        product = f"{model.product:04x}"
-        return self._kept if self._kept is not None and self._kept["product"] == product else {}
+        """The readings kept of `model`'s headset, or none for another model's."""
+        return self._kept[1] if self._kept is not None and self._kept[0] == model.product else {}
 
     def _away_reply(self, model: Model) -> dict:
         """`a50x`'s answer while `model`'s headset does not answer its receiver, with answering
-        false, as a mouse's reply keeps a silent mouse's: the reply kept when its receiver was
-        let go for the headset's leaving or for its cable (_kept), until a base attaches, or
-        nothing, as for a receiver unplugged while its headset answered. Its writes are
-        refused (missing)."""
-        return {**NOTHING_KEPT, **self._kept_of(model), "ok": True, "answering": False,
-                "name": model.name, "product": f"{model.product:04x}",
-                "first": dict(self.first.get(model.key, {})),
-                "writes_refused": writes_refused(model), "untested": not model.tested}
+        false, as a mouse's reply keeps a silent mouse's: what is said of the model now
+        (_about), and the readings kept when its receiver was let go for the headset's leaving
+        or silence or for its cable (_kept), until a base attaches, or none, as for a receiver
+        unplugged while its headset answered. Its writes are refused (missing)."""
+        return {"ok": True, "answering": False, **self._about(model), **NOTHING_KEPT,
+                **self._kept_of(model)}
 
     def _cmd_a50x(self, request: dict) -> dict:
         """The base's state; with `read`, every feature it lists read again first; while a
@@ -718,8 +769,8 @@ class A50XHeadset(BatteryNotices):
 
     def _cmd_a50x_set(self, request: dict) -> dict:
         """Write a setting's `value`, or with `reset` the value each setting's first read
-        found, then read it back. Refused, with nothing sent, where A50X.write_refused refuses
-        the write."""
+        found, then read it back. Refused, with nothing sent, where A50X.setting_refused
+        refuses the write."""
         if self.dev is None:
             return {"ok": False, "error": self.missing()}
         dev, model = self.dev, self.dev.model
@@ -728,30 +779,27 @@ class A50XHeadset(BatteryNotices):
         key = name_text(request.get("setting"), "a50x_set.setting").strip().lower()
         setting = next((s for s in model.settings if s.key == key.replace("-", "_")), None)
         if setting is None:
-            return {"ok": False, "error": (
-                f"there is no {model.name} setting {written(key)}; the settings are "
-                f"{word_list([s.key for s in model.settings], 'and')}")}
+            return {"ok": False, "error": NO_SETTING.format(
+                model.name, written(key), word_list([s.key for s in model.settings], "and"))}
         try:
             setting.checked(request.get("value"))
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
-        if (refused := dev.write_refused(setting.feature, setting.key,
-                                         setting.words)) is not None:
+        if (refused := dev.setting_refused(setting.key)) is not None:
             return {"ok": False, "error": refused}
         return self._write(dev, {setting.key: request["value"]})
 
     def _reset(self, dev: A50X, model: Model) -> dict:
         """Each setting's first-read value written back; refused, with nothing sent, unless
-        every one of their writes is tested and may go (A50X.write_refused)."""
+        every one of their writes is tested and may go (A50X.setting_refused)."""
         first = self.first.get(model.key, {})
         if not first:
             return {"ok": False, "error": NOTHING_TO_RESET.format(model.name)}
         if not set(first) <= model.writes_tested:
             return {"ok": False, "error": not_tested(model.name, "settings")}
         # Kept across a replug, whose lookup can miss a feature the first read's found.
-        for setting in map(model.setting, first):
-            if (refused := dev.write_refused(setting.feature, setting.key,
-                                             setting.words)) is not None:
+        for key in first:
+            if (refused := dev.setting_refused(key)) is not None:
                 return {"ok": False, "error": refused}
         return self._write(dev, first)
 
@@ -775,7 +823,7 @@ class A50XHeadset(BatteryNotices):
     def _cmd_a50x_mix(self, request: dict) -> dict:
         """One source's level or mute, or the stream port's level, written in the whole stream
         mix as it was last read, then read back. Refused, with nothing sent, where
-        A50X.write_refused refuses the write and for a source the mix as read does not list."""
+        A50X.mix_refused refuses the write and for a source the mix as read does not list."""
         if self.dev is None:
             return {"ok": False, "error": self.missing()}
         dev, model = self.dev, self.dev.model
@@ -785,7 +833,7 @@ class A50XHeadset(BatteryNotices):
             change = mix_change(request)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
-        if (refused := dev.write_refused(mixer.ID, MIXER_WRITE, mixer.WORDS)) is not None:
+        if (refused := dev.mix_refused()) is not None:
             return {"ok": False, "error": refused}
         if self.mix is None:
             return {"ok": False, "error": MIX_NOT_READ.format(model.name)}
@@ -795,6 +843,8 @@ class A50XHeadset(BatteryNotices):
         mix = change(self.mix)
 
         def write() -> None:
+            # Before the write, as _write's: a mix whose write or read back failed is unknown.
+            self.mix = None
             dev.write_mix(mix)
             log.info("a50x: the stream mix set to %s", mixer.words(mixer.reply(mix)))
             self._read_mix(dev)
@@ -806,8 +856,8 @@ class A50XHeadset(BatteryNotices):
         or with `bands` ten bands, a saved preset's (a50x_library), written into the slot the
         instance plays, then read back: the gains with each band's frequency and Q as read, a
         preset with its frequencies and gains and G HUB's Q for a preset (PRESET_Q), and the
-        bands as given. Refused, with nothing sent, for more than one of the three and where
-        A50X.write_refused refuses the write."""
+        bands as given. Refused, with nothing sent, for none or more than one of the three, and
+        where A50X.equalizer_write_refused refuses the write."""
         if self.dev is None:
             return {"ok": False, "error": self.missing()}
         dev, model = self.dev, self.dev.model
@@ -822,8 +872,7 @@ class A50XHeadset(BatteryNotices):
             asked = equalizer_change(model, instance, request)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
-        if (refused := dev.write_refused(equalizer.ID, EQUALIZER_WRITE,
-                                         f"{instance} equalizer")) is not None:
+        if (refused := dev.equalizer_write_refused(instance)) is not None:
             return {"ok": False, "error": refused}
         if isinstance(asked, tuple):
             bands = asked
@@ -843,6 +892,8 @@ class A50XHeadset(BatteryNotices):
             said = f"its {asked} preset"
 
         def write() -> None:
+            # Before the write, as _write's: bands whose write or read back failed are unknown.
+            self.equalizers.pop(instance, None)
             dev.write_equalizer(instance, bands)
             log.info("a50x: the %s equalizer set to %s", instance, said)
             self._read_equalizer(dev, instance)
@@ -872,9 +923,7 @@ def mix_change(request: dict) -> Callable[[Mix], Mix]:
         if source == mixer.STREAM:
             raise ValueError("the stream port has a level and no mute")
         return lambda mix: mix.with_muted(source, muted)
-    if not whole(level) or not 0 <= level <= mixer.LEVELS:
-        raise ValueError(f"a level of the stream mix is a whole number from 0 to "
-                         f"{mixer.LEVELS}, not {written(level)}")
+    level = whole_in(level, 0, mixer.LEVELS, "a level of the stream mix")
     return lambda mix: mix.with_level(source, level)
 
 
@@ -882,10 +931,10 @@ def equalizer_change(model: Model, instance: str, request: dict
                      ) -> list[float] | str | tuple[Band, ...]:
     """What an `a50x_eq` request asks of `instance`'s equalizer: ten gains, checked_gains'
     list; the name of one of the model's presets of it; or ten bands (bands_from), a tuple.
-    ValueError with the sentence for a value it does not take, or more than one of the
-    three (ONE_OF)."""
+    ValueError with the sentence for a value it does not take, or none or more than one of
+    the three (ONE_OF)."""
     gains, preset, bands = request.get("gains"), request.get("preset"), request.get("bands")
-    if sum(value is not None for value in (gains, preset, bands)) > 1:
+    if sum(value is not None for value in (gains, preset, bands)) != 1:
         raise ValueError(ONE_OF)
     if bands is not None:
         return bands_from(bands)

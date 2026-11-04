@@ -17,6 +17,7 @@ from bisect import bisect_left
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from .config import AT_10_AND_5, AT_30_AND_15, DEFAULT_BATTERY_NOTICES, NO_NOTICES, URGENT
 from .hidpp import DeviceGone, Feature, Hidpp, HidppError, HidppFailure, not_there
 from .wording import number
 
@@ -63,14 +64,15 @@ STATUS_STATES = {
     7: FAULT,
 }
 
-#: The two low-battery levels in whole percent, G HUB's LOW and CRITICAL, which the
-#: notices, the tray and the window's Battery row share.
+#: The two low-battery levels in whole percent of a device with no preset, G HUB's LOW and
+#: CRITICAL.
 LOW_PERCENT, CRITICAL_PERCENT = 30, 15
-#: The low-battery notices' thresholds in percent (daemon.shared.BatteryNotices), one notice
-#: below each; the tray's low-battery icon goes by the lower one.
-BATTERY_WARNINGS = (LOW_PERCENT, CRITICAL_PERCENT)
-#: What ends the low-battery notice of a device charged on its USB cable: a keyboard, the
-#: G432 family's wireless headsets and the Centurion headsets charged on a cable.
+#: Each of config.BATTERY_PRESETS' two levels in whole percent, low then very low.
+#: NO_NOTICES silences the low-battery notices alone, so its levels stay the default's.
+PRESET_LEVELS = {AT_30_AND_15: (LOW_PERCENT, CRITICAL_PERCENT), AT_10_AND_5: (10, 5),
+                 NO_NOTICES: (LOW_PERCENT, CRITICAL_PERCENT),
+                 URGENT: (LOW_PERCENT, CRITICAL_PERCENT)}
+#: What ends the low-battery notice of a device charged on its USB cable.
 CABLE_CHARGE = "Plug in its USB cable to charge it."
 #: What ends the low-battery notice of a headset charged on its base station.
 BASE_CHARGE = "Put the headset on its base station to charge it."
@@ -100,11 +102,27 @@ def has_battery(dev: Hidpp) -> bool:
 PLAIN = (None, ON_BATTERY, UNKNOWN)
 
 
+def notice_levels(preset: object) -> tuple[int, int]:
+    """The two levels of a device's preset (PRESET_LEVELS), low then very low: the default's,
+    DEFAULT_BATTERY_NOTICES', for any other value, as battery_notices_of reads a preset this
+    version does not know, and as the window reads a reply that gives none."""
+    default = PRESET_LEVELS[DEFAULT_BATTERY_NOTICES]
+    return PRESET_LEVELS.get(preset, default) if isinstance(preset, str) else default
+
+
 def shown_percent(percent: float) -> int:
     """The whole percent a view shows for a reading's `percent` (level_words), which every
     comparison of a percent the user reads goes by: at 14.6 a row reads "15%", and is not
     colored or warned of as below 15."""
     return round(percent)
+
+
+def below(percent: float | None, state: str | None, powered: bool, level: int) -> bool:
+    """Whether a reading is below `level` by the whole percent shown (shown_percent), as the
+    window's Battery row and the tray's icon compare it: never one with no percent, fully
+    charged or on external power (on_power)."""
+    return (percent is not None and state != FULL and not powered
+            and shown_percent(percent) < level)
 
 
 def level_words(percent: float | None, approximate: bool, state: str | None) -> str:
@@ -302,6 +320,9 @@ READERS: tuple[tuple[int, int, Callable[[bytes, CellCurves | None], dict]], ...]
     (F_VOLTAGE, 0, _voltage),
     (F_ADC, 0, adc),
 )
+#: The battery features of READERS whose readings are millivolts, which give a charge only
+#: against the device's cell; the others give their own.
+MILLIVOLT_READERS = frozenset({F_VOLTAGE, F_ADC})
 
 
 def _ask(dev: Hidpp, feature: Feature, function: int, name: str) -> bytes | None:
@@ -320,7 +341,7 @@ def _ask(dev: Hidpp, feature: Feature, function: int, name: str) -> bytes | None
         if isinstance(exc, HidppError):
             log.debug("the %s refused its battery read: %s", name, exc)
         else:
-            log.debug("the %s's battery read failed: %s", name, exc)
+            log.debug("the %s's battery was not read: %s", name, exc)
         return None
 
 #: Bit 7 of 0x1001's status byte: the device is on external power.
@@ -412,10 +433,14 @@ class CellCurves:
     #: Charging above this, the device reads NEARLY_FULL and no percentage.
     nearly_full_mv: int
 
+    def curve(self, charging: bool) -> tuple[tuple[int, float], ...]:
+        """The curve a reading is read against."""
+        return self.charging if charging else self.discharge
+
     def percent(self, millivolts: int, charging: bool) -> float | None:
         """Charge remaining, 0 to 100, linear between the curve's points; off either end,
         that end's value; None from an empty curve."""
-        curve = self.charging if charging else self.discharge
+        curve = self.curve(charging)
         if not curve:
             return None
         at = bisect_left(curve, millivolts, key=lambda point: point[0])
@@ -755,9 +780,8 @@ G733_0AFE_DISCHARGE: tuple[tuple[int, float], ...] = (
     (3815, 80.2), (3816, 81.2), (3836, 90.1), (3840, 91.4), (3843, 92.8), (3845, 93.2), (3850, 95),
     (3856, 96.8), (3860, 97.7), (3871, 99.5)
 )
-G733_0AFE_CHARGING: tuple[tuple[int, float], ...] = ()
 #: Its charging rows' last voltage, at 99.99 %.
-G733_0AFE_CELL = CellCurves(G733_0AFE_DISCHARGE, G733_0AFE_CHARGING, nearly_full_mv=3998)
+G733_0AFE_CELL = CellCurves(G733_0AFE_DISCHARGE, charging=(), nearly_full_mv=3998)
 
 #: The cell of the G733 on 0b1f, `g733_0b1f` (`battery_0b1f.xml`): discharge over
 #: 2747.22 mWh.

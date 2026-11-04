@@ -221,10 +221,11 @@ class PerKeyboard:
                 self.brightness(keyboard))
 
     def at_brightness(self, color: int) -> int:
-        """`color` at the brightness of the leader's keyboard (shared.scaled): the keyboard's
-        color as a mouse takes it, which has no brightness of its own. Whole where the leader's
-        keyboard takes no brightness (keyboard_zones.takes_brightness)."""
-        model = model_named(self.leader())
+        """`color` at the brightness of the leader's keyboard (shared.scaled), as a mouse, which
+        has no brightness of its own, and a synced headset's lights take it (Keyboard.at_level).
+        Whole where the leader's keyboard takes no brightness (keyboard_zones.takes_brightness),
+        or with no leader, the model of the leader's controller (shown_model)."""
+        model = model_named(self.shown_model(self.d.keyboard))
         if takes_brightness(self.d.keyboard.lighting, model is not None and model.zone_lighting):
             return scaled(color, self.brightness())
         return color
@@ -271,16 +272,19 @@ class PerKeyboard:
         with null none; saved in config.json under the model's key. Each keyboard driven whose
         lighting or brightness the choice changes (`view`), or with none driven the new
         leader's controller where what the mice show changes, is woken and painted, as at a
-        profile switch, the leader's first; the reply's note is the leader's apply's. A new
-        leader not painted gives the mice its color all the same."""
+        profile switch, the leader's first; the reply's note is the new leader's apply's, and
+        its leader the one in force after the paints, which a new leader gone during its own
+        hands back. A new leader not painted gives the mice its color all the same."""
         value = request["value"]
         chosen = (None if value is None
                   else keyboard_model_named(value, "sync_keyboard"))
         led, driven = self.d.keyboard, self.d.keyboards.driven()
         was = {keyboard: self.view(keyboard) for keyboard in driven or [led]}
         self.d.save_setting(sync_keyboard=chosen)
-        reply = {"ok": True, "sync_keyboard": chosen, "sync_leader": self.leader()}
         leading, failed, painted = self.d.keyboard, None, False
+        # With none driven, a leader never set up since the start has no controller of its own,
+        # and the one standing in for it would say its own model is away.
+        stands_in = leading.model() != self.leader()
         if not driven:
             # With none driven, the mice show the leader's controller's view, and the choice can
             # hand the lead to another controller: that one is told by what the mice showed.
@@ -291,14 +295,13 @@ class PerKeyboard:
             keyboard.idle.wake_for_change()
             note = keyboard.apply_profile()
             if keyboard is leading:
-                # With none driven, a leader never set up since the start has no controller of
-                # its own, and the one standing in for it would say its own model is away.
-                failed = note if keyboard.model() == self.leader() else None
+                failed = None if stands_in else note
                 painted = True
         if leading is not led and not painted:
             # A follower's apply gives the mice nothing (Keyboard.sync_devices), and a new leader
             # whose view did not change was not painted.
             leading.sync_devices(leading.shown_color())
+        reply = {"ok": True, "sync_keyboard": chosen, "sync_leader": self.leader()}
         return with_note(reply, failed, leading.last_apply_detail)
 
     def _cmd_follow_leader(self, request: dict) -> dict:

@@ -1,8 +1,8 @@
 """The modal dialogs: `CaptureDialog` captures a key, `RecordDialog` records a macro.
 
-`CaptureDialog` is the window's one place to bind a G key, so a macro and the
-keys the capture cannot take (Escape, and Super alone under GNOME Shell) must
-be reachable there.
+`CaptureDialog` is the window's one place to bind a keyboard's G key, so a
+macro, the actions a G key takes and the keys the capture cannot take (Escape,
+and Super alone under GNOME Shell) must be reachable there.
 
 Both are `Adw.Dialog`s, drawn inside the window that opens them. Their keys
 pass through that window, but an Adw.Dialog sets limit-events: the window's
@@ -21,23 +21,26 @@ from typing import cast
 from gi.repository import Adw, Gdk, GObject, Gtk
 
 from ..config import MACRO_PREFIX
+from ..key_list import KEY_GROUPS, KEY_LABELS, key_matches
 from ..macros import (
     MAX_STEPS,
     MacroRecorder,
     macro_summary,
     step_summary,
 )
-from ..uinput import (
-    KEY_GROUPS,
-    KEY_LABELS,
-    MODIFIER_KINDS,
-    UinputError,
-    key_matches,
-    resolve,
-    spec_for_keys,
-)
+from ..uinput import MODIFIER_KINDS, MODIFIER_ORDER, UinputError, resolve, spec_for_keys
 from ..wording import capitalized, counted, service_command
-from .style import held_while_shown, pointer_button, say_in_place, weakly
+from .binding_labels import (
+    FALLS_THROUGH,
+    NOTHING_ACTION,
+    NOTHING_TIP,
+    SAME_AS_BASE,
+    SHARED_ACTIONS,
+    SHARED_TIPS,
+    outputs_line,
+    shift_layer_actions,
+)
+from .style import held_while_shown, in_place, pointer_button, say_in_place, weakly
 from .worker import (
     BUSY,
     DOWN,
@@ -48,8 +51,11 @@ from .worker import (
     unreachable,
 )
 
-#: The key list's modifier boxes, (spec name, label), in `spec_for_keys`'s order.
-MODIFIER_BOXES = (("ctrl", "Ctrl"), ("shift", "Shift"), ("alt", "Alt"), ("super", "Super"))
+#: The key list's modifier boxes, (spec name, label), in the order a spec names them.
+MODIFIER_BOXES = tuple((kind, kind.capitalize()) for kind in MODIFIER_ORDER)
+#: Each box's description to a screen reader, which does not tie the "With" before the
+#: boxes to them.
+MODIFIER_BOX_HELP = "With the key you pick"
 #: The capture's height in pixels: its pane asks 234 and the header 46 (measured
 #: 2026-10-15 at the dialog's 380 px width). The key list's needs room for a
 #: search, boxes and a list.
@@ -58,18 +64,36 @@ KEY_LIST_HEIGHT = 560
 #: The Super keys, the one modifier whose release may never arrive: GNOME
 #: Shell keeps a lone Super's for its Activities overview.
 SUPER_CODES = frozenset(code for code, kind in MODIFIER_KINDS.items() if kind == "super")
+#: GDK's hardware keycode is the evdev code plus this: X keycodes start at 8, and xkb's evdev
+#: keymap adds 8 to every key.
+EVDEV_OFFSET = 8
 #: The capture dialog's buttons that open a list, each saying what its page does, as that
 #: page's title: Choose a key and Choose a macro.
 CHOOSE_A_KEY = "Choose a key…"
 CHOOSE_A_MACRO = "Choose a macro…"
+#: The key list's group of binding_labels.SHARED_ACTIONS, for a keyboard's G key, its tips
+#: by binding word, NOTHING_ACTION's tip among them for the G-Shift layer, and the
+#: capture's hint's last line, which names what only the key list picks: Super alone, and
+#: with that group an action.
+ACTIONS = "Actions"
+ACTION_TIPS = SHARED_TIPS | {NOTHING_ACTION[0]: NOTHING_TIP}
+FOR_SUPER = f"For Super alone, use {CHOOSE_A_KEY}"
+FOR_SUPER_OR_ACTION = f"For Super alone or an action, use {CHOOSE_A_KEY}"
 #: A read of the macros that failed, in the macro list and the Macros tab's toast.
 MACROS_UNREAD = "The macros could not be read"
-#: The macro list's next step under unreachable's words, by `failure`'s kind. A socket that
-#: cannot be used has none: its words name the path and the cause.
-MACROS_NEXT_STEP = {UNREAD: "Press Back and try again", BUSY: "Press Back and try again",
-                    DOWN: f"Start it with `{service_command('start')}`"}
+#: An empty library, in the macro list and the Macros tab's list, each with its own next step.
+NO_MACROS = "No macros yet"
+#: The recording dialog's list before the first step.
+NOTHING_RECORDED = "Nothing recorded yet"
+#: The next step after unreachable's words under a list the daemon fills, the macro list
+#: and the program picker, by `failure`'s kind. A socket that cannot be used has none: its
+#: words name the path and the cause.
+LIST_NEXT_STEP = {UNREAD: "Press Back and try again", BUSY: "Press Back and try again",
+                  DOWN: f"Start it with `{service_command('start')}`"}
 #: The keys each window's one guard keeps from it (swallow_held_keys).
 _GUARDED: weakref.WeakKeyDictionary[Gtk.Window, set[int]] = weakref.WeakKeyDictionary()
+#: The keys down in each window that counts them (track_keys_down), for keys_held.
+_DOWN: weakref.WeakKeyDictionary[Gtk.Window, set[int]] = weakref.WeakKeyDictionary()
 
 
 def held_modifiers(state: Gdk.ModifierType) -> dict[str, bool]:
@@ -80,11 +104,20 @@ def held_modifiers(state: Gdk.ModifierType) -> dict[str, bool]:
             "meta": bool(state & Gdk.ModifierType.SUPER_MASK)}
 
 
-def track_keys_down(window: Gtk.Window) -> set[int]:
-    """The keys down in `window`, by GDK hardware keycode, each from its press there to its
-    release, all forgotten as the keyboard comes or goes: what a dialog opening over the
-    window keeps from it (swallow_held_at_open). Window holds it as `keys_down`."""
+def unlisted(error: BaseException) -> str:
+    """A failed round trip as the line under a list's heading: unreachable's words,
+    capitalized, then LIST_NEXT_STEP's step for its kind where there is one."""
+    words = capitalized(unreachable(error))
+    step = LIST_NEXT_STEP.get(failure(error))
+    return f"{words}. {step}" if step else words
+
+
+def track_keys_down(window: Gtk.Window) -> None:
+    """Count the keys down in `window` (keys_held), by GDK hardware keycode, each from its
+    press there to its release, all forgotten as the keyboard comes or goes: what a dialog
+    opening over the window keeps from it (swallow_held_at_open)."""
     down: set[int] = set()
+    _DOWN[window] = down
 
     def pressed(_c: Gtk.EventControllerKey, _keyval: int, keycode: int,
                 _state: Gdk.ModifierType) -> bool:
@@ -104,20 +137,18 @@ def track_keys_down(window: Gtk.Window) -> set[int]:
     window.add_controller(keys)
     # The releases go where the keyboard goes.
     window.connect("notify::is-active", lambda *_args: down.clear())
-    return down
 
 
 def keys_held(window: Gtk.Window) -> set[int]:
     """The keys down in `window` (track_keys_down), none in a window that does not count
     them."""
-    return getattr(window, "keys_down", set())
+    return _DOWN.get(window, set())
 
 
 def swallow_held_at_open(window: Gtk.Window) -> None:
     """Keep the keys still held in `window` as a dialog opens over it from the dialog until
     each comes up (swallow_held_keys)."""
-    if held := keys_held(window):
-        swallow_held_keys(window, held)
+    swallow_held_keys(window, keys_held(window))
 
 
 def swallow_held_keys(window: Gtk.Window, keycodes: set[int]) -> None:
@@ -128,7 +159,10 @@ def swallow_held_keys(window: Gtk.Window, keycodes: set[int]) -> None:
     the dialog's callback put up, or the dialog's own capture or recording.
 
     One guard to a window, which a later call adds its keys to: a newer guard that took a
-    key's press takes its release from the older, which would then eat the key's next press."""
+    key's press takes its release from the older, which would then eat the key's next press.
+    No keys, no guard."""
+    if not keycodes:
+        return
     if (guarded := _GUARDED.get(window)) is not None:
         guarded |= keycodes
         return
@@ -179,8 +213,7 @@ def close_keeping_held(dialog: Adw.Dialog, window: Gtk.Window, keys_down: set[in
     # Copied first: the keyboard leaving the closed dialog empties the set.
     held = set(keys_down)
     dialog.close()
-    if held:
-        swallow_held_keys(window, held)
+    swallow_held_keys(window, held)
 
 
 class CaptureDialog(Adw.Dialog):
@@ -194,18 +227,18 @@ class CaptureDialog(Adw.Dialog):
     other keys go in the order they went down, `a+b+c`. Modifiers pressed with
     no other key are the binding once all are up: `shift`, `rsuper`, or a chord
     such as `rctrl+rshift`, each keeping its side, in `spec_for_keys`'s order.
-    Every capture waits for Set.
+    Every capture waits for its confirming button, named by `verb`.
 
     GNOME Shell keeps a lone Super's release for its Activities overview
     (mutter's `process_special_modifier_key`), so Super tapped alone never
     completes; a chord with Super arrives as any other. A Super that GDK's
     state no longer holds is dropped at the next press, and every key is
     forgotten when the keyboard leaves the dialog, so no key stays counted as
-    down. Opening and closing keep a key still held from the dialog and the
-    window until it comes up (`swallow_held_at_open`, `close_keeping_held`):
-    Enter held on a G key or Change… would repeat into the capture as its
-    binding, and Enter held at a pick from a list into what gets the focus
-    back, opening the dialog again.
+    down. Opening, closing and Back keep a key still held from the dialog and
+    the window until it comes up (`swallow_held_at_open`, `close_keeping_held`,
+    `_back`): Enter held on a G key, Change… or Back would repeat into the
+    capture as its binding, and Enter held at a pick from a list into what
+    gets the focus back, opening the dialog again.
 
     **Choose a key…** is the second way to pick (the owner's decisions of
     2026-09-24): a search, Ctrl, Shift, Alt and Super boxes sent with the key
@@ -213,21 +246,39 @@ class CaptureDialog(Adw.Dialog):
     binds Escape, which closes the capture, and Super alone. It takes one key;
     keys held together are captured, or typed with `gearbench-ctl bind`.
 
+    With `actions`, for a keyboard's G key, which has no dropdown of them as a
+    mouse button's row has (the owner's decision of 2026-10-28), the key list
+    opens on the Actions group, binding_labels.SHARED_ACTIONS in its order, each
+    by its label over its binding word with its tip, a balance word with
+    binding_labels.NEEDS_OUTPUTS there instead while `outputs_off`, as that row
+    says it, `OutputsGroup.balance_unheard` from the caller. A pick reports the
+    word alone: the boxes are a key's. The capture's hint names the group.
+
     Given a `worker`, it also offers the daemon's macros and reports a pick as
     `macro:<name>`. Without one it captures keys only, for a macro's own key
     step: a macro cannot run a macro.
 
     `can_unbind=False` drops the Unbind button, for a caller with nothing to
-    unbind, such as a macro step, or one whose row clears with Nothing, as a mouse
-    button's and a headset G key's do. `title` replaces "Bind `target`" on the capture
-    page.
+    unbind, such as a macro step, or one whose row unbinds with Nothing on Base and
+    clears with Same as Base on G-Shift, as a mouse button's and a headset G key's do.
+    `verb` is the confirming button's label and the act its hint names, as the title's
+    first word: "Bind", or "Change" for a macro step. `title` replaces "`verb` `target`" on
+    the capture page.
+
+    With `shift`, for a keyboard's G key on the G-Shift layer, Unbind reads SAME_AS_BASE,
+    which a clear there gives the key, and the Actions group opens with NOTHING_ACTION (the
+    owner's decisions of 2026-10-28) and leaves out G_SHIFT, which the daemon refuses there,
+    as a binding row's list does on that layer.
     """
 
     def __init__(self, parent: Gtk.Window, target: str,
                  worker: DaemonWorker | None = None, can_unbind: bool = True,
-                 title: str | None = None) -> None:
+                 title: str | None = None, actions: bool = False,
+                 outputs_off: bool = False, shift: bool = False, verb: str = "Bind") -> None:
         #: The capture's title, which Back puts back.
-        self._capture_title = title or f"Bind {target}"
+        self._capture_title = title or f"{verb} {target}"
+        #: The confirming button's label, which its hint names.
+        self._verb = verb
         super().__init__(title=self._capture_title, content_width=380,
                          content_height=CAPTURE_HEIGHT)
         self._parent = parent
@@ -239,7 +290,7 @@ class CaptureDialog(Adw.Dialog):
         self.connect("closed", self._on_closed)
         #: The keys down, in the order this dialog saw them go down.
         self._down: list[int] = []
-        #: The keys down in the dialog on any page, by GDK hardware keycode, for `_close`.
+        #: The keys down in the dialog on any page, by GDK hardware keycode.
         self._keys_down: set[int] = set()
         #: The spec of the modifiers down at the last press, while no other
         #: key has gone down since nothing was: the binding once all are up.
@@ -247,18 +298,24 @@ class CaptureDialog(Adw.Dialog):
         #: A non-modifier went down since all keys were up, so the modifiers are its
         #: combination, no binding of their own.
         self._keyed = False
-        #: (group, list) per `KEY_GROUPS` group, empty until _fill_keys.
+        #: (group, list) per group of the key list (_group_names), empty until _fill_keys.
         self.key_lists: list[tuple[Adw.PreferencesGroup, Gtk.ListBox]] = []
         #: The search the rows are filtered by now.
         self._key_query = ""
+        #: The key list has the Actions group, and its balance words say NEEDS_OUTPUTS.
+        self._actions, self._outputs_off = actions, outputs_off
+        #: The Actions group's labels by binding word, which give its rows: on the G-Shift
+        #: layer NOTHING_ACTION first and no G_SHIFT, which the daemon refuses there.
+        self._action_labels = (dict((NOTHING_ACTION, *shift_layer_actions(SHARED_ACTIONS)))
+                               if shift else dict(SHARED_ACTIONS))
 
         self.label = Gtk.Label(label="Press a key", css_classes=["title-1"])
         self.hint = Gtk.Label(
             label=f"{target} will send it.\nHold keys together, or tap a modifier alone.\n"
-                  f"For Super alone, use {CHOOSE_A_KEY}",
+                  f"{FOR_SUPER_OR_ACTION if actions else FOR_SUPER}",
             justify=Gtk.Justification.CENTER, css_classes=["dimmed"])
         self._build_header()
-        self._build_capture(can_unbind)
+        self._build_capture(can_unbind, shift)
         self._build_macro_list()
         self._build_key_list()
 
@@ -283,9 +340,11 @@ class CaptureDialog(Adw.Dialog):
         self.header.pack_start(self.back)
         self.header.pack_start(cancel)
 
-    def _build_capture(self, can_unbind: bool) -> None:
-        """The capture pane: the prompt and its hint over the buttons."""
-        self.accept = Gtk.Button(label="Set", css_classes=["suggested-action"], sensitive=False)
+    def _build_capture(self, can_unbind: bool, shift: bool) -> None:
+        """The capture pane: the prompt and its hint over the buttons, Unbind as SAME_AS_BASE
+        on the G-Shift layer, `shift`."""
+        self.accept = Gtk.Button(label=self._verb, css_classes=["suggested-action"],
+                                 sensitive=False)
         self.accept.connect("clicked", weakly(self._confirm))
 
         # The other ways to pick get their own row: four buttons on one row do not fit.
@@ -301,7 +360,8 @@ class CaptureDialog(Adw.Dialog):
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
                           halign=Gtk.Align.CENTER)
         if can_unbind:
-            unbind = Gtk.Button(label="Unbind")
+            unbind = Gtk.Button(label=SAME_AS_BASE if shift else "Unbind",
+                                tooltip_text=FALLS_THROUGH if shift else None)
             unbind.connect("clicked", weakly(self._unbind))
             buttons.append(unbind)
         buttons.append(self.accept)
@@ -343,6 +403,8 @@ class CaptureDialog(Adw.Dialog):
         checks.append(Gtk.Label(label="With", css_classes=["dimmed"]))
         for name, label in MODIFIER_BOXES:
             self.modifier_checks[name] = Gtk.CheckButton(label=label)
+            self.modifier_checks[name].update_property([Gtk.AccessibleProperty.DESCRIPTION],
+                                                       [MODIFIER_BOX_HELP])
             checks.append(self.modifier_checks[name])
         self.key_empty = Gtk.Label(css_classes=["dimmed"], wrap=True, visible=False,
                                    margin_top=12)
@@ -402,15 +464,21 @@ class CaptureDialog(Adw.Dialog):
         self.set_content_height(height)
 
     def _back(self, _b: Gtk.Button | None) -> None:
-        """Back to key capture, from either list, under its own title."""
+        """Back to key capture, from either list, under its own title, with the keys still
+        held kept from it until they come up (swallow_held_keys): Back clicks at its
+        activate timeout with Space or Enter still down."""
+        # Copied first: hiding Back, which has the focus once pressed, moves the focus out of
+        # the dialog, which empties the set (_keyboard_left).
+        held = set(self._keys_down)
         self._show_page(self.capture_box, self._capture_title)
+        swallow_held_keys(self._parent, held)
 
     # -- the macro list ----------------------------------------------------
 
     def _ask_macros(self, _b: Gtk.Button | None) -> None:
         self._show_page(self.macro_box, "Choose a macro")
         say_in_place(self.macro_list, "Reading the macros…", waiting=True)
-        # A worker: __init__ makes the button that leads here, and `run` opens here, only
+        # A worker: the button that leads here exists only with one, and `macros` comes only
         # with one.
         cast(DaemonWorker, self._worker).call({"command": "macros"}, self._show_macros)
 
@@ -420,8 +488,7 @@ class CaptureDialog(Adw.Dialog):
         # An empty library and an unreachable daemon get different placeholders; the Macros
         # tab lists the macros either way, since it reads the files itself.
         if isinstance(reply, Exception):
-            say_in_place(self.macro_list, capitalized(unreachable(reply)),
-                         MACROS_NEXT_STEP.get(failure(reply), ""))
+            say_in_place(self.macro_list, MACROS_UNREAD, unlisted(reply))
             return
         if not reply.get("ok"):
             error = str(reply.get("error") or "")
@@ -429,7 +496,7 @@ class CaptureDialog(Adw.Dialog):
             return
         macros = reply.get("macros") or []
         if not macros:
-            say_in_place(self.macro_list, "No macros yet",
+            say_in_place(self.macro_list, NO_MACROS,
                          "Make one on the Macros tab, then come back")
             return
         self.macro_list.remove_all()
@@ -452,17 +519,19 @@ class CaptureDialog(Adw.Dialog):
         self._show_page(self.key_box, "Choose a key", KEY_LIST_HEIGHT)
         self.key_search.grab_focus()
 
+    def _group_names(self) -> list[tuple[str, tuple[str, ...]]]:
+        """The key list's groups down the page, (title, the names of its rows): ACTIONS first
+        where the dialog has it, its binding words, then each `KEY_GROUPS` group."""
+        actions = [(ACTIONS, tuple(self._action_labels))] if self._actions else []
+        return [*actions, *KEY_GROUPS.items()]
+
     def _fill_keys(self) -> None:
-        """A group per `KEY_GROUPS` group, a row per key: its label over its spec name."""
-        for title, names in KEY_GROUPS.items():
+        """A group per _group_names group, a row per name (_entry_row)."""
+        for title, names in self._group_names():
             listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE,
                                   css_classes=["boxed-list"])
             for name in names:
-                row = Adw.ActionRow(title=KEY_LABELS[name], subtitle=name,
-                                    name=name, activatable=True, use_markup=False)
-                # The row's own signal: the list's row-activated misses ActionRow.activate().
-                row.connect("activated", weakly(self._pick_key), name)
-                listbox.append(row)
+                listbox.append(self._entry_row(name))
             listbox.set_filter_func(weakly(self._key_shown))
             group = Adw.PreferencesGroup(title=title)
             group.add(listbox)
@@ -470,20 +539,46 @@ class CaptureDialog(Adw.Dialog):
                                               if self.key_lists else None)
             self.key_lists.append((group, listbox))
 
+    def _entry_row(self, name: str) -> Adw.ActionRow:
+        """The key list's row for `name`: an action's label over its binding word, or for a
+        balance word over binding_labels.NEEDS_OUTPUTS while `outputs_off` (outputs_line), with
+        its tip; a key's label over its spec name."""
+        label = self._action_labels.get(name)
+        if label is None:
+            row = Adw.ActionRow(title=KEY_LABELS[name], subtitle=name,
+                                name=name, activatable=True, use_markup=False)
+            # The row's own signal: the list's row-activated misses ActionRow.activate().
+            row.connect("activated", weakly(self._pick_key), name)
+            return row
+        row = Adw.ActionRow(title=label, subtitle=outputs_line(name, self._outputs_off) or name,
+                            tooltip_text=ACTION_TIPS[name], name=name, activatable=True,
+                            use_markup=False)
+        row.connect("activated", weakly(self._pick_action), name)
+        return row
+
     def _on_search(self, entry: Gtk.SearchEntry) -> None:
         """Keep the rows that match, and the groups that still have one."""
         self._key_query = entry.get_text().strip()
         shown = 0
-        for (group, listbox), names in zip(self.key_lists, KEY_GROUPS.values(), strict=True):
+        for (group, listbox), (_title, names) in zip(self.key_lists, self._group_names(),
+                                                      strict=True):
             listbox.invalidate_filter()
-            matches = sum(key_matches(name, self._key_query) for name in names)
+            matches = sum(map(self._matches, names))
             group.set_visible(matches > 0)
             shown += matches
         self.key_empty.set_label(f'No key matches "{self._key_query}"')
         self.key_empty.set_visible(shown == 0)
 
+    def _matches(self, name: str) -> bool:
+        """Whether the search shows the row for `name`: a key, or an action by its label."""
+        return key_matches(name, self._key_query, self._action_labels.get(name))
+
     def _key_shown(self, row: Adw.ActionRow) -> bool:
-        return key_matches(row.get_name(), self._key_query)
+        return self._matches(row.get_name())
+
+    def _pick_action(self, _row: Adw.ActionRow, word: str) -> None:
+        """Bind the action picked, whatever boxes are checked, and close."""
+        self._done(word)
 
     def _pick_key(self, _row: Adw.ActionRow, name: str) -> None:
         """Bind the key picked, prefixed by the checked boxes in a capture's order, and close."""
@@ -505,7 +600,7 @@ class CaptureDialog(Adw.Dialog):
             return True
         if not self.capture_box.get_visible():
             return False        # a list has the keyboard while it is up
-        code = keycode - 8          # GDK hardware keycode is evdev + 8
+        code = keycode - EVDEV_OFFSET
         # A Super that GDK's state says is up was released out of sight, in GNOME Shell's
         # overview (SUPER_CODES); counted as down, it would join the next capture.
         if not state & Gdk.ModifierType.SUPER_MASK:
@@ -529,7 +624,7 @@ class CaptureDialog(Adw.Dialog):
         non-modifier released without its press seen was down with them, so they
         were its combination."""
         self._keys_down.discard(keycode)
-        code = keycode - 8
+        code = keycode - EVDEV_OFFSET
         if code not in self._down:
             if code not in MODIFIER_KINDS:
                 self._keyed = True
@@ -551,19 +646,20 @@ class CaptureDialog(Adw.Dialog):
         try:
             spec = spec_for_keys(self._down, **held_modifiers(state))
         except UinputError as exc:
-            # Drop the last good key too, or Set would bind it under "Cannot use this key".
+            # Drop the last good key too, or the confirming button would bind it under
+            # "Cannot use this key".
             self.spec = None
             self.accept.set_sensitive(False)
             self.label.set_text("Cannot use this key")
-            self.hint.set_text(capitalized(str(exc)))
+            self.hint.set_text(f"{capitalized(str(exc))}. Press another key.")
             return
         self._show(spec)
 
     def _show(self, spec: str) -> None:
-        """Show `spec` as the binding, for Set to confirm."""
+        """Show `spec` as the binding, for the confirming button to confirm."""
         self.spec = spec
         self.label.set_text(spec)
-        self.hint.set_text("Press another key to change it, or Set to confirm.")
+        self.hint.set_text(f"Press another key to change it, or {self._verb} to confirm.")
         self.accept.set_sensitive(True)
 
     def _done(self, result: str | None) -> None:
@@ -583,7 +679,7 @@ class CaptureDialog(Adw.Dialog):
         Held until it closes, since its callers keep no reference and its buttons, keys and
         lists are weakly's (held_while_shown)."""
         self._on_done = on_done
-        if macros and self._worker is not None:
+        if macros:
             self._ask_macros(None)
         held_while_shown(self)
         swallow_held_at_open(self._parent)
@@ -613,8 +709,8 @@ class RecordDialog(Adw.Dialog):
     recording, and a key held at the close would press what gets the focus
     back.
 
-    Clicks are watched on the body alone, so Cancel and Stop are in the header
-    bar: a button that is both a control and a recordable click is neither
+    Clicks are watched under the header bar alone, so Cancel and Stop are in
+    it: a button that is both a control and a recordable click is neither
     reliably.
 
     Stop hands the steps to `run`'s callback; closing any other way discards
@@ -641,9 +737,7 @@ class RecordDialog(Adw.Dialog):
 
         self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE,
                                    css_classes=["boxed-list"])
-        self.listbox.set_placeholder(Gtk.Label(
-            label="Nothing recorded yet", css_classes=["dimmed"],
-            margin_top=18, margin_bottom=18))
+        self.listbox.set_placeholder(in_place(NOTHING_RECORDED))
         self.scroller = Gtk.ScrolledWindow(child=self.listbox, vexpand=True,
                                            hscrollbar_policy=Gtk.PolicyType.NEVER)
         # Follow the end once a new row has its size: an idle can run before the frame
@@ -666,7 +760,10 @@ class RecordDialog(Adw.Dialog):
         body.append(self.scroller)
         body.append(self.count)
 
-        view = Adw.ToolbarView(content=body)
+        # Clicks are watched on all under the header: a click in the body's margin is one in
+        # the dialog too, and a margin is outside the body's own allocation.
+        area = Adw.Bin(child=body)
+        view = Adw.ToolbarView(content=area)
         view.add_top_bar(header)
         self.set_child(view)
 
@@ -675,7 +772,7 @@ class RecordDialog(Adw.Dialog):
         # one gesture per button. Capture phase, so a step row's click is seen first.
         buttons = Gtk.EventControllerLegacy(propagation_phase=Gtk.PropagationPhase.CAPTURE)
         buttons.connect("event", weakly(self._on_button))
-        body.add_controller(buttons)
+        area.add_controller(buttons)
 
         keys = Gtk.EventControllerKey(name="record-keys",
                                       propagation_phase=Gtk.PropagationPhase.CAPTURE)
@@ -712,7 +809,9 @@ class RecordDialog(Adw.Dialog):
         if not self._recording:
             return
         self._lost_super(state)
-        code = keycode - 8          # GDK hardware keycode is evdev + 8
+        if not self._recording:
+            return                  # Super's release filled it: as `_click`, the key is no step
+        code = keycode - EVDEV_OFFSET
         if code in MODIFIER_KINDS:
             # Alone, as bound alone; the recorder holds its press until a key takes it
             # into a combination or it becomes a step.

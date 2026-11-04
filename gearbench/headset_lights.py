@@ -3,18 +3,13 @@ G935, G633, G635 and G733 (G HUB's device list gives each two zones). Nothing he
 the daemon.
 
 `find_lights` looks 0x8070 up through the headset's channel (`G432.lookup`), which sends
-nothing for a feature its table does not list, and reads its zones as `HeadsetZones`, a
-mouse_lighting `ZoneLighting`, over `LightsChannel`, which sends only what `SENT` names:
-0x8070's three reads, its host control (fn 8) and its zone effect (fn 3) with the
-persistence byte RAM_ONLY, the startup effect's setting's read (fn 4) on a headset whose
-fn 0 caps list it, and on a model tested on this hardware the two writes the headset keeps,
-as G HUB sends them to the G933: a zone effect with the persistence byte STORED and the
-startup effect's setting (fn 5). On a model not tested, each of those is refused
-(g432.kept_refusal). The claim, `01 01` as G HUB sends it to the G933
-(`HeadsetZones.CLAIM`), goes right before each effect, as on the PRO WIRELESS, whose
+nothing for a feature its table does not list, and reads its zones as `HeadsetZones` over
+`LightsChannel`, which sends only what `SENT` names and refuses a write the headset keeps on
+a model not tested on this hardware (g432.kept_refusal). The claim, `01 01` as G HUB sends
+it to the G933 (`HeadsetZones.CLAIM`), goes right before each effect, as on the PRO WIRELESS, whose
 firmware stores a zone effect sent without it (mouse_lighting): with both, every firmware
 read so far keeps the effect in RAM. The G933's fn 7, the control's read, answers invalid
-function, and its fn 8 takes the claim (the Windows captures of 2026-10-25). A headset whose
+function, and its fn 8 takes the claim (G HUB on Windows, 2026-10-25). A headset whose
 fn 8 answers invalid function gives no such guard, so whether its effects persist is
 unknown: its writes are refused (`NO_CONTROL`), the effect never sent.
 
@@ -59,8 +54,8 @@ SENT = frozenset({GET_INFO, GET_ZONE_INFO, GET_EFFECT_INFO, SET_CONTROL, SET_EFF
 #: persistence byte, which goes out RAM_ONLY, or STORED for an effect the headset keeps.
 EFFECT_PARAMS = 13
 #: The startup effect's setting of 0x8070's non-volatile configuration, fn 4's and fn 5's
-#: first two bytes, its value on and off, as G HUB reads and writes a G933's (the Windows
-#: captures of 2026-10-25), and fn 0's cap for it: the G933 lists caps 0x0001 and answers
+#: first two bytes, its value on and off, as G HUB reads and writes a G933's (on Windows,
+#: 2026-10-25), and fn 0's cap for it: the G933 lists caps 0x0001 and answers
 #: setting 0x0001 (inferred: the setting's bit). The only setting LightsChannel reads or
 #: writes.
 STARTUP_SETTING = bytes([0x00, 0x01])
@@ -68,8 +63,8 @@ STARTUP_ON, STARTUP_OFF = 0x01, 0x02
 STARTUP_CAP = 0x0001
 STARTUP_WRITES = frozenset(STARTUP_SETTING + bytes([value]) for value in (STARTUP_ON, STARTUP_OFF))
 #: The brightness cycle's steps a headset's G key runs (daemon/g432/lights.py), in percent of the
-#: effect's own, the last off: G HUB's G1 on a G933 (the Windows captures of 2026-10-25,
-#: H5c), as the owner's answer of 2026-10-25 gives them, "full, 50 %, 25 %, 12 %, off".
+#: effect's own, the last off: G HUB's G1 on a G933 (on Windows, 2026-10-25), as the
+#: owner's answer of 2026-10-25 gives them, "full, 50 %, 25 %, 12 %, off".
 BRIGHTNESS_STEPS = (100, 50, 25, 12, 0)
 FULL_BRIGHTNESS = BRIGHTNESS_STEPS[0]
 #: Why a headset's lights are not written: its 0x8070 takes no host control, so the
@@ -80,7 +75,7 @@ NO_CONTROL = ("Gearbench does not write the {}'s lights until that is tested on 
 #: its light: ((share + SRGB_OFFSET) / (1 + SRGB_OFFSET)) ** SRGB_EXPONENT. Times CHANNEL_MAX,
 #: the fraction cut off, it gives each channel as G HUB sent a G933's in RAM: 00B4FF as
 #: 00 74 ff, 00DBFF as 00 b4 ff and 00FFFF as itself, and 00DB77, its field's hex as the owner
-#: read it, as 00 b4 2f (the Windows captures of 2026-10-25, partC-g933). A single power,
+#: read it, as 00 b4 2f (on Windows, 2026-10-25). A single power,
 #: rounded or cut, gives the first three but not the last. The curve's linear part, below a
 #: share of 0.04045, would change no byte: the power part cuts to 0 there too.
 SRGB_OFFSET, SRGB_EXPONENT = 0.055, 2.4
@@ -107,8 +102,8 @@ class HeadsetZones(ZoneLighting):
     in RAM corrected as it corrects them, and its startup effect's setting."""
 
     #: fn 8's claim as G HUB sends it to the G933 at each connect, which answers with its
-    #: echo: the host's control and a second byte whose meaning is not known (the Windows
-    #: captures of 2026-10-25).
+    #: echo: the host's control and a second byte whose meaning is not known (on Windows,
+    #: 2026-10-25).
     CLAIM = bytes([HOST_CONTROL, 0x01])
 
     def set_effect(self, zone: int, effect: str | int, *, wait: bool = True,
@@ -127,7 +122,7 @@ class HeadsetZones(ZoneLighting):
         if (refused := cast("LightsChannel", self.dev).kept_refused()) is not None:
             raise ValueError(refused)
         payload = self._payload(zone, effect, params, STORED)
-        self._claim_for_effect()
+        self.claim()
         self.dev.request(self._index, SET_EFFECT, payload, long=True)
 
     def startup(self) -> bool | None:
@@ -138,8 +133,8 @@ class HeadsetZones(ZoneLighting):
             return None
         value = self.dev.request(self._index, GET_NV_CONFIG, STARTUP_SETTING)[0]
         if value not in (STARTUP_ON, STARTUP_OFF):
-            raise UnreadableAnswer(f"the startup effect's setting read 0x{value:02x}, neither "
-                                   f"on (0x{STARTUP_ON:02x}) nor off (0x{STARTUP_OFF:02x})")
+            raise UnreadableAnswer(f"0x{value:02x} is neither on (0x{STARTUP_ON:02x}) nor off "
+                                   f"(0x{STARTUP_OFF:02x})")
         return value == STARTUP_ON
 
     def set_startup(self, on: bool) -> bool | None:
@@ -185,12 +180,13 @@ class LightsChannel:
         headset keeps on a model not tested (kept_refused) among them. Raises HidppFailure."""
         short = self._headset.model.short
         if feature_index != self._feature.index or function not in SENT or not reply:
-            raise ValueError(f"0x8070 function {function} at index 0x{feature_index:02x} is "
-                             f"not a request Gearbench sends the {short}'s lights")
+            raise ValueError(f"0x8070 function {function} at index 0x{feature_index:02x}"
+                             f"{'' if reply else ', its reply not waited for,'} is not a "
+                             f"request Gearbench sends the {short}'s lights")
         if function == SET_EFFECT and (len(params) != EFFECT_PARAMS
                                        or params[-1] not in (RAM_ONLY, STORED)):
-            raise ValueError(f"the {short}'s lights are sent an effect with persistence 0, "
-                             f"RAM, or 2, kept, alone")
+            raise ValueError(f"the {short}'s lights are sent a {EFFECT_PARAMS}-byte effect, in "
+                             f"RAM (0) or kept (2), alone")
         if function == SET_CONTROL and params not in (HeadsetZones.CLAIM,
                                                       bytes([DEVICE_CONTROL])):
             raise ValueError(f"the {short}'s lights take host or device control alone")

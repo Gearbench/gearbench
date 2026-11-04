@@ -1,0 +1,61 @@
+# Maintainer: wmuschetto <113629853+wmuschetto@users.noreply.github.com>
+#
+# The Arch package, for Arch and CachyOS. It holds what the .deb holds:
+# packaging/install-files installs everything beside the Python package from
+# the .deb's own lists, and gearbench.install runs the steps the .deb's
+# postinst, prerm and postrm run, less those its header names. Build it with
+# makepkg in this folder, with the release's source archive,
+# gearbench-VERSION.tar.gz, beside this file.
+
+pkgname=gearbench
+pkgver=1.3.0
+pkgrel=1
+pkgdesc='Lighting, G keys, DPI and macros for Logitech G keyboards, mice and headsets'
+arch=('any')
+url='https://github.com/gearbench/gearbench'
+license=('GPL-3.0-or-later' 'CC0-1.0' 'Apache-2.0' 'LGPL-3.0-only OR CC-BY-SA-3.0')
+# systemctl, systemd-sysusers and systemd-hwdb, and udevadm, which
+# gearbench.install runs. python-gobject for the daemon's desktop session and
+# login screen check: the daemon looks for it once, as it starts, and
+# post_install starts it, so it has to be there first, as pacman installs a
+# dependency before what needs it (measured on Arch and CachyOS on 2026-11-03:
+# no "no python3-gi" line after the install's start). Without
+# it the daemon runs at the login screen too, and bindings reach another
+# account.
+# python-installer puts the package in the build Python's
+# /usr/lib/python3.X/site-packages, which only that Python reads: both bounds
+# name it and move with it.
+depends=('python>=3.14' 'python<3.15' 'systemd' 'python-gobject')
+makedepends=('python-build' 'python-installer' 'python-setuptools' 'make')
+# The window needs GTK 4 and libadwaita through GObject introspection, and
+# `gearbench-ctl gui` says what is missing and exits 1 without them.
+# pipewire-audio holds pw-record and pw-play and depends on pipewire, which
+# holds pw-dump, pw-cli, pw-metadata and the pipewire program: the PipeWire
+# programs Gearbench runs for the headsets' sound, spatial sound and Outputs.
+# Without them each of those says the program is not installed.
+optdepends=('gtk4: the window'
+            'libadwaita: the window'
+            "pipewire-audio: the headsets' sound, spatial sound and Outputs")
+install=gearbench.install
+# The archive made beside this file, never a download: it holds the files of
+# GitHub's archive of the tag but not its bytes, so no sum can be checked, and
+# a download with none would install, as root, whatever the server sent. With
+# no archive here, makepkg stops.
+source=("gearbench-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "gearbench-$pkgver"
+    python -m build --wheel --no-isolation
+}
+
+package() {
+    cd "gearbench-$pkgver"
+    python -m installer --destdir="$pkgdir" dist/*.whl
+    # The console script, which the unit, the desktop entry and D-Bus start,
+    # runs with -I: no PYTHON* variable and no user site-packages from the
+    # session, where an empty PYTHONPATH element names the working directory,
+    # $HOME.
+    sed -i '1s|.*|#!/usr/bin/python3 -I|' "$pkgdir/usr/bin/gearbench-ctl"
+    packaging/install-files "$pkgdir"
+}

@@ -8,14 +8,15 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .. import pipewire_client, spatial, system_volume
+from .. import pipewire_client, pipewire_headsets, system_volume
 from ..wording import escaped, word_list
 from .output import Subcommands, print_block, print_json
 
 #: A volume's line while it is not in PipeWire.
 NOT_THERE = "not in PipeWire"
-#: The command alone, while no headset's volume is in PipeWire.
-NONE_THERE = "no headset in PipeWire"
+#: The command alone, while no headset's volume is in PipeWire, as with a G432 on a
+#: profile with no input.
+NONE_THERE = "no headset volume in PipeWire"
 #: The refusal of an output the headset named does not have, by its name and the output's.
 NO_SUCH = "the {} has no {} output: game and chat are for {}"
 #: The refusal of a level outside GNOME's range, the level given put in.
@@ -23,15 +24,6 @@ NOT_A_LEVEL = f"the level is 0 to {system_volume.LEVEL_MAX}, GNOME's percent, no
 #: The headsets by their keys, and the volumes, as the arguments take them.
 HEADSET_WORDS = list(system_volume.VOLUMES)
 VOLUME_WORDS = [*system_volume.OUTPUT_NAMES, system_volume.MIC]
-
-
-def _level(text: str) -> int:
-    """The level `headset-volume` sets as a whole number; ArgumentTypeError for text that is
-    not one. Its range is the command's to refuse, as macro-run refuses its --delay."""
-    try:
-        return int(text)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"the level is a whole number, not {text!r}") from None
 
 
 def _place(args: argparse.Namespace) -> None:
@@ -50,10 +42,11 @@ def _place(args: argparse.Namespace) -> None:
         if word is not None and word not in choices:
             args.usage_error(f"argument {name}: invalid choice: {word!r} "
                              f"(choose from {', '.join(choices)})")
+    # Its range is the command's to refuse, as macro-run refuses its --delay.
     try:
-        args.level = None if level is None else _level(level)
-    except argparse.ArgumentTypeError as exc:
-        args.usage_error(f"argument level: {exc}")
+        args.level = None if level is None else int(level)
+    except ValueError:
+        args.usage_error(f"argument level: the level is a whole number, not {level!r}")
 
 
 def cmd_headset_volume(args: argparse.Namespace) -> int:
@@ -61,7 +54,7 @@ def cmd_headset_volume(args: argparse.Namespace) -> int:
     one, the headset's, or alone those of each headset with one in PipeWire."""
     _place(args)
     if args.volume is not None and args.volume not in system_volume.VOLUMES[args.headset]:
-        refused = NO_SUCH.format(spatial.HEADSET_KEYED[args.headset].name,
+        refused = NO_SUCH.format(pipewire_headsets.HEADSET_KEYED[args.headset].name,
                                  system_volume.OUTPUT_NAMES[args.volume],
                                  word_list(list(system_volume.OUTPUTS), "and"))
         print(f"error: {refused}", file=sys.stderr)
@@ -95,8 +88,8 @@ def cmd_headset_volume(args: argparse.Namespace) -> int:
 
 
 def add_headset_volume(sub: Subcommands) -> None:
-    outputs = word_list([spatial.HEADSET_KEYED[key].name for key in system_volume.OUTPUTS],
-                        "and")
+    outputs = word_list([pipewire_headsets.HEADSET_KEYED[key].name
+                         for key in system_volume.OUTPUTS], "and")
     volume = sub.add("headset-volume",
                      help="show or set the volume of a headset's microphone, and of the Game "
                           f"and Chat outputs of the {outputs}, in percent, as GNOME's Sound "
@@ -107,7 +100,8 @@ def add_headset_volume(sub: Subcommands) -> None:
     # With --headset each word after the command moves up a place, so _place checks them
     # and the metavars list the choices, as argparse does.
     volume.add_argument("headset", nargs="?", metavar="{" + ",".join(HEADSET_WORDS) + "}",
-                        help="the headset; left out, each headset in PipeWire is shown")
+                        help="the headset; left out, each headset with a volume in "
+                             "PipeWire is shown")
     volume.add_argument("volume", nargs="?", metavar="{" + ",".join(VOLUME_WORDS) + "}",
                         help=f"game or chat, an output of the {outputs}, or mic, the "
                              "microphone; left out, each of the headset's is shown")

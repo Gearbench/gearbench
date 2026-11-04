@@ -10,8 +10,10 @@ equalizer's Preset row lists the headset's own presets under Headset, then the m
 library on this computer under Library, which its LibraryCard (library_card) keeps, so
 the headset's Gaming and the library's are told apart by their group. On a model with a
 Game and a Chat output, Game output and Chat output follow Balance, their volume as GNOME's
-Sound settings set it (volume_rows). The Microphone group ends with Mic input, the
-microphone's volume set the same way, and Input level, its level live (input_meter_row).
+Sound settings set it (volume_rows). The Microphone group ends with Noise suppression, the
+window's own on the computer, on a model with none in the headset, with Test the microphone
+under it (noise_rows), Mic input, the microphone's volume set the same way, and Input level,
+its level live (input_meter_row).
 Reads go to the worker straight, so a poll that finds no headset toasts nothing; writes go
 through the window's `call`, which shows a refusal. Building it runs nothing.
 """
@@ -19,22 +21,34 @@ through the window's `call`, which shows a refusal. Building it runs nothing.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from functools import partial
 from typing import cast
 
 from gi.repository import Adw, Gio, GLib, GObject, Gtk
 
-from ..a50x import INSTANCE_NAMES, INSTANCES, MODELS, PRODUCTS, Model
+from ..a50x import INSTANCE_NAMES, INSTANCES, MIC_SETTINGS, PRODUCTS, Model, reply_model
 from ..astro import SETTING_NAMES
 from ..battery import kept_at
-from ..centurion_features import mix, mixer, noise_reduction, onboard_eq
+from ..centurion_features import (
+    auto_sleep,
+    eco_mode,
+    led_brightness,
+    mix,
+    mixer,
+    noise_gate,
+    noise_reduction,
+    onboard_eq,
+    power_mode,
+    sidetone,
+    tones,
+    volume,
+)
 from ..centurion_features.equalizer import GAIN_RANGE
 from ..centurion_features.setting import SWITCH, Setting
-from ..system_volume import MIC
 from ..wording import capitalized, hertz, shares_words, signed, whole
+from .computer_rows import ComputerRows
+from .device_rows import show_gone, status_rows
 from .holds import Holds
-from .input_meter_row import InputMeterRow
 from .library_card import CENTURION, LibraryCard
 from .style import (
     ASLEEP,
@@ -47,33 +61,31 @@ from .style import (
     NOT_READ,
     PRESET,
     SIDETONE,
+    STREAM_HELP,
     STREAM_MIX,
+    NoticesRow,
     confirm,
-    displayable,
     page_of,
     plain_row,
     preset_label,
     set_dot,
     show_battery,
+    show_choice,
     show_looking,
     show_untested,
     spoken_scale,
-    status_rows,
     through,
     untested_row,
     watch_pointer,
 )
-from .tips import NOISE_GATE_TIPS, explain_choices
-from .volume_rows import OUTPUT_WORDS, VolumeRows
+from .tips import NOISE_GATE_TIPS, NOT_READ_TIP, explain_choices
 from .worker import (
     LIVE_MS,
     SETTLE_MS,
     Call,
     DaemonWorker,
     LoadingGuard,
-    Pace,
     Reply,
-    Settle,
     take_typed,
     unreachable,
 )
@@ -86,41 +98,46 @@ NAMES = frozenset(PRODUCTS.values())
 TITLE = HEADSET_TAB
 #: The row shown while the daemon refuses every write, said before a click.
 READ_ONLY = "Read only"
-#: An equalizer row's tooltip where the daemon reads its bands and never writes them, on a
-#: tested model too, where Read only no longer shows.
+#: The Equalizer group's line where the daemon reads a shown equalizer's bands and never
+#: writes them, on a tested model too, where Read only no longer shows.
 EQUALIZER_READ_ONLY_HELP = "Gearbench reads this equalizer and does not change it"
 BALANCE_HELP = "Set by the headset's balance dial"
 #: The microphone's boom, the Microphone group's first row: down, live; up, muted. Not Mic,
 #: which is the stream mix's level of the microphone.
 BOOM, LIVE, MUTED = "Boom", "Live", "Muted"
-#: The stream mix's rows by the words the socket gives their sources.
-MIX_TITLES = {mixer.STREAM: "Stream port", "game": "Game", "voice": "Voice",
-              "mic_out": "Mic", "bluetooth": "Bluetooth"}
+#: A muted source's stream mix row: not Muted, which beside Boom would read as the
+#: microphone's.
+MIX_MUTED = "Muted in the mix"
+#: The stream mix's rows by the words the socket gives their sources, in mixer.ORDER after
+#: the stream port; the first is the level of all the port sends, which is not the headset's
+#: volume.
+MIX_TITLES = {source: {mixer.STREAM: "Stream port level", "game": "Game", "voice": "Voice",
+                       "mic_out": "Mic", "bluetooth": "Bluetooth"}[source]
+              for source in (mixer.STREAM, *mixer.ORDER)}
 #: Each stream mix slider's name for a screen reader, the A50 Gen 4's for the same levels,
 #: which keeps the mix's Mic apart from the Microphone group's rows; the port's own level
-#: is Stream port level.
-MIX_NAMES = {mixer.STREAM: f"{MIX_TITLES[mixer.STREAM]} level",
+#: is its row's title.
+MIX_NAMES = {mixer.STREAM: MIX_TITLES[mixer.STREAM],
              "game": SETTING_NAMES["stream_game"], "voice": SETTING_NAMES["stream_chat"],
              "mic_out": SETTING_NAMES["stream_mic"], "bluetooth": "Stream Bluetooth"}
 #: Each setting's row title, and its slider's or dropdown's name for a screen reader, by its
 #: key, of those the Microphone and Settings groups show: the balance shows in the status
 #: group, as the headset's dial sets it.
-ROW_TITLES = {"sidetone": SIDETONE, "volume": "Volume",
-              "noise_gate": "Noise gate", "auto_sleep": "Auto sleep",
-              "brightness": "Brightness", "deep_sleep": "Deep sleep", "tones": "Tones",
-              "noise_reduction": capitalized(noise_reduction.WORDS), "eco_mode": "Eco mode"}
-#: The settings the Microphone group shows; Settings shows the rest. Each takes the model
-#: record's order, one order on every model (the owner's decision of 2026-10-22).
-MIC_SETTINGS = frozenset({"sidetone", "noise_gate", "noise_reduction"})
-#: A slider's tooltip, where its title needs one: its subtitle is its value.
-ROW_HELP = {"brightness": "The base station's light"}
+ROW_TITLES = {sidetone.KEY: SIDETONE, volume.KEY: "Headset volume",
+              noise_gate.KEY: "Noise gate", auto_sleep.KEY: "Auto sleep",
+              led_brightness.KEY: "Base station brightness",
+              power_mode.KEY: "Deep sleep", tones.KEY: "Tones",
+              noise_reduction.KEY: capitalized(noise_reduction.WORDS),
+              eco_mode.KEY: "Eco mode"}
 #: A spin row's subtitle, the unit of its bare number, as the Keyboard tab's idle times say
 #: theirs.
-SPIN_HELP = {"auto_sleep": "Minutes idle before the headset sleeps"}
+SPIN_HELP = {auto_sleep.KEY: "Minutes idle before the headset sleeps"}
 #: A switch's subtitle where its title needs one, said without a pointer: Deep sleep's
-#: says which device sleeps, beside Auto sleep in the Settings group.
-SWITCH_HELP = {"deep_sleep": "The base station, after 15 minutes idle",
-               "eco_mode": "The headset's battery saver"}
+#: says which device sleeps, beside Auto sleep in the Settings group, and Noise
+#: suppression's where it runs, as the computer's own row says its own place.
+SWITCH_HELP = {power_mode.KEY: "The base station, after 15 minutes idle",
+               eco_mode.KEY: "The headset's battery saver",
+               noise_reduction.KEY: "In the headset"}
 #: The row that asks to put every first-read setting back, its ellipsis for the question (the
 #: HIG's writing style), and the question's own response.
 PUT_BACK = "Put back"
@@ -140,14 +157,7 @@ HEADSET_GROUP, LIBRARY_GROUP = "Headset", "Library"
 
 def balance_words(value: int) -> str:
     """The balance, 0 all Voice to 12 all Game, in whole percent."""
-    return shares_words(mix.game_share(value))
-
-
-def model_of(info: dict) -> Model | None:
-    """The record of the model an `a50x` reply names, None for one this install does not
-    know."""
-    product = info.get("product")
-    return MODELS.get(int(product, 16)) if isinstance(product, str) else None
+    return shares_words(value, mix.WIRE[-1])
 
 
 def bands_written(model: Model | None, instance: str) -> bool:
@@ -167,14 +177,14 @@ def choice_values(setting: Setting) -> list[int | str]:
     return [setting.value(raw) for raw in setting.wire]
 
 
-def choice_words(setting: Setting, raw: int) -> str:
-    """A value's words in a list: "Night", "Never", "15 minutes"."""
-    return capitalized(setting.shown(setting.value(raw)))
+def choice_labels(setting: Setting) -> list[str]:
+    """A setting's values in words, as its list gives them: "Night", "Never", "15 minutes"."""
+    return [capitalized(setting.level(setting.value(raw))) for raw in setting.wire]
 
 
 # The keys of an instance's bands, a stream mix's slider and a source's mute, in the page's
-# sends, pointer holds and last sent values, each prefix keeping them apart from a setting's
-# key and from each other.
+# senders, holds and last sent values, each prefix keeping them apart from a setting's key and
+# from each other.
 def gains_key(instance: str) -> str:
     return f"gains:{instance}"
 
@@ -229,40 +239,14 @@ class PresetGroups:
         label.set_visible(bool(title))
 
 
-@dataclass
-class Sends:
-    """A slider's sends: `now` writes its value unless it is the last sent or the last
-    reply's, `settle` once a run of its keys stops, and `pace` while the pointer drags it."""
-
-    now: Callable[[], None]
-    settle: Settle
-    pace: Pace
-
-    @classmethod
-    def of(cls, now: Callable[[], None]) -> Sends:
-        return cls(now, Settle(now), Pace(now, LIVE_MS))
-
-    @property
-    def pending(self) -> bool:
-        return self.settle.pending or self.pace.pending
-
-    def cancel(self) -> None:
-        self.settle.cancel()
-        self.pace.cancel()
-
-    def flush(self) -> bool:
-        """Send now what waits, both; True if anything did."""
-        settled, paced = self.settle.flush(), self.pace.flush()
-        return settled or paced
-
-
 class A50XPage:
     """The Centurion headset's page, the A50 X's, the A50 Gen 5's or a LIGHTSPEED one's:
-    `call` is the window's, for the writes, whose refusals it shows. HeadsetStack puts the
-    Spatial sound group last in `page` while this page shows."""
+    `call` is the window's, for the writes, whose refusals it shows; `kept_up` is told of an
+    action the page runs itself that failed (Window.kept_up). HeadsetStack puts the groups
+    every headset page shares last in `page` while this page shows."""
 
     def __init__(self, worker: DaemonWorker, call: Call,
-                 toast: Callable[..., object]) -> None:
+                 toast: Callable[..., object], kept_up: Callable[[], None]) -> None:
         self._worker = worker
         self._call = call
         self._toast = toast
@@ -273,30 +257,33 @@ class A50XPage:
         #: Custom: a preset's name, or a library preset's number; and the groups it lists.
         self._settings: dict[str, object] = {}
         self._equalizers: dict[str, list[float]] = {}
+        #: Each equalizer's bands as the last reply that gave them read them, the reply's band
+        #: objects, which Save as new keeps at the gains the sliders show (_keep_heard).
+        self._read_bands: dict[str, list[dict]] = {}
         self._presets: dict[str, list[str]] = {}
         self._playing: dict[str, object] = {}
         self._writable = False
         self._picks: dict[str, list[str | int]] = {}
         self._groups: dict[str, tuple[tuple[str | None, tuple[str, ...]], ...]] = {}
-        self.saved = LibraryCard(worker, toast, self._saved_changed, CENTURION)
-        #: Each slider's sends by its key: a setting's, an instance's bands' and each stream
-        #: mix row's; a setting picked from a list sends at once.
-        self._sends: dict[str, Sends] = {
-            **{gains_key(instance): Sends.of(partial(self._send_gains, instance))
+        self.saved = LibraryCard(worker, toast, kept_up, self._saved_changed, CENTURION)
+        #: Each slider's send by its key, which writes its value unless it is the last sent or
+        #: the last reply's: a setting's, of each model shown so far, an instance's bands' and
+        #: each stream mix row's; a setting picked from a list sends at once.
+        self._senders: dict[str, Callable[[], None]] = {
+            **{gains_key(instance): partial(self._send_gains, instance)
                for instance in INSTANCES},
-            **{mix_key(source): Sends.of(partial(self._send_mix, source))
-               for source in MIX_TITLES}}
+            **{mix_key(source): partial(self._send_mix, source) for source in MIX_TITLES}}
         #: The value each key's last write sent, while a write of it is not answered.
         self._sent: dict[str, object] = {}
         #: The last reply's stream mix: each source's level and mute, and the stream port's
         #: level, by the source's word; none while it is not known.
         self._mix: dict[str, dict] = {}
-        #: The sliders the pointer holds down and how many writes of each key are not
-        #: answered, by key: a setting's, `gains_key`'s, `mix_key`'s or `mute_key`'s. A reply
-        #: meanwhile leaves the slider where it is (_held).
+        #: Each slider's send settling, its drag's pace and whether the pointer holds it down,
+        #: and how many writes of each key are not answered, by key: a setting's,
+        #: `gains_key`'s, `mix_key`'s or `mute_key`'s. A reply meanwhile leaves the slider
+        #: where it is (Holds.held).
         self._holds = Holds()
-        self.meter = InputMeterRow(worker)
-        self.volumes = VolumeRows(worker, toast)
+        self.computer = ComputerRows(worker, toast, kept_up)
         self.widget = self._build()
 
     # -- construction -----------------------------------------------------
@@ -321,22 +308,25 @@ class A50XPage:
             group)
         show_looking(self.state_row, self.state_dot)
         # Every device group's order: Status, Battery, the untested note, Read only, then
-        # the readings (the owner's decision of 2026-10-22).
+        # the readings (the owner's decision of 2026-10-22); Battery notices, a setting, goes
+        # before the readings.
         self.untested_row = untested_row(group, self._toast)
         self.read_only_row = plain_row(Adw.ActionRow, READ_ONLY, CHANGES_WAIT, visible=False)
         group.add(self.read_only_row)
+        self.notices = NoticesRow(group, self._call)
         self.balance_row = plain_row(Adw.ActionRow, BALANCE, "", tooltip_text=BALANCE_HELP,
                                      visible=False)
         group.add(self.balance_row)
         # Under Balance (the owner's decision of 2026-10-25).
-        for word in OUTPUT_WORDS:
-            group.add(self.volumes.rows[word])
+        for row in self.computer.output_rows:
+            group.add(row)
         return group
 
     def _mic_group(self) -> Adw.PreferencesGroup:
         """Boom first, the reading of a model with the stream mix's boom, then the rows made
-        with the Settings group's, for a model whose settings have them, and Mic input and
-        Input level last; shown while Boom or a setting's row is."""
+        with the Settings group's, for a model whose settings have them, and Noise
+        suppression, its test, Mic input and Input level last; shown while Boom or a
+        setting's row is."""
         self.mic_group = Adw.PreferencesGroup(title="Microphone", visible=False)
         self.boom_row = plain_row(Adw.ActionRow, BOOM, "", visible=False)
         self.mic_group.add(self.boom_row)
@@ -344,9 +334,8 @@ class A50XPage:
         return self.mic_group
 
     def _add_mic_rows(self) -> None:
-        """Mic input and Input level, after the Microphone group's other rows."""
-        self.mic_group.add(self.volumes.rows[MIC])
-        self.mic_group.add(self.meter.row)
+        for row in self.computer.mic_rows:
+            self.mic_group.add(row)
 
     def _settings_group(self) -> Adw.PreferencesGroup:
         group = self.settings_group = Adw.PreferencesGroup(title="Settings")
@@ -372,15 +361,11 @@ class A50XPage:
         self.saved.model_shown(model)
         if model == self.model:
             return
-        for send in self._sends.values():
-            send.cancel()
-        for key in (*self.scales, *self.spins):
-            del self._sends[key]
         for key, row in self.rows.items():
             self._group_of(key).remove(row)
         # Each taken out and put back after the rows, so it stays last in its group.
-        self.mic_group.remove(self.volumes.rows[MIC])
-        self.mic_group.remove(self.meter.row)
+        for mic_row in self.computer.mic_rows:
+            self.mic_group.remove(mic_row)
         self.settings_group.remove(self.put_back_row)
         self.rows, self.scales, self.spins, self.choices, self.switches = {}, {}, {}, {}, {}
         # The bands too: another model's may take another range.
@@ -389,12 +374,10 @@ class A50XPage:
                 expander.remove(band_row)
             self.band_rows[instance], self.gain_scales[instance] = [], []
             expander.set_visible(model is None or instance in model.equalizers)
-            # On the expander, whose tooltip GTK shows over a grayed row in it with none.
-            expander.set_tooltip_text(None if bands_written(model, instance)
-                                      else EQUALIZER_READ_ONLY_HELP)
         self._holds.forget()
         self._sent = {}
         self.model = model
+        self._show_eq_line()
         self.put_back_row.set_tooltip_text(PUT_BACK_HELP.format(self._balance_too))
         for setting in model.settings if model else ():
             if setting.key in ROW_TITLES:
@@ -424,8 +407,10 @@ class A50XPage:
                     lower=low, upper=high, value=low, step_increment=1,
                     page_increment=page_of(low, high)))
             row.connect("output", self.on_spin_output, setting)
+            # Written again: GTK wrote the text before the handler was connected.
+            self.on_spin_output(row, setting)
             row.connect("notify::value", self.on_spin, key)
-            self._sends[key] = Sends.of(partial(self._send, key))
+            self._senders[key] = partial(self._send, key)
         elif setting.ranged:
             row = plain_row(Adw.ActionRow, title, NOT_READ)
             # A screen reader says the row's words, the unit with the number.
@@ -435,16 +420,15 @@ class A50XPage:
             self._held_by_pointer(scale, key)
             row.add_suffix(scale)
             self.scales[key] = scale
-            self._sends[key] = Sends.of(partial(self._send, key))
+            self._senders[key] = partial(self._send, key)
         else:
-            row = Adw.ComboRow(title=title, model=Gtk.StringList.new(
-                [choice_words(setting, raw) for raw in setting.wire]))
-            if key == "noise_gate":
-                # The A50 Gen 4's tips, each entry its own.
-                explain_choices(row, [NOISE_GATE_TIPS[name] for name in setting.names])
+            row = Adw.ComboRow(title=title, model=Gtk.StringList.new(choice_labels(setting)))
+            if key == noise_gate.KEY:
+                # The A50 Gen 4's tips, each entry its own, Not read's last (show_choice).
+                explain_choices(row, [*(NOISE_GATE_TIPS[name] for name in setting.names),
+                                      NOT_READ_TIP])
             row.connect("notify::selected", self.on_choice, key)
             self.choices[key] = row
-        row.set_tooltip_text(ROW_HELP.get(key))
         self._group_of(key).add(row)
         self.rows[key] = row
 
@@ -460,22 +444,32 @@ class A50XPage:
 
     def _mix_group(self) -> Adw.PreferencesGroup:
         """The stream mix's rows, each a slider of its level, the sources' with a button that
-        mutes it; shown for a model that has the mix."""
-        group = self.mix_group = Adw.PreferencesGroup(title=STREAM_MIX, visible=False)
+        mutes it; shown for a model that has the mix. The port's row, which has no mute, keeps
+        a gap of a button's width so its slider lines up with the sources'."""
+        group = self.mix_group = Adw.PreferencesGroup(title=STREAM_MIX, description=STREAM_HELP,
+                                                      visible=False)
         self.mix_rows: dict[str, Adw.ActionRow] = {}
         self.mix_scales: dict[str, Gtk.Scale] = {}
         self.mutes: dict[str, Gtk.ToggleButton] = {}
+        # Each widget added holds the group, as GTK's own documentation of it says.
+        mute_width = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
         for source, title in MIX_TITLES.items():
             row = plain_row(Adw.ActionRow, title, NOT_READ)
             scale = spoken_scale(0, mixer.LEVELS, MIX_NAMES[source], page=1, spoken=mix_words)
             scale.connect("value-changed", self.on_mix_level, source)
             self._held_by_pointer(scale, mix_key(source))
             row.add_suffix(scale)
-            if source != mixer.STREAM:
+            if source == mixer.STREAM:
+                gap = Gtk.Box(accessible_role=Gtk.AccessibleRole.PRESENTATION)
+                mute_width.add_widget(gap)
+                row.add_suffix(gap)
+            else:
                 mute = Gtk.ToggleButton(icon_name="audio-volume-muted-symbolic",
-                                        valign=Gtk.Align.CENTER, tooltip_text=f"Mute {title}")
+                                        valign=Gtk.Align.CENTER, tooltip_text=f"Mute {title}",
+                                        css_classes=["flat"])
                 mute.update_property([Gtk.AccessibleProperty.LABEL], [f"Mute {title}"])
                 mute.connect("toggled", self.on_mute, source)
+                mute_width.add_widget(mute)
                 row.add_suffix(mute)
                 self.mutes[source] = mute
             group.add(row)
@@ -504,7 +498,7 @@ class A50XPage:
             preset.connect("notify::selected", self.on_preset, instance)
             row.add_row(preset)
             self.preset_rows[instance] = preset
-            self.saved.add_rows(instance, row, row.get_subtitle)
+            self.saved.add_rows(instance, row, row.get_subtitle, INSTANCE_NAMES[instance])
             self.band_rows[instance], self.gain_scales[instance] = [], []
         return group
 
@@ -529,9 +523,10 @@ class A50XPage:
     def refresh(self) -> None:
         """Ask the daemon for the base station, unless a read is out. It answers from what it
         read and the events since, sending the base nothing. The saved presets are read
-        again too, and the volumes where their rows show (VolumeRows.refresh)."""
+        again too, and the noise suppression's state and the volumes where their rows show
+        (ComputerRows.refresh)."""
         self.saved.refresh()
-        self.volumes.refresh()
+        self.computer.refresh()
         if self._pending or self._closed:
             return
         self._pending = True
@@ -549,15 +544,11 @@ class A50XPage:
             self.show(info)
 
     def _missing(self, why: str) -> None:
-        set_dot(self.state_dot, False)
-        self.state_row.set_subtitle(displayable(capitalized(why)))
-        self.state_row.set_tooltip_text(None)
-        show_battery(self.battery_row, self.battery_icon, None, gone=True)
-        # The readings were the gone headset's, as the A50 Gen 4's page has it.
+        show_gone(self.state_row, self.state_dot, self.battery_row, self.battery_icon,
+                  self.notices, why)
         self.balance_row.set_visible(False)
         self.boom_row.set_visible(False)
-        self.meter.show_headset(None)
-        self.volumes.show_headset(None)
+        self.computer.gone()
         self._show_mic_group()
         self._writable = False
         # The library's rows too, as while the headset is away: the bands were the gone one's.
@@ -569,22 +560,24 @@ class A50XPage:
         """Every row from the `a50x` reply. A slider stays where it is while its send
         settles."""
         self.status_group.set_title(GLib.markup_escape_text(str(info.get("name") or TITLE)))
-        model = model_of(info)
+        model = reply_model(info)
         # Away behind its receiver, as a keyboard or a mouse asleep: amber, what to do, and
         # the last readings with every row that writes off.
         answering = info.get("answering") is not False
         set_dot(self.state_dot, True if answering else ASLEEP)
-        # The route, as the Keyboard tab's row; the node is in the tooltip.
+        # The route, as the Keyboard tab's row; the node is in the tooltip and the description.
         self.state_row.set_subtitle(HEADSET_ASLEEP if not answering
                                     else through(model.dongle) if model else "")
-        self.state_row.set_tooltip_text(str(info.get("device") or "") or None)
+        self.state_row.show_node(str(info.get("device") or "") or None)
         battery = info.get("battery")
         # A headset that does not answer keeps its last reading, with when it was taken.
         show_battery(self.battery_row, self.battery_icon,
-                     battery if isinstance(battery, dict) else None, kept_at(info))
+                     battery if isinstance(battery, dict) else None, kept_at(info),
+                     preset=info.get("battery_notices"))
+        self.notices.show({"headset": info.get("model")}, info)
         settings = info.get("settings")
         self._settings = settings if isinstance(settings, dict) else {}
-        balance = self._settings.get("balance")
+        balance = self._settings.get(mix.KEY)
         self.balance_row.set_visible(whole(balance))
         if whole(balance):
             self.balance_row.set_subtitle(balance_words(balance))
@@ -597,8 +590,7 @@ class A50XPage:
         show_untested(self.untested_row, info.get("untested"))
         # Before the rows are made again for another model, which takes the meter's row out
         # and puts it back: it looks for the new model's microphone once.
-        self.meter.show_headset(None if model is None else model.key)
-        self.volumes.show_headset(None if model is None else model.key)
+        self.computer.show_headset(None if model is None else model.key)
         self._show_model(model)
         self._show_mic_group()
         for key in (*self.scales, *self.spins):
@@ -608,8 +600,8 @@ class A50XPage:
         for key in self.switches:
             self._show_switch(key)
         self.mix_group.set_visible(self.model is not None and self.model.mixer)
-        mix = info.get("mix")
-        self._show_mix(mix if isinstance(mix, dict) else None)
+        stream_mix = info.get("mix")
+        self._show_mix(stream_mix if isinstance(stream_mix, dict) else None)
         equalizers, presets = info.get("equalizer"), info.get("presets")
         for instance in INSTANCES:
             read = equalizers.get(instance) if isinstance(equalizers, dict) else None
@@ -622,14 +614,25 @@ class A50XPage:
 
     def _show_level(self, key: str) -> None:
         """A setting's slider and its number, or its spin row and its unit, from the reply,
-        but while it is held (_held), when both stay the row's."""
+        but while it is held (Holds.held), when both stay the row's. One not read says so beneath,
+        its slider where it was, and its spin row has no number while the reply lacks it."""
         value, setting = self._settings.get(key), cast("Model", self.model).setting(key)
         low, high = setting.range
+        spin = self.spins.get(key)
+        # A spin row's text is written here too: GTK writes it (on_spin_output) only for a
+        # value that changes, and Adw.SpinRow.set_value of the same value writes nothing
+        # (libadwaita 1.9.1, tried 2026-10-31).
         if not whole(value) or not low <= value <= high:
             self.rows[key].set_subtitle(NOT_READ)
-        elif not self._held(key):
-            if key in self.spins:
-                self._loading.put_value(self.spins[key], value)
+            if spin is not None:
+                self.on_spin_output(spin, setting)
+        elif not self._holds.held(key):
+            if spin is not None:
+                self._loading.put_value(spin, value)
+                # On a row off since the last reply, which may show Not read's blank; a row
+                # on keeps what is typed in it.
+                if not spin.get_sensitive():
+                    self.on_spin_output(spin, setting)
                 self.rows[key].set_subtitle(SPIN_HELP.get(key, ""))
             else:
                 self._loading.put_value(self.scales[key], value)
@@ -652,11 +655,11 @@ class A50XPage:
             self._mix[source] = {"level": level, "muted": muted}
             if source in self.mutes:
                 self._loading.put_active(self.mutes[source], muted)
-            if self._held(mix_key(source)):
+            if self._holds.held(mix_key(source)):
                 level = round(self.mix_scales[source].get_value())
             else:
                 self._loading.put_value(self.mix_scales[source], level)
-            row.set_subtitle(MUTED if muted else mix_words(level))
+            row.set_subtitle(MIX_MUTED if muted else mix_words(level))
 
     def _show_switch(self, key: str) -> None:
         value = self._settings.get(key)
@@ -666,15 +669,15 @@ class A50XPage:
                                         else NOT_READ)
 
     def _show_choice(self, key: str) -> None:
-        values = choice_values(cast("Model", self.model).setting(key))
-        value = self._settings.get(key)
+        setting = cast("Model", self.model).setting(key)
+        values, value = choice_values(setting), self._settings.get(key)
         known = isinstance(value, int | str) and value in values
-        if known:
-            self._loading.put_selected(self.choices[key], values.index(cast("int | str", value)))
-        self.choices[key].set_subtitle("" if known else NOT_READ)
+        show_choice(self._loading, self.choices[key], choice_labels(setting),
+                    values.index(cast("int | str", value)) if known else None)
 
     def _show_equalizer(self, instance: str, read: dict | None) -> None:
-        """An instance's preset and band rows from its read, or Not read."""
+        """An instance's preset and band rows from its read, or Not read; while its sliders
+        are held (Holds.held), Save as new keeps the gains they show (_keep_heard)."""
         bands = read.get("bands") if read else None
         row = self.instance_rows[instance]
         writes = self._writable and bands_written(self.model, instance)
@@ -694,7 +697,8 @@ class A50XPage:
             self.saved.to_end(instance)
         gains = [float(band["gain"]) for band in bands]
         self._equalizers[instance] = gains
-        settling = self._held(gains_key(instance))
+        self._read_bands[instance] = bands
+        settling = self._holds.held(gains_key(instance))
         for number, (band_row, scale) in enumerate(zip(self.band_rows[instance],
                                                        self.gain_scales[instance],
                                                        strict=True)):
@@ -714,6 +718,8 @@ class A50XPage:
                     words = signed(gains[number])
                     band_row.set_subtitle(words)
                     scale.update_property([Gtk.AccessibleProperty.VALUE_TEXT], [words])
+        if settling:
+            self._keep_heard(instance)
 
     def _show_presets(self, instance: str) -> None:
         """An instance's preset row: each preset its reply names under Headset, by name, then
@@ -739,10 +745,19 @@ class A50XPage:
 
     def _saved_changed(self) -> None:
         """The saved presets read or changed: each Preset row of an equalizer read lists them
-        again, and the group says why the library takes no change while it does not."""
-        self.eq_group.set_description(self.saved.said())
+        again, and the group's line is put again (_show_eq_line)."""
+        self._show_eq_line()
         for instance in self._equalizers:
             self._show_presets(instance)
+
+    def _show_eq_line(self) -> None:
+        """The Equalizer group's line, said without a pointer: why the library takes no change
+        (LibraryCard.said), then EQUALIZER_READ_ONLY_HELP while the model shown has an
+        equalizer whose bands the daemon only reads; none while neither holds."""
+        read_only = self.model is not None and not all(
+            bands_written(self.model, instance) for instance in self.model.equalizers)
+        lines = (self.saved.said(), EQUALIZER_READ_ONLY_HELP if read_only else None)
+        self.eq_group.set_description("\n".join(line for line in lines if line) or None)
 
     def _set_sensitive(self) -> None:
         """The rows that write on only while the daemon lets writes through and a value is
@@ -771,8 +786,7 @@ class A50XPage:
         # A slider grayed out under the pointer never sees its release; while writes go
         # through, a change its drag still owes goes at the interval's end.
         for key in off:
-            if self._holds.release(key) and not self._writable:
-                self._sends[key].pace.cancel()
+            self._holds.release(key, keep_owed=self._writable)
 
     # -- writing ------------------------------------------------------------
 
@@ -782,33 +796,26 @@ class A50XPage:
     def on_press(self, key: str) -> None:
         """The pointer went down on `key`'s slider: from here it sends at the drag's pace."""
         self._holds.press(key)
-        self._sends[key].settle.cancel()
 
     def on_release(self, key: str) -> None:
         """The pointer let go of `key`'s slider: its value is sent now, unless it is the last
         sent or the last reply's. Sent whatever the loading guard says: a release is one
         event, and a poll's rows can hold the guard when it comes, or did when the drag's
-        last change came."""
-        if not self._holds.release(key):
-            return
-        sends = self._sends[key]
-        sends.pace.cancel()
-        sends.now()
-
-    def _held(self, key: str) -> bool:
-        """Whether `key`'s slider stays where it is through a reply: the pointer holds it, a
-        send of it waits, or a write of it is not answered yet."""
-        return self._holds.held(key) or self._sends[key].pending
+        last change came. A release with no press, of a slider let go of as its row went off
+        (_set_sensitive), leaves the change its drag owes to the interval's end."""
+        if self._holds.pressing(key):
+            self._holds.release(key)
+            self._senders[key]()
 
     def _moved(self, key: str) -> bool:
         """`key`'s slider moved: sent at the drag's pace while the pointer holds it, which no
-        reply moves (_held), else once its keys settle; False for a move the page made."""
+        reply moves (Holds.held), else once its keys settle; False for a move the page made."""
         if self._holds.pressing(key):
-            self._sends[key].pace.changed()
+            self._holds.dragged(key, self._senders[key], LIVE_MS)
         elif self._loading.active:
             return False
         else:
-            self._sends[key].settle.restart(SETTLE_MS)
+            self._holds.settle(key, self._senders[key], SETTLE_MS)
         return True
 
     def on_spin(self, row: Adw.SpinRow, _pspec: GObject.ParamSpec, key: str) -> None:
@@ -818,14 +825,15 @@ class A50XPage:
         if not self._closed and self.spins.get(key) is row:
             self._moved(key)
 
-    @staticmethod
-    def on_spin_output(row: Adw.SpinRow, setting: Setting) -> bool:
-        """A spin row's number as it shows: Never for 0, where the setting has that word.
-        True once the row's text is set, the signal's contract."""
-        if round(row.get_value()) == 0 and setting.never:
-            row.set_text(capitalized(setting.never))
-            return True
-        return False
+    def on_spin_output(self, row: Adw.SpinRow, setting: Setting) -> bool:
+        """Write a spin row's text: no number while the reply lacks the setting, as the
+        Mouse tab's DPI row has none, Never for 0 where the setting has that word, else the
+        number. True, the signal's contract for a text written."""
+        number = round(row.get_value())
+        row.set_text("" if setting.key not in self._settings
+                     else capitalized(setting.never) if number == 0 and setting.never
+                     else str(number))
+        return True
 
     def on_slider(self, scale: Gtk.Scale, key: str) -> None:
         if self._moved(key):
@@ -853,9 +861,12 @@ class A50XPage:
         if held is not None and level != self._sent.get(key, held["level"]):
             self._write(key, {"command": "a50x_mix", "source": source, "level": level}, level)
 
-    def on_choice(self, _row: Adw.ComboRow | Adw.SwitchRow, _pspec: GObject.ParamSpec,
+    def on_choice(self, row: Adw.ComboRow | Adw.SwitchRow, _pspec: GObject.ParamSpec,
                   key: str) -> None:
-        if not self._loading.active:
+        # Not read, the entry show_choice lists after a list's values, has no value to send.
+        if not self._loading.active and not (
+                isinstance(row, Adw.ComboRow)
+                and row.get_selected() >= len(cast("Model", self.model).setting(key).wire)):
             self._send(key)
 
     def _send(self, key: str) -> None:
@@ -891,7 +902,7 @@ class A50XPage:
         once (the owner's decision of 2026-10-22)."""
         def put_back() -> None:
             for key in (*self.scales, *self.spins):
-                self._sends[key].cancel()
+                self._holds.cancel(key)
             self._call({"command": "a50x_set", "reset": True}, self._answered)
         confirm(row, PUT_BACK_HEADING, PUT_BACK_BODY.format(self._balance_too), PUT_BACK,
                 put_back)
@@ -903,27 +914,41 @@ class A50XPage:
         picks = self._picks.get(instance, [])
         index = row.get_selected()
         if not self._loading.active and index < len(picks):
-            self._sends[gains_key(instance)].cancel()
+            self._holds.cancel(gains_key(instance))
             pick = picks[index]
             self._call(self.saved.request(pick) if isinstance(pick, int)
                        else {"command": "a50x_eq", "instance": instance, "preset": pick},
                        self._answered)
 
     def on_gain(self, scale: Gtk.Scale, instance: str, number: int) -> None:
-        """A band moved by hand: its row says the whole dB it sends."""
+        """A band moved by hand: its row says the whole dB it sends, which Save as new keeps
+        (_keep_heard)."""
         if self._moved(gains_key(instance)):
             self.band_rows[instance][number].set_subtitle(signed(round(scale.get_value())))
+            self._keep_heard(instance)
+
+    def _heard(self, instance: str, read: list[float]) -> list[float]:
+        """An instance's gains as its sliders show them, a band each of `read`, the gains
+        read: each slider moved by hand, the others as read."""
+        # Exact: a slider not moved holds the gain it was put to, which may be a half dB, and
+        # one moved by hand lands on a whole dB, which may be that gain rounded.
+        return [float(round(scale.get_value())) if scale.get_value() != gain
+                else gain for scale, gain in zip(self.gain_scales[instance], read, strict=False)]
+
+    def _keep_heard(self, instance: str) -> None:
+        """The read bands at the gains the sliders show, for Save as new to keep
+        (LibraryCard.keep); nothing while the instance's bands are not read."""
+        read = self._equalizers.get(instance)
+        if read is not None:
+            self.saved.keep(instance, [{**band, "gain": gain} for band, gain in zip(
+                self._read_bands[instance], self._heard(instance, read), strict=False)])
 
     def _send_gains(self, instance: str) -> None:
         """Write an instance's gains: each slider moved by hand, the others as read."""
         read = self._equalizers.get(instance)
         if read is None:
             return
-        # Exact: a slider not moved holds the gain it was put to, which may be a half dB, and
-        # one moved by hand lands on a whole dB, which may be that gain rounded.
-        gains = [float(round(scale.get_value())) if scale.get_value() != gain
-                 else gain for scale, gain in zip(self.gain_scales[instance], read,
-                                                  strict=False)]
+        gains = self._heard(instance, read)
         key = gains_key(instance)
         if gains == self._sent.get(key, read):
             return
@@ -945,21 +970,20 @@ class A50XPage:
     def flush(self) -> bool:
         """Send what is still waiting now, a number typed in a spin row and not yet taken
         among it, for the window's close; True if any."""
-        take_typed(*self.spins.values())
-        # Each one sent: any() over a generator would stop at the first that was.
-        flushed = [send.flush() for send in self._sends.values()]
-        return self.volumes.flush() or any(flushed)
+        # Not a row Not read: GTK takes its blank as 0, which the close would send.
+        take_typed(*(row for key, row in self.spins.items() if key in self._settings))
+        # Apart, and first: `or` would skip the headset's writes once the computer's sent one.
+        flushed = self._holds.flush()
+        return self.computer.flush() or flushed
 
     @property
     def busy(self) -> bool:
         """An action the page runs itself, which the window's close waits for: a change of
-        the saved presets or a volume set (VolumeRows); every write to the headset goes
-        through `call`."""
-        return self.saved.busy or self.volumes.busy
+        the saved presets, a volume set or a switch of the noise suppression
+        (ComputerRows.busy); every write to the headset goes through `call`."""
+        return self.saved.busy or self.computer.busy
 
     def close(self) -> None:
         self._closed = True
-        self.meter.close()
-        self.volumes.close()
-        for send in self._sends.values():
-            send.cancel()
+        self.computer.close()
+        self._holds.cancel_all()

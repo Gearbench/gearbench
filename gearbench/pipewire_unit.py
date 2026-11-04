@@ -1,57 +1,49 @@
 """A transient user unit of Gearbench's: its command line and its stop, the equalizer's
 watch's included; for one that runs `pipewire -c` on a conf of Gearbench's, its state as
 systemd and PipeWire give it, the wait after its start and the runtime folder a switch's
-OSError comes from (switch_folder); and the headset's own nodes in pw-dump, which each
-chain's conf aims at and the input meter (input_meter) records from, with the volume of such
-a node where pipewire-pulse and GNOME keep it: its card's Route or its own Props (route_of,
-props_volumes), their pw-cli sets (route_argv, sink_argv), and GNOME's percent
-(gnome_percent). Standard library only; every outside program goes through a `run` argument
-and `pipewire_client.run_program`, and a failure is a `pipewire_client.StepError` in words.
+OSError comes from (switch_folder); a node a unit of Gearbench's made (made_in), and each such
+node of some names (unit_nodes), and the node a chain's stream aims at (aimed_at); the default
+output or input, read and picked (default_sink, users_defaults, pick_default), and a
+pw-metadata write's outcome (written). Standard library only; every outside program goes
+through a `run` argument and `pipewire_client.run_program`, and a failure is a
+`pipewire_client.StepError` in words.
 """
 
 from __future__ import annotations
 
-import sys
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+import json
+from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
-from . import pipewire_client, runtime_folder, spatial, wording
-from .g432 import HeadsetModel
+from . import pipewire_client, runtime_folder, wording
 
 #: systemctl's exit status for a stop of a unit not loaded, as a transient unit is once it
 #: has stopped: off already. systemd's EXIT_NOTINSTALLED, from its documented exit codes,
 #: not yet seen from this stop.
 NOT_LOADED = 5
-#: PipeWire's filter-chain.service's hardening, which the spatial unit carries too.
+#: PipeWire's filter-chain.service's hardening, which the spatial and Outputs units carry
+#: too.
 HARDENING = ("LockPersonality=yes", "MemoryDenyWriteExecute=yes", "NoNewPrivileges=yes",
              "RestrictNamespaces=yes", "SystemCallArchitectures=native",
              "SystemCallFilter=@system-service")
+#: A chain's unit, a client of the session's PipeWire, is stopped with it and starts after
+#: it and its session manager, as PipeWire's filter-chain.service does; the spatial and
+#: Outputs units carry the same BindsTo= and After=.
+PIPEWIRE_BOUND_TO = "pipewire.service"
+PIPEWIRE_AFTER = "pipewire.service pipewire-session-manager.service"
 #: The ActiveStates of a unit that runs or starts.
 RUNS_OR_STARTS = ("active", "activating")
 #: A switch-on's refusal when its unit stopped as it started, by the unit's description
 #: and its name.
 STOPPED = "{} stopped as it started: `journalctl --user -u {}` says why"
-#: The media class of a headset's microphone in PipeWire, an input of its card.
-MIC_CLASS = "Audio/Source"
-#: The A50 X's Stream Out, the stream mix's capture: an input of its card beside the
-#: microphone, the profile set's mapping of this name
-#: (alsa-card-profile/gearbench-astro-a50x.conf), which names the node's device.profile.name.
-STREAM_OUT = "stereo-stream"
-#: GNOME's 100 %, a volume of 1.0.
-GNOME_FULL = 100
-
-
-@dataclass(frozen=True)
-class UnitState:
-    """What systemd and pw-dump say of the unit: the fields unit_summary reads, before those
-    of the conf's own nodes, which each unit's State adds."""
-
-    systemd: str | None = None        # why `systemctl --user show` failed
-    active: str = "inactive"          # the unit's ActiveState
-    tools: bool = True                # False: pw-dump not installed
-    pipewire: str | None = None       # why pw-dump failed or did not parse
+#: Why a pw-metadata write did not go (written): WirePlumber keeps the "default" metadata.
+NO_METADATA = "pw-metadata found no default metadata, which WirePlumber keeps"
+#: Why a pick that went did not show: WirePlumber did not make it the default in time.
+NOT_SHOWN = f"WirePlumber did not make it the default within {pipewire_client.SETTLE:g} s"
+#: What the "default" metadata keeps a default node of, as its keys end: an output, "sink",
+#: or an input, "source".
+type DefaultKind = Literal["sink", "source"]
 
 
 def transient_argv(unit: str, description: str, bound_to: str, *, after: str) -> list[str]:
@@ -68,20 +60,22 @@ def transient_argv(unit: str, description: str, bound_to: str, *, after: str) ->
 def pipewire_argv(unit: str, description: str, conf: Path) -> list[str]:
     """systemd-run's command line for a transient unit, `unit`, that runs `pipewire -c` on
     `conf` (transient_argv)."""
-    # A client of the session's PipeWire, stopped with it.
-    return [*transient_argv(unit, description, "pipewire.service",
-                            after="pipewire.service pipewire-session-manager.service"),
+    return [*transient_argv(unit, description, PIPEWIRE_BOUND_TO, after=PIPEWIRE_AFTER),
             # Each $ doubled: the user manager expands ${NAME} in the command line, an unset
             # one to nothing, and reads $$ as $ (systemd.service(5), "Command lines"), so
             # PipeWire would read a conf in a folder private_runtime never checked.
             pipewire_client.PIPEWIRE, "-c", str(conf).replace("$", "$$")]
 
 
+def show_argv(unit: str) -> list[str]:
+    """`systemctl --user show`'s command line for `unit`, with the properties read here."""
+    return pipewire_client.systemctl("--property=Id,LoadState,ActiveState,SubState,MainPID",
+                                     "show", unit)
+
+
 def unit_of(run: pipewire_client.Run, unit: str) -> dict[str, str]:
     """`unit` as `systemctl --user show` gives it; StepError when systemctl fails."""
-    return pipewire_client.unit_of(run, ["systemctl", "--user",
-                                         "--property=Id,LoadState,ActiveState,SubState,MainPID",
-                                         "show", unit])
+    return pipewire_client.unit_of(run, show_argv(unit))
 
 
 def running(run: pipewire_client.Run, unit: str) -> bool:
@@ -113,10 +107,125 @@ def settle_start[S](run: pipewire_client.Run, unit: str, read_state: Callable[[]
     return state
 
 
-def g432_cards(objects: Sequence[object], *, model: HeadsetModel) -> set[int]:
-    """The ids of the headset's card Devices in pw-dump's objects, on any profile
-    (pipewire_client.card_nodes)."""
-    return set(pipewire_client.card_nodes(objects, spatial.HEADSET_KEYED[model.key].card)[0])
+def maker(objects: Sequence[object], name: str, unit: str, *,
+          media_class: str = "Audio/Sink") -> int | None:
+    """The pid of the process of systemd's `unit` that made the node of `media_class` named
+    `name` in pw-dump's `objects` (unit_nodes); None for none."""
+    return next((pid for _node, props, pid in unit_nodes(objects, (name,), unit)
+                 if props.get("media.class") == media_class), None)
+
+
+def made_in(objects: Sequence[object], name: str, unit: str, *,
+            media_class: str = "Audio/Sink") -> bool:
+    """Whether a process of systemd's `unit` made the node of `media_class` named `name` in
+    pw-dump's `objects` (maker)."""
+    return maker(objects, name, unit, media_class=media_class) is not None
+
+
+def unit_nodes(objects: Sequence[object], names: Collection[str], unit: str
+               ) -> list[tuple[int, dict, int]]:
+    """Each node in pw-dump's `objects` named one of `names` that a process running in
+    systemd's `unit` made (pipewire_client.unit_of_process), as (id, props, pid), each of a
+    name made twice included, by the pid PipeWire took from its client's socket
+    (pipewire_client.node_pids): any client can name a node so, a sandboxed app and
+    pipewire-pulse for a pulse client among them, and a node with no maker (pipewire_client.node_client) is no unit's."""
+    return [(node, props, pid) for node, _info, props, pid in pipewire_client.node_pids(objects)
+            if props.get("node.name") in names and pipewire_client.unit_of_process(pid) == unit]
+
+
+def default_key(kind: DefaultKind, *, configured: bool = False) -> str:
+    """The "default" metadata's key for the default node of `kind`: the one WirePlumber
+    picked, default.audio.<kind>, or with `configured` the one the user picked,
+    default.configured.audio.<kind>."""
+    return f"default.{'configured.' if configured else ''}audio.{kind}"
+
+
+def default_named(objects: Sequence[object], key: str) -> str | None:
+    """The node name the "default" Metadata in pw-dump's objects holds under `key` for the
+    whole session, subject 0; None for none. A client that may use PipeWire's metadata
+    factory can make a Metadata of that name and fill it, so one counts only where its
+    client.id, which the factory sets, names a Client PipeWire did not restrict
+    (pipewire_client.trusted_clients); one with no client.id counts for none, as
+    pipewire_client.card_nodes' Devices."""
+    trusted = pipewire_client.trusted_clients(objects)
+    for obj in objects:
+        if (isinstance(obj, dict) and obj.get("type") == "PipeWire:Interface:Metadata"
+                and isinstance(obj.get("props"), dict)
+                and obj["props"].get("metadata.name") == "default"
+                and pipewire_client.as_whole(obj["props"].get("client.id")) in trusted
+                and isinstance(obj.get("metadata"), list)):
+            for item in obj["metadata"]:
+                value = item.get("value") if isinstance(item, dict) else None
+                if (isinstance(value, dict) and item.get("subject") == 0
+                        and item.get("key") == key and isinstance(value.get("name"), str)):
+                    return value["name"]
+    return None
+
+
+def default_sink(objects: Sequence[object]) -> str | None:
+    """The default output's node name in pw-dump's objects, the one WirePlumber picked
+    (default_named), None for none."""
+    return default_named(objects, default_key("sink"))
+
+
+def users_defaults(objects: Sequence[object], kind: DefaultKind) -> list[str]:
+    """The node names in pw-dump's objects that stand for the user's default node of `kind`,
+    each that is set, once: first the one the user picked, which GNOME's pick and wpctl
+    set-default write and which WirePlumber 0.5.13 keeps while that node is away, playing on
+    another meanwhile (state-default-nodes.lua, find-selected-default-node.lua); then the
+    one WirePlumber picked (default_named)."""
+    names = (default_named(objects, default_key(kind, configured=True)),
+             default_named(objects, default_key(kind)))
+    return list(dict.fromkeys(name for name in names if name is not None))
+
+
+def default_argv(name: str, kind: DefaultKind = "sink") -> list[str]:
+    """pw-metadata's write of the node picked as the default of `kind`, its configured key
+    (default_key), as GNOME's pick and wpctl set-default write it; WirePlumber 0.5.13 then
+    makes it the default while it is there, and keeps it as the user's pick while it is
+    away (find-selected-default-node.lua, state-default-nodes.lua)."""
+    return ["pw-metadata", "-n", "default", "0", default_key(kind, configured=True),
+            json.dumps({"name": name}), "Spa:String:JSON"]
+
+
+def written(run: pipewire_client.Run, argv: list[str]) -> str | None:
+    """Why the pw-metadata write `argv` did not go, in words; None once it went."""
+    try:
+        done = pipewire_client.run_program(run, argv)
+    except pipewire_client.StepError as err:
+        return str(err)
+    # pw-metadata 1.6.2 says "set property:" for a write that went, and exits 0 saying
+    # nothing for a metadata it does not find (measured 2026-10-17).
+    return None if "set property:" in done.stdout else NO_METADATA
+
+
+def aim_argv(stream: int, target: str) -> list[str]:
+    """pw-metadata's write that aims the node `stream`, a stream, at the node named `target`:
+    its target.object in the "default" metadata, which WirePlumber 0.5.13 takes over the
+    target.object in the stream's own props and links it by (find-defined-target.lua). "--"
+    ends the options: a node's name is whatever its client gave it, and pw-metadata 1.6.2
+    reads an argument that starts with "-" as an option wherever it stands (getopt_long with
+    "hVr:lmdn:", read 2026-11-01), so a sink named "-d" would make the write a delete."""
+    return ["pw-metadata", "-n", "default", "--", str(stream), "target.object", target]
+
+
+def pick_default(run: pipewire_client.Run, name: str, kind: DefaultKind = "sink"
+                 ) -> str | None:
+    """Make `name` the default of `kind`, the default output unless told, and wait up to
+    pipewire_client.SETTLE for WirePlumber to pick it, which moves the streams that follow
+    the default with it: None once WirePlumber shows the pick, else why not, in words. A pick
+    not seen is not known to have gone, so the sound may still go where it did."""
+    if (failed := written(run, default_argv(name, kind))) is not None:
+        return failed
+
+    def look() -> str | None:
+        try:
+            shown = pipewire_client.dumped(
+                run, lambda objects: default_named(objects, default_key(kind)))
+        except pipewire_client.StepError as err:
+            return str(err)
+        return None if shown == name else NOT_SHOWN
+    return pipewire_client.waited(look, lambda failed: failed is not NOT_SHOWN)
 
 
 def aimed_at(objects: Sequence[object], pid: int, stream: str) -> str | None:
@@ -127,154 +236,6 @@ def aimed_at(objects: Sequence[object], pid: int, stream: str) -> str | None:
                  for _node, _info, props, made_by in pipewire_client.node_pids(objects)
                  if made_by == pid and props.get("node.name") == stream
                  and isinstance(target := props.get("target.object"), str)), None)
-
-
-def g432_node(objects: Sequence[object], media_class: str = "Audio/Sink", *,
-              model: HeadsetModel, aimed: str | None = None) -> dict | None:
-    """headset_node of `model`, a model of the G432's family."""
-    return headset_node(objects, spatial.HEADSET_KEYED[model.key], media_class, aimed=aimed)
-
-
-def headset_node(objects: Sequence[object], headset: spatial.Headset, media_class: str, *,
-                 aimed: str | None = None) -> dict | None:
-    """The props of `headset`'s node of `media_class` in pw-dump's objects: with `aimed`, a
-    node's name, such as a running chain's (aimed_at), the node of that name among its cards'
-    nodes (pipewire_client.card_nodes), so a second headset of the model plugged in meanwhile
-    is never taken for it; else the first with a name of the nodes of the card Gearbench
-    Spatial plays to (spatial.card_of), the A50 X's Stream Out left out. None while there is
-    none."""
-    if aimed is None:
-        card = spatial.card_of(headset, objects)
-        nodes = [] if card is None else card[1]
-    else:
-        nodes = pipewire_client.card_nodes(objects, headset.card)[1]
-    return next((props for props in nodes if props.get("media.class") == media_class
-                 and props.get("device.profile.name") != STREAM_OUT
-                 and isinstance(name := props.get("node.name"), str)
-                 and (aimed is None or name == aimed)), None)
-
-
-def mic_of(objects: Sequence[object], headset: spatial.Headset) -> str | None:
-    """The node name of `headset`'s microphone in pw-dump's objects, headset_node's input;
-    None while there is none."""
-    props = headset_node(objects, headset, MIC_CLASS)
-    return None if props is None else props["node.name"]
-
-
-def node_id(objects: Sequence[object], props: dict | None) -> int | None:
-    """The id of the Node in pw-dump's objects whose props are `props`, as g432_node gives
-    them: by those props, not their node.name, which any client can give a node of its
-    own; None for None."""
-    return next((node for node, _info, found in pipewire_client.of_type(objects, "Node")
-                 if found is props), None)
-
-
-@dataclass(frozen=True)
-class Route:
-    """A node of a headset's card, its output or its microphone, as the card's Route param
-    gives it: the card Device's id, the route's index and device, each channel's volume,
-    volumeBase, the volume at which the adapter's own is at 0 dB: PipeWire's ACP sets the
-    hardware volume to the volume over volumeBase, which it takes from the mixer path's
-    highest dB (acp.c's mixer_volume_init and set_volume, read 2026-10-17), and whether it
-    is muted."""
-
-    card: int
-    index: int
-    device: int
-    volumes: tuple[float, ...]
-    base: float
-    mute: bool
-
-
-def levels(value: object) -> tuple[float, ...] | None:
-    """`value` as volumes, one a channel, if it is a list of finite numbers of 0 or more, at
-    least one; else None."""
-    # json.loads reads 1e999 and Infinity as an infinity, and a whole number past the largest
-    # float raises OverflowError at float(); NaN fails each comparison.
-    if not (isinstance(value, list) and value
-            and all(wording.number(v) and 0 <= v <= sys.float_info.max for v in value)):
-        return None
-    return tuple(float(v) for v in value)
-
-
-def _route(route: object, card: int, device: object, direction: str) -> Route | None:
-    """`route`, one of the card's Route params, as a Route if it is the node's: its
-    direction `direction`, its device the node's card.profile.device, a whole index, and a
-    volume of 0 or more for each channel and a volumeBase above 0 in its props, whose mute
-    is true only for a JSON true."""
-    if (not isinstance(route, dict) or route.get("direction") != direction
-            or not isinstance(values := route.get("props"), dict)):
-        return None
-    volumes, base = levels(values.get("channelVolumes")), values.get("volumeBase")
-    if (not wording.whole(device) or route.get("device") != device
-            or not wording.whole(route.get("index")) or volumes is None
-            or not wording.number(base) or not base > 0):
-        return None
-    return Route(card, route["index"], device, volumes, float(base), values.get("mute") is True)
-
-
-def route_of(objects: Sequence[object], props: dict, direction: str = "Output"
-             ) -> Route | None:
-    """The route of the node whose props are `props`, a node of a card's in pw-dump's
-    objects (pipewire_client.card_nodes), an output, or with `direction` "Input" a
-    microphone: its card's Route param for its card.profile.device, None where the card gives
-    none of the shape _route reads. pipewire-pulse 1.6.2 matches the device alone
-    (collect.c's collect_device_info, read 2026-10-25): a device of an ACP card is an output
-    or an input, so the direction finds the same route."""
-    card = props["device.id"]
-    for card_id, info, _card_props in pipewire_client.of_type(objects, "Device"):
-        params = info.get("params") if card_id == card else None
-        routes = params.get("Route") if isinstance(params, dict) else None
-        for route in routes if isinstance(routes, list) else ():
-            if (found := _route(route, card, props.get("card.profile.device"),
-                                direction)) is not None:
-                return found
-    return None
-
-
-def props_volumes(info: dict) -> tuple[tuple[float, ...] | None, bool]:
-    """A node's volume on each channel and whether it is muted, from its info in pw-dump: the
-    channelVolumes and the mute of the first entry of its Props with channelVolumes, the
-    volumes None where they are not levels and the mute true only for a JSON true. (None,
-    False) where it has no such entry."""
-    params = info.get("params")
-    entries = params.get("Props") if isinstance(params, dict) else None
-    entry = next((entry for entry in (entries if isinstance(entries, list) else ())
-                  if isinstance(entry, dict) and "channelVolumes" in entry), {})
-    return levels(entry.get("channelVolumes")), entry.get("mute") is True
-
-
-def route_argv(route: Route, volumes: Sequence[float], save: bool, *,
-               mute: bool | None) -> list[str]:
-    """pw-cli's set-param of `route` to `volumes`, and to `mute` unless None, as
-    WirePlumber 0.5.13's apply-routes.lua sets a route: its index and device, the volumes and
-    the mute in its props, and save, which decides whether WirePlumber keeps the level and
-    the mute (state-routes.lua)."""
-    shown = " ".join(f"{volume:.6f}" for volume in volumes)
-    muted = "" if mute is None else f", mute: {'true' if mute else 'false'}"
-    param = (f"{{ index: {route.index}, device: {route.device}, props: {{ channelVolumes: "
-             f"[ {shown} ]{muted} }}, save: {'true' if save else 'false'} }}")
-    return ["pw-cli", "set-param", str(route.card), "Route", param]
-
-
-def sink_argv(sink_id: int, volumes: Sequence[float], mute: bool) -> list[str]:
-    """pw-cli's set-param of the Props of the node `sink_id`, a sink or a microphone, to
-    `volumes`, muted when `mute`, as GNOME's slider and its mute set them."""
-    shown = " ".join(f"{volume:.6f}" for volume in volumes)
-    return ["pw-cli", "set-param", str(sink_id), "Props",
-            f"{{ channelVolumes: [ {shown} ]{', mute: true' if mute else ''} }}"]
-
-
-def gnome_percent(volume: float) -> int:
-    """A route's volume as GNOME's Sound settings shows it: the cube root, in percent, as
-    WirePlumber's 0.064 shows as 40 %."""
-    return round(volume ** (1 / 3) * GNOME_FULL)
-
-
-def gnome_volume(percent: float) -> float:
-    """The volume GNOME's slider sets for `percent`: gnome_percent the other way, its
-    cube."""
-    return (percent / GNOME_FULL) ** 3
 
 
 def owned_nodes(objects: Sequence[object], pid: int) -> dict[str, int]:
@@ -306,55 +267,42 @@ def linked(objects: Sequence[object], output: int | None, into: int | None) -> b
 def read_fields(run: pipewire_client.Run, unit: str,
                 graph: Callable[[Sequence[object], int], dict]) -> dict:
     """UnitState's fields for `unit`, and `graph`'s of a fresh pw-dump's objects for its
-    MainPID (pipewire_client.dumped). Never raises."""
-    fields: dict = {}
-    pid = 0
-    try:
-        found = unit_of(run, unit)
-    except pipewire_client.StepError as err:
-        fields["systemd"] = str(err)
-    else:
-        fields["active"] = found.get("ActiveState") or "inactive"
-        pid = pipewire_client.main_pid(found)
-    try:
-        fields.update(pipewire_client.dumped(run, lambda objects: graph(objects, pid)))
-    except pipewire_client.NotInstalled:
-        fields["tools"] = False
-    except pipewire_client.StepError as err:
-        fields["pipewire"] = str(err)
-    return fields
+    MainPID, 0 where systemctl failed (pipewire_client.unit_and_graph). Never raises."""
+    return pipewire_client.unit_and_graph(
+        run, show_argv(unit), lambda found: {"active": found.get("ActiveState") or "inactive"},
+        lambda objects, found: graph(objects,
+                                     0 if found is None else pipewire_client.main_pid(found)))
 
 
-def unit_summary(state: UnitState) -> tuple[str, str] | None:
+def unit_summary(state: pipewire_client.UnitState) -> tuple[str, str] | None:
     """(kind, words) for the first of the unit's own conditions below that holds, in
-    spatial.summary's words for the kinds the two share; None while it runs and pw-dump was
+    spatial.unit_kind's words for the kinds the two share; None while it runs and pw-dump was
     read."""
     if state.systemd:
-        return "no_manager", spatial.NO_MANAGER.format(state.systemd)
+        return "no_manager", pipewire_client.NO_MANAGER.format(state.systemd)
     if state.active in ("activating", "reloading"):
         return "starting", "starting"
     if state.active != "active":
         return "off", "off"
     if not state.tools:
-        return "no_tools", spatial.NO_TOOLS
+        return "no_tools", pipewire_client.NO_TOOLS
     if state.pipewire:
-        return "pipewire", spatial.PIPEWIRE_NOT_READ.format(state.pipewire)
+        return "pipewire", pipewire_client.PIPEWIRE_NOT_READ.format(state.pipewire)
     return None
 
 
 def switch_folder() -> Path:
     """The runtime folder, where a switch's OSError comes from, the equalizer's or the noise
-    suppression's: the folder's stat, the conf's write or the equalizer's record. Named
-    without conf_path, whose second stat could raise again; XDG_RUNTIME_DIR is a full path,
-    since each unit's conf_path, g432_eq's and g432_mic's, refuses it unset or relative
-    before anything is written."""
+    suppression's. Named without conf_path, which stats the folder again and could refuse it;
+    XDG_RUNTIME_DIR is a full path, since each unit's conf_path, g432_eq's and headset_mic's,
+    refuses it unset or relative before anything is written."""
     return cast("Path", runtime_folder.runtime_home())
 
 
 def stop(run: pipewire_client.Run, unit: str) -> None:
     """Stop `unit`; one not loaded is off already. StepError in systemctl's words when the
     stop fails."""
-    done = pipewire_client.run_program(run, ["systemctl", "--user", "stop", unit],
+    done = pipewire_client.run_program(run, pipewire_client.systemctl("stop", unit),
                                        check_exit=False)
     if done.returncode not in (0, NOT_LOADED):
         raise pipewire_client.StepError(pipewire_client.program_words(done, "systemctl"))

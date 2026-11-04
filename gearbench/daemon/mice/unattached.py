@@ -1,24 +1,39 @@
 """The mice found and not attached, by node: one this user may not open (`denied_mice`), and one
-whose setup was refused at its attach (`setup_refused`), each said once in the journal. They
-give `problems` its first entries and the error of a command that needs a mouse while none is
-attached (`none_attached`), and tell `attached.asked` why the mouse it was asked for is
-missing (`found`)."""
+whose setup was refused at its last attach (`setup_refused`; not once its probe goes
+unanswered, `probe_unanswered`), each said once in the journal. They give `problems` its first
+entries and the error of a command that needs a mouse while none is attached
+(`none_attached`), and tell `attached.asked` why the mouse it was asked for is missing
+(`found`)."""
 
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
 
-from ...hidpp import NO_RULE, DeviceGone
+from ...hidpp import NO_RULE, DeviceGone, HidppFailure
 from ...mouse import CABLED_IDS as MOUSE_CABLED, MODELS, find_attached_mice
 from ...wording import reason
-from ..shared import DEVICE_NOT_SET_UP, failure_reason, node_denied, said_once, unanswered
-from .attached import denied_problem, no_mouse
+from ..shared import (
+    DEVICE_NOT_SET_UP,
+    NODE_DENIED,
+    failure_reason,
+    node_denied,
+    said_once,
+    unanswered,
+)
+from .attached import no_mouse
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from . import Mice
+
+log = logging.getLogger("gearbench")
+
+
+def denied_problem(path: Path, product: int) -> str:
+    """NODE_DENIED for a mouse node this user may not open, as Unattached.denied_mice gives it."""
+    return NODE_DENIED.format(path, MODELS[product])
 
 
 class Unattached:
@@ -29,7 +44,8 @@ class Unattached:
         #: By path, the refusal of a mouse node's open said, so a retry says it at debug.
         self._denied_said: dict[str, str] = {}
         #: By path, the product id and problem of the mouse whose setup was refused there: not
-        #: one that timed out or whose node went, which the retry or a replug settles.
+        #: one that timed out, in its setup or its probe since, or whose node went, which the
+        #: retry or a replug settles.
         self._not_set_up: dict[str, tuple[int, str]] = {}
         #: By path, the line said for the mouse whose setup was refused there (said_once).
         self._not_set_up_said: dict[str, str] = {}
@@ -46,9 +62,10 @@ class Unattached:
         self._denied_said.pop(str(path), None)
 
     def setup_refused(self, path: Path, product: int, exc: BaseException) -> str:
-        """Say that the mouse of id `product` found on `path` could not be set up, at info once
-        per node and cause: dropped without a word, it would read as no mouse. Its problem is
-        kept for `problems`, but for a timeout or a node gone. Answers why, in words."""
+        """Say that the mouse of id `product` found on `path` could not be set up, at info, or at
+        debug where it repeats the last line said of that node (said_once): dropped without a
+        word, it would read as no mouse. Its problem is kept for `problems`, but for a timeout or
+        a node gone. Answers why, in words."""
         why = failure_reason(exc)
         said_once(self._not_set_up_said, str(path), f"found the {MODELS[product]} "
                   f"({product:04x}) on {path} but could not set it up: {why}", logging.INFO)
@@ -59,21 +76,37 @@ class Unattached:
                 MODELS[product], why, "its cable" if product in MOUSE_CABLED else "its receiver")
         return why
 
+    def probe_unanswered(self, path: Path, exc: HidppFailure) -> None:
+        """Say at debug that the mouse on `path` did not answer its probe, and forget a setup
+        refused there before: off, asleep or gone now, it is no mouse to unplug, as a timeout in
+        its setup is not (setup_refused)."""
+        log.debug("mouse on %s did not answer the probe: %s", path, exc)
+        self._not_set_up.pop(str(path), None)
+
     def set_up(self, path: Path) -> None:
         """Forget what was said of the node at `path`, whose mouse is set up now."""
         self._not_set_up.pop(str(path), None)
         self._not_set_up_said.pop(str(path), None)
 
+    def holds_refusal(self) -> bool:
+        """Whether a setup refused at a node's last attach is held, on any node: no walk of
+        the nodes, so its node may be gone or another mouse's since (not_set_up)."""
+        return bool(self._not_set_up)
+
     def denied_mice(self) -> list[tuple[Path, int]]:
-        """Mouse nodes attached to nothing because this user may not open them."""
-        attached = {m.product for m in self.mice.attached}
+        """Mouse nodes attached to nothing because this user may not open them: not one whose
+        product id is attached, nor a receiver node whose model is attached on its cable
+        (Mice.attached_models)."""
+        covered = self.mice.attached_models()
         return [(path, product) for path, product, _index in find_attached_mice()
-                if product not in attached and node_denied(path)]
+                if product not in covered and node_denied(path)]
 
     def not_set_up(self) -> list[tuple[int, str]]:
         """Each mouse node still there, and still that mouse's, whose setup was refused at its
-        last attach, by its product id, with its problem: not one whose model is attached, on its
-        other route too, nor a node number the kernel has given another mouse since."""
+        last attach, by its product id, with its problem: not one whose product id is attached,
+        nor a receiver node whose model is attached on its cable (Mice.attached_models), nor a
+        node number the kernel has given another mouse since. A cable node refused while its
+        model is attached through its receiver stays: it says why the cable did not take over."""
         if not self._not_set_up:
             # No walk of the nodes: `problems` runs at each pass, for the tray.
             return []

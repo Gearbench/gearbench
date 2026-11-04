@@ -1,5 +1,6 @@
 """The handle the daemon holds for each mouse attached (Mouse): its DPI, report rate,
-battery, mode, the profile it runs, the `mouse` reply's readings, and onboard profile 1.
+battery, mode, the profile it runs, its firmware version, the `mouse` reply's readings, and
+onboard profile 1.
 
 Profile 1 is the only profile written, and only on a model whose writes are let through
 (MouseModel.writes_tested); another's are refused. In ONBOARD mode a write takes effect at its
@@ -10,11 +11,13 @@ reads the sector back.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import cast
 
 from . import config
 from .battery import has_battery, read as read_battery
 from .hidpp import (
+    F_DEVICE_INFO,
     REQUEST_RETRIES,
     REQUEST_TIMEOUT,
     DeviceGone,
@@ -22,6 +25,7 @@ from .hidpp import (
     HidppError,
     HidppFailure,
     not_there,
+    running_version,
 )
 from .mouse import (
     BAD_CRC,
@@ -39,8 +43,6 @@ from .mouse import (
     untested_words,
 )
 from .onboard import (
-    DPI_HIGHEST,
-    DPI_LOWEST,
     DPI_STAGES,
     F_ONBOARD,
     MODE_HOST,
@@ -54,6 +56,7 @@ from .onboard import (
     stage_dpi,
 )
 from .sensor import (
+    DPI_NOT_TAKEN,
     DpiRange,
     MouseError,
     SensorDpi,
@@ -64,9 +67,25 @@ from .sensor import (
     rate_feature,
 )
 from .settings_files import ConfigError, backup_dir, read_capped
-from .wording import counted, reason
+from .wording import counted, reason, word_list
 
 log = logging.getLogger("gearbench")
+
+
+def _set_aside(path: Path, write: str) -> None:
+    """Set aside the backup `path` of profile 1, which `write` made and left the sector as it
+    was (OnboardProfiles.set_aside), and say so in the journal. A rename that fails is a
+    warning; a file that is no `.bin` stays as it is."""
+    try:
+        aside = OnboardProfiles.set_aside(path)
+    except OSError as exc:
+        log.warning("could not set %s aside (%s); set it aside by hand, or the next "
+                    "mouse-restore writes it back", path, reason(exc))
+        return
+    if aside is None:
+        return
+    log.info("the %s left sector 0x%04x as it was; its backup of it is now %s, so "
+             "the next restore takes the one before", write, PROFILE_SECTOR, aside)
 
 
 class Mouse:
@@ -86,7 +105,7 @@ class Mouse:
         self.dpi_level_sent = 0
         #: 0x8060, 0x8061 (sensor.rate_feature), or None.
         self._rate = rate_feature(dev)
-        #: 0x2121, or None; read by Mice.keep_wheel.
+        #: 0x2121, or None.
         self.wheel = dev.feature(F_HIRES_WHEEL)
         #: Whether its feature table lists a battery feature (battery.has_battery): the wired
         #: G502 HERO and G502 X list none.
@@ -98,10 +117,13 @@ class Mouse:
         #: Profile 1 as last read from the mouse.
         self.profile: ProfileImage | None = None
         #: A write failed and the sector could not be read back, so what it holds is not known.
-        #: `profile` keeps the read before; describe and switch_to_profile_one read again.
-        #: Cleared only by a read that works, or a bad sector would show as the old profile, CRC
-        #: ok.
+        #: `profile` keeps the read before. Cleared only by a read that works, or a bad sector
+        #: would show as the old profile, CRC ok.
         self.flash_unknown = False
+        #: The backup of profile 1 the write that left it unknown made, its bytes and the
+        #: write's name, for the read that settles the sector (_take_sector) to set aside where
+        #: that write changed nothing.
+        self._unknown_backup: tuple[Path, bytes, str] | None = None
         #: Profile 1 writes started (write_profile). The daemon puts back what a write moved
         #: only after one started: a refusal before one wrote the mouse nothing.
         self.sector_writes = 0
@@ -110,6 +132,31 @@ class Mouse:
         if dev.feature(F_ONBOARD) is not None:
             self.onboard = OnboardProfiles(dev)
             self.profile = ProfileImage(self.onboard.read_sector(PROFILE_SECTOR))
+        #: The version of the firmware it runs (hidpp.firmware_words), read here, at its
+        #: connect, and never again (_read_firmware); None where it gave none.
+        self.firmware = self._read_firmware()
+
+    def _read_firmware(self) -> str | None:
+        """The root's lookup of 0x0003, its getDeviceInfo, then getFwInfo up to the main
+        application it runs (hidpp.running_version), reads alone; None, after the lookup
+        alone, for a model without 0x0003. Any other failure of these reads, a refusal, an
+        entry cut short, a receiver that cannot reach the mouse or no answer, is said at info
+        and gives None: the version is for show, so it does not stop the connect (the owner's
+        decision of 2026-10-28). A mouse gone mid-read raises DeviceGone, as each read of its
+        connect does."""
+        try:
+            found = self.dev.feature(F_DEVICE_INFO)
+            if found is None:
+                return None
+            return running_version(
+                # "it": an entry cut short is said in the log line below, which names the mouse.
+                lambda function, params: self.dev.request(found.index, function, params), "it")
+        except DeviceGone:
+            raise
+        except HidppFailure as exc:
+            log.info("the %s did not give its firmware version (%s): it shows none until its "
+                     "next connect", self.name, exc)
+            return None
 
     # -- onboard mode --------------------------------------------------------
 
@@ -180,6 +227,11 @@ class Mouse:
             raise MouseError(f"the {self.name} has no adjustable DPI")
         return self._dpi
 
+    def landing(self, dpi: int) -> int:
+        """The DPI the mouse takes for `dpi`: on its sensor's step within its range
+        (DpiRange.clamp), or `dpi` itself where it lists no range."""
+        return self.dpi_range.clamp(dpi) if self.dpi_range else dpi
+
     def get_dpi(self, timeout: float = REQUEST_TIMEOUT, retries: int = REQUEST_RETRIES) -> int:
         return self._dpi_feature().get(timeout, retries)
 
@@ -195,14 +247,12 @@ class Mouse:
         (Dpi.restore_dpi). 0x2202's write has no level and is refused outside host mode
         (sensor.py), which the refusal says."""
         dpi = self._dpi_feature()
-        target = self.dpi_range.clamp(value) if self.dpi_range else value
+        target = self.landing(value)
         if not dpi_fits(target):
-            # Nothing clamps without a range (dpi_range), and a range the mouse lists
-            # may start at 0.
-            made = "" if target == value else f"its sensor's range and step make it {target}, and "
-            raise MouseError(f"DPI {value} is outside what the {self.name} takes: {made}a "
-                             f"DPI is {DPI_LOWEST} to {DPI_HIGHEST}")
-        level = self._dpi_level(target, stages) if indicate and dpi.stage_level else 0
+            # Nothing clamps without a range (landing); a range's clamp always fits, since
+            # 0x0000 ends its list and a value past 0xdfff is a step marker.
+            raise MouseError(DPI_NOT_TAKEN.format(value, self.name))
+        level = self._dpi_level(value, target, stages) if indicate and dpi.stage_level else 0
         try:
             dpi.set(target, level, timeout, retries)
         except HidppError as exc:
@@ -212,12 +262,15 @@ class Mouse:
         self.dpi_level_sent = level
         return target
 
-    def _dpi_level(self, target: int, stages: list[int] | None) -> int:
-        """`target`'s 1-based stage, or 0. In a game profile's own `stages`, which have no gap
-        and may equal profile 1's, it is the position; with None, it is the slot in profile 1,
-        as the mouse counts them, unused slots included."""
+    def _dpi_level(self, value: int, target: int, stages: list[int] | None) -> int:
+        """The 1-based stage of `target`, the DPI `value` lands on, or 0. In a game profile's own
+        `stages`, which have no gap and may equal profile 1's, it is the position, of `value`
+        where it is one: Dpi.tuning_for leaves the stages off the sensor's step where two would
+        land on one. With None, it is the slot in profile 1 that holds `target`, as the mouse
+        counts them, unused slots included."""
         if stages is not None:
-            return stages.index(target) + 1 if target in stages else 0
+            found = value if value in stages else target
+            return stages.index(found) + 1 if found in stages else 0
         if self.profile is None:
             return 0
         return next((s + 1 for s in range(DPI_STAGES) if self.profile.dpi_slot(s) == target), 0)
@@ -228,7 +281,7 @@ class Mouse:
 
     @property
     def shift_dpi(self) -> int | None:
-        """The stage the DPI-shift paddle drops to, from the profile."""
+        """The stage the DPI-shift paddle goes to, from the profile."""
         if self.profile is None:
             return None
         return stage_dpi(self.profile.dpi_stages, self.profile.shift_dpi_index)
@@ -241,8 +294,7 @@ class Mouse:
         choices = self.dpi_stages if stages is None else stages
         if not choices:
             raise MouseError(f"the {self.name} has no DPI stages to step through")
-        # The DPI each stage lands on, as set_dpi clamps it.
-        landed = [self.dpi_range.clamp(c) if self.dpi_range else c for c in choices]
+        landed = [self.landing(c) for c in choices]
         return self.set_dpi(choices[next_stage(landed, self.get_dpi(), direction, wrap)],
                             stages=stages)
 
@@ -290,8 +342,8 @@ class Mouse:
             if self.onboard is None or self.flash_refusal is not None:
                 # A model whose writes are not tested has profile 1 written in no mode.
                 raise MouseError(refused) from None
-            raise MouseError(f"{refused}; the rate is kept in the onboard profile, which this "
-                             f"command writes in onboard mode") from None
+            raise MouseError(f"{refused}; in onboard mode the rate goes to onboard "
+                             "profile 1") from None
         return "live"
 
     def check_rate(self, hz: int) -> None:
@@ -299,7 +351,8 @@ class Mouse:
         neither 0x8060 nor 0x8061."""
         available = self.report_rates()
         if hz not in available:
-            takes = ", ".join(map(str, available)) or f"none of {config.RATE_CHOICES}"
+            takes = (word_list([str(rate) for rate in available]) if available
+                     else f"none of {config.RATE_CHOICES}")
             raise MouseError(f"{hz} Hz is not supported; the {self.name} takes {takes} Hz")
 
     def store_report_rate(self, hz: int) -> ProfileImage:
@@ -384,9 +437,14 @@ class Mouse:
         return None if self.model.writes_tested else untested_words(self.name)
 
     def _take_sector(self, image: ProfileImage) -> None:
-        """Adopt a read of sector 0x0001 that worked: the sector is known now."""
+        """Adopt a read of sector 0x0001 that worked: the sector is known now. Where it holds
+        what the backup of the write that left it unknown holds, that write changed nothing, and
+        its backup is set aside (_set_aside)."""
+        unknown, self._unknown_backup = self._unknown_backup, None
         self.profile = image
         self.flash_unknown = False
+        if unknown is not None and image.data == unknown[1]:
+            _set_aside(unknown[0], unknown[2])
 
     def write_profile(self, image: ProfileImage, over_bad_crc: bool = False) -> ProfileImage:
         """Back up, refuse on a bad current CRC, write, verify, and adopt the result.
@@ -398,7 +456,8 @@ class Mouse:
         write back (the owner's decision of 2026-10-03). Otherwise the write's HidppFailure is
         re-raised as it came, or the re-read's DeviceGone where that read finds the node gone, so
         the caller can tell a mouse switched off from one that has gone. A write, done or failed,
-        that left the sector as it was sets its backup aside (_set_aside_unchanged). Only a
+        that left the sector as it was sets its backup aside (_set_aside_unchanged), or, where
+        its re-read failed, the read that settles the sector does (_take_sector). Only a
         restore passes `over_bad_crc`: it writes a backup that does not depend on the sector as
         it was.
         """
@@ -431,7 +490,7 @@ class Mouse:
             self.sector_writes += 1
             now = onboard.write_sector(PROFILE_SECTOR, written)
         except (OnboardError, HidppFailure) as exc:
-            if self._reread_after_failure(onboard) != written:
+            if self._reread_after_failure(onboard, write) != written:
                 # It compares: a sector the failed write changed keeps the backup the newest.
                 self._set_aside_unchanged(onboard, write)
                 if isinstance(exc, OnboardError):
@@ -448,10 +507,11 @@ class Mouse:
         self._set_aside_unchanged(onboard, write)
         return cast(ProfileImage, self.profile)
 
-    def _reread_after_failure(self, onboard: OnboardProfiles) -> bytes | None:
-        """Take up what the sector holds now, after a write that failed, and return it. A re-read
+    def _reread_after_failure(self, onboard: OnboardProfiles, write: str) -> bytes | None:
+        """Take up what the sector holds now, after `write` failed, and return it. A re-read
         that fails too returns None and keeps the old profile, marked unknown, so `gearbench-ctl
-        mouse`, the stage editor and the DPI shift still have one. One that finds the node gone
+        mouse`, the stage editor and the DPI shift still have one, and keeps the write's backup
+        for the read that settles the sector (_take_sector). One that finds the node gone
         raises its DeviceGone, the sector marked unknown as well."""
         # Unknown until the read works (_take_sector).
         self.flash_unknown = True
@@ -462,6 +522,8 @@ class Mouse:
             # refusing, not one that went away (Mice.mouse_call).
             raise
         except (OnboardError, HidppFailure):
+            # write_profile backed the profile sector up before the write.
+            self._unknown_backup = (*onboard.backed_up[PROFILE_SECTOR], write)
             return None
         return now
 
@@ -482,8 +544,11 @@ class Mouse:
         """Write the newest backup of profile 1 back. Returns the image and its path. As any
         write (write_profile), one that leaves the sector as it was, failed or done, sets its own
         backup aside (_set_aside_unchanged), if that is a `.bin`: over a bad CRC it is a
-        `.bad-read`, which stays."""
+        `.bad-read`, which stays. A sector a failed write left unknown is read first, so the
+        backup of a write that changed nothing is set aside before the newest is picked
+        (_take_sector); a read that fails is raised, with nothing written."""
         onboard = self._writable("restore")
+        self._reread_unknown_sector()
         path = onboard.newest_backup(self.backup_name, PROFILE_SECTOR)
         if path is None:
             raise MouseError(f"the {self.name} has no backup of profile 1 to restore in "
@@ -518,16 +583,7 @@ class Mouse:
         path, held = onboard.backed_up[PROFILE_SECTOR]
         if self.flash_unknown or cast(ProfileImage, self.profile).data != held:
             return
-        try:
-            aside = onboard.set_aside(path)
-        except OSError as exc:
-            log.warning("could not set %s aside (%s); set it aside by hand, or the next "
-                        "mouse-restore writes it back", path, reason(exc))
-            return
-        if aside is None:
-            return
-        log.info("the %s left sector 0x%04x as it was; its backup of it is now %s, so "
-                 "the next restore takes the one before", write, PROFILE_SECTOR, aside)
+        _set_aside(path, write)
 
     def factory_profile(self) -> ProfileImage:
         """Profile 1's factory copy, read from the mouse's ROM: the first sector after
@@ -546,7 +602,7 @@ class Mouse:
         image = self._edited_profile("stages")
         snapped, default_index, shift_index = place_stages(
             stages, default, shift, image.dpi_stages, image.default_dpi_index,
-            image.shift_dpi_index, self.dpi_range)
+            image.shift_dpi_index, self.dpi_range, self.name)
         image.dpi_stages = snapped
         image.default_dpi_index = default_index
         image.shift_dpi_index = shift_index
@@ -632,14 +688,13 @@ class Mouse:
                 "profile_count": self.onboard.info.profile_count,
                 **self.profile.describe(self.onboard.info.button_count),
                 "flash_unknown": self.flash_unknown,
-                # As last read; on profile 2 none of the above is in effect.
+                # As last read; on any profile but 1, profile 1's settings above are not in effect.
                 "running_profile": self.running_profile,
             }
         return out
 
     def _reread_unknown_sector(self) -> None:
-        """The read of a sector a failed write left unknown (`flash_unknown`), before describe
-        shows it and switch_to_profile_one goes to it; nothing where it is known. A read that
-        fails is raised, and the sector stays unknown."""
+        """Read profile 1 again where a failed write left it unknown (`flash_unknown`); nothing
+        where it is known. A read that fails is raised, and the sector stays unknown."""
         if self.flash_unknown:
             self._read_profile_one()

@@ -20,10 +20,8 @@
 # as taking keyboard reports, and hands each keyboard report to the first
 # such device in slot order. With a keyboard paired after the mouse,
 # its keystrokes would arrive on this mouse's hidraw and event nodes, the
-# two this file grants. In host mode, when a key arrives on the event node,
-# the daemon warns in the journal once each time the mouse attaches, and
-# `gearbench-ctl status`, the tray and the Mouse tab show the warning until
-# the mouse detaches.
+# two this file grants. In host mode the daemon warns when a key arrives on
+# the event node (gearbench-ctl(1), NOTES).
 #
 # The mouse's own keystrokes arrive the same way. A button its onboard profile
 # binds to a key or a macro, whenever that profile runs (host mode off or not
@@ -63,14 +61,11 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0003:046D:4099.*", TAG+="uacce
 # keyboard-range codes alongside the 0x11a-0x11f the extra buttons arrive on.
 # Reading those buttons means granting that node, and no finer scope exists.
 #
-# What this does and does not expose: the node carries what this mouse emits,
-# its motion and buttons, with G4 to G9 as buttons 11-16 after
-# mouse-enable-buttons, and the keystrokes of a button its onboard profile
-# binds to a key (above). It does not carry the G915's keystrokes, which come on
-# the G915's own interfaces that no rule here grants; a keyboard paired to
-# this mouse's receiver is the exception above. ID_INPUT_MOUSE bounds it to
-# pointer-capable nodes, so a second node the mouse might expose is not swept
-# in with it.
+# The node does not carry the G915's keystrokes, which come on the G915's
+# own interfaces that no rule here grants; a keyboard paired to this mouse's
+# receiver is the exception above. ID_INPUT_MOUSE bounds the grant to
+# pointer-capable nodes, so a second node the mouse might expose is not
+# swept in with it.
 #
 # The grant is the gearbench group's, mode 0640 (the owner's decision of
 # 2026-09-28). uaccess would give the seat user a read-write ACL, and an

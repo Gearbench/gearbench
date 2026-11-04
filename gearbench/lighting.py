@@ -19,6 +19,7 @@ Nothing here writes a non-volatile persistence flag or touches 0x8100 ONBOARD_PR
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from collections.abc import Collection, Iterable, Mapping
@@ -175,8 +176,8 @@ EFFECTS: dict[int, tuple[str, dict[str, tuple[int, ...]]]] = {
     # two colors, the period in ms and the intensity in percent, by G HUB's dual-color encoder,
     # read in its agent, which writes its signature index at [9] (SIGNATURE_BYTE), 0 for
     # Pulsar Point (its G512 X records), left 0 here; SIGNATURES run on it by other indexes.
-    # Its writes on the G915 X LIGHTSPEED and the G515 TKL carry the same ten bytes (Windows
-    # captures of 2026-10-23 and 2026-10-21).
+    # Its writes on the G915 X LIGHTSPEED and the G515 TKL carry the same ten bytes (G HUB on
+    # Windows, 2026-10-23 and 2026-10-21).
     0x18: ("pulsar-point", {"color": (0, 1, 2), "second_color": (3, 4, 5), "period": (6, 7),
                             "intensity": (8,)}),
 }
@@ -242,8 +243,9 @@ class EffectParams(TypedDict, total=False):
     saturation: int
 
 
-#: The rate byte of the two signature effects: G HUB's one captured write of either carries
-#: 0x20 (neural-wave), and its device database marks both fixedRate. The mouse's records hold 0.
+#: The rate byte of the G502 X PLUS's snipe-pulse and neural-wave: G HUB's one captured write
+#: of either carries 0x20 (neural-wave), and its device database marks both fixedRate. The
+#: mouse's records hold 0.
 SIGNATURE_RATE = 0x20
 
 #: Default periods in ms, by the name EFFECTS gives the effect's id, whichever of a name's ids
@@ -268,6 +270,14 @@ ANIMATIONS = ("breathe", "cycle", "wave", "ripple", "pulsar-point", *SIGNATURES)
 #: SIGNATURES take none either, as each runs on its effect.
 SPEEDS = {"breathe": (1000, 20000), "cycle": (1000, 20000), "wave": (1000, 20000),
           "ripple": (100, 1000)}
+
+
+def nearest_speed(name: str, period: int) -> int:
+    """`period` in ms held to animation `name`'s range in SPEEDS: at the nearer end where it
+    falls outside."""
+    fastest, slowest = SPEEDS[name]
+    return min(max(period, fastest), slowest)
+
 
 #: COLORWAVE's direction byte, by G HUB's window labels, as its protobuf enum numbers them and
 #: its capture sent 1, 2, 3 and 6; COLORWAVE_S numbers them the same (the x8071 v4 spec). The
@@ -346,7 +356,7 @@ TWO_COLORED = tuple(name for name in ANIMATIONS
 
 #: The effects a dim takes the intensity of and leaves the colors whole, by id: Pulsar Point,
 #: as G HUB dims it at the idle notice, its intensity 0x32 for 0x64 and its colors as they were
-#: (Windows capture G4, 2026-10-23), and SIGNATURES on its id, which G HUB's encoder dims in the
+#: (on Windows, 2026-10-23), and SIGNATURES on its id, which G HUB's encoder dims in the
 #: same branch, its intensity times the dim (read in its agent; no capture of them dimmed).
 DIMMED_BY_INTENSITY = frozenset({0x18})
 
@@ -363,7 +373,7 @@ def dimmed_parameter(effect: int,
     return "intensity" if "intensity" in params else None
 
 #: The lighting levels a repaint goes through: a keyboard's (Keyboard.lights) and a synced
-#: mouse's (Keyboard.mouse_level). On the keyboard, dim halves what dimmed_parameter names and
+#: mouse's (Keyboard.mouse_level_from). On the keyboard, dim halves what dimmed_parameter names and
 #: leaves the saved brightness untouched, and dark is every cluster Disabled with the claim held.
 LIT, DIM, DARK = "lit", "dim", "dark"
 LEVEL_WORDS = {LIT: "on", DIM: "dimmed", DARK: "off"}
@@ -375,6 +385,13 @@ class LightingError(RuntimeError):
 
 #: The refusal of a brightness read or write on a device without 0x8040.
 NO_BRIGHTNESS = "this device has no brightness control"
+#: The refusal of a per-key paint, fill or frame on a device without 0x8081.
+NO_PER_KEY_LIGHTING = "this device has no per-key lighting"
+#: The refusal of a brightness past the range: its top level, a percent, and the level asked.
+BRIGHTNESS_OUT_OF_RANGE = "brightness is 0 to {}%, not {}"
+#: The refusal of an effect parameter's value its field does not take: the effect, the
+#: parameter, the largest value it takes and the value asked.
+PARAMETER_OUT_OF_RANGE = "{}'s {} is 0 to {}, not {}"
 
 
 def need_reply(reply: bytes, length: int, what: str) -> bytes:
@@ -468,11 +485,11 @@ class Cluster:
 def effect_order(names: Iterable[str]) -> list[str]:
     """`names` in the one order of every Effect row and effects line, a keyboard's, a
     mouse's and a headset's: static, the per-key mode, the animations in KEYBOARD_EFFECTS'
-    order, then a device's own effects as they come, and disabled, the lights off, last."""
+    order, then a device's own effects as they come, and OFF, the lights off, last."""
     shared = ("static", "custom", *ANIMATIONS)
 
     def rank(name: str) -> int:
-        if name == "disabled":
+        if name == OFF:
             return len(shared) + 1
         return shared.index(name) if name in shared else len(shared)
 
@@ -523,8 +540,8 @@ def effect_parameters(chosen: Effect, params: Mapping[str, int]) -> bytes:
                 f"{', '.join(sorted(takes)) or 'none'}"
             )
         if not fits(chosen.id, key, value):
-            raise LightingError(
-                f"{chosen.name} {key} {value} outside 0 to {param_max(chosen.id, key)}")
+            raise LightingError(PARAMETER_OUT_OF_RANGE.format(
+                chosen.name, key, param_max(chosen.id, key), value))
         offsets = takes[key]
         for offset, byte in zip(offsets, value.to_bytes(len(offsets), "big"), strict=True):
             body[offset] = byte
@@ -650,7 +667,7 @@ class Lighting:
         count = info[2]
         # Byte 7 counts the multi-cluster effects, the ones on cluster 0xff
         # (OpenLogi's x8071 page): 5 on the G502 X PLUS, 0 on the G915, 8 on the G915 X
-        # LIGHTSPEED and 6 on the G515 TKL (Windows captures of 2026-10-23 and 2026-10-21).
+        # LIGHTSPEED and 6 on the G515 TKL (read by G HUB on Windows, 2026-10-23 and 2026-10-21).
         multi = info[7] if len(info) > 7 else 0
         clusters = []
         for c in range(min(count, CLUSTERS_MAX)):
@@ -709,7 +726,7 @@ class Lighting:
         none of those, a count of 0 included.
 
         The G915 X LIGHTSPEED lists 0x000C, 0x0013, 0x0016, 0x0017, 0x000A, 0x0015, 0x0018
-        and 0x0019 there, the G515 TKL six of them (Windows captures of 2026-10-23 and
+        and 0x0019 there, the G515 TKL six of them (read by G HUB on Windows, 2026-10-23 and
         2026-10-21). Wave and ripple are kept on the G915 X LIGHTSPEED, whose logo's cluster
         lacks them, and left to the G515 TKL's one cluster, which runs both; breathe and cycle
         run on the counted clusters, as each was checked there; custom is no effect offered;
@@ -879,9 +896,7 @@ class Lighting:
     def _require_per_key(self) -> Feature:
         """0x8081, or LightingError on a device without it."""
         if self._perkey is None:
-            raise LightingError(
-                "this device has zone lighting but no per-key lighting "
-                "(0x8081), so individual keys cannot be painted")
+            raise LightingError(NO_PER_KEY_LIGHTING)
         return self._perkey
 
     def set_effect(self, cluster: str | int, effect: str | int, *, wait: bool = True,
@@ -943,7 +958,7 @@ class Lighting:
         by_color: dict[int, list[int]] = {}
         for zone, color in colors.items():
             if not MIN_ZONE <= zone <= MAX_ZONE:
-                raise LightingError(f"zone {zone} outside {MIN_ZONE} to {MAX_ZONE}")
+                raise LightingError(f"a zone is {MIN_ZONE} to {MAX_ZONE}, not {zone}")
             by_color.setdefault(color, []).append(zone)
 
         for color, zones in by_color.items():
@@ -982,11 +997,9 @@ class Lighting:
         answering would cost the full budget again; a failure is swallowed so the error raised is
         the one that stopped the frame.
         """
-        try:
+        with contextlib.suppress(HidppFailure):
             self.dev.request(perkey.index, PERKEY_FRAME_END, bytes([0x00]),
                              timeout=COMMIT_TIMEOUT, retries=0)
-        except HidppFailure:
-            pass
         self._frame_end_at = time.monotonic()
 
     def _write_frames(self, perkey: Feature, reports: list[tuple[int, bytes]]) -> None:
@@ -1019,27 +1032,29 @@ class Lighting:
         """Set individual zones to 0xrrggbb colors and commit the frame."""
         self._write_frames(self._require_per_key(), self._pack(colors))
 
-    def fill_and_paint(self, color: int, colors: Mapping[int, int], last: int = MAX_ZONE) -> None:
-        """Zones MIN_ZONE to `last` in `color`, then `colors` over it, shown by one FrameEnd, so
-        the board never shows the fill without the zones, as a `fill` then a `paint` does.
+    def fill_and_paint(self, color: int, colors: Mapping[int, int], unlisted: int) -> None:
+        """Zones MIN_ZONE to the last in `color`, then `colors` over it, shown by one FrameEnd,
+        so the board never shows the fill without the zones, as a `fill` then a `paint` does.
+        The last zone is the highest the zone bitmap sets (listed_last) where it was read, else
+        `unlisted`: a range ending on a zone the keyboard does not set may be refused whole
+        (_read_listed_last).
 
         The zone writes go after the range to overwrite what it staged; within one frame that
         is untried on the G915. Past MAX_REPORTS_PER_FRAME it splits like `paint`, the first
         frame with the fill.
         """
         perkey = self._require_per_key()
+        last = unlisted if self.listed_last is None else self.listed_last
         # Always an explicit range: on the G915 the broadcast id 255 through fn 6 left the
         # per-key buffer untouched, and the frame end showed its old color over the zone effect.
         reports = [(PERKEY_SET_RANGE, bytes([MIN_ZONE, last]) + _rgb(color))]
         reports += self._pack(colors)
         self._write_frames(perkey, reports)
 
-    def fill(self, color: int, last: int = MAX_ZONE) -> None:
-        """Set zones MIN_ZONE to `last` to one color and commit.
-
-        The default range covers the logo, zone 210; pass `last` to leave it alone.
-        """
-        self.fill_and_paint(color, {}, last)
+    def fill(self, color: int, unlisted: int = MAX_ZONE) -> None:
+        """Set zones MIN_ZONE to the last to one color and commit: the last as fill_and_paint
+        takes it, `unlisted` where the zone bitmap was not read."""
+        self.fill_and_paint(color, {}, unlisted)
 
     def send_fill(self, color: int) -> tuple[tuple[int, int, int], ...]:
         """One frame of `fill` sent without waiting for either reply, for a mouse that may be
@@ -1074,7 +1089,8 @@ class Lighting:
         if self._brightness is None:
             raise LightingError(NO_BRIGHTNESS)
         if not 0 <= level <= max(self.brightness_levels):
-            raise LightingError(f"brightness {level} outside 0 to {max(self.brightness_levels)}")
+            raise LightingError(
+                BRIGHTNESS_OUT_OF_RANGE.format(max(self.brightness_levels), level))
         chosen = snap_brightness(self.brightness_levels, level)
         self._settle_claim()
         self.dev.request(self._brightness.index, 2, chosen.to_bytes(2, "big"))

@@ -1,8 +1,8 @@
 """0x020D AdvancedParaEQ, G HUB's FeatureC020DAdvancedParaEQ: a headset's parametric
 equalizers, one an instance, each with its slots.
 
-Its functions as G HUB sent them to the A50 X (G HUB's captures of 2026-10-21, B3 and
-B4-04 to B4-06): getCustomEQ (1) of an instance and a slot, which answers one byte, then
+Its functions as G HUB sent them to the A50 X on 2026-10-21: getCustomEQ (1) of an
+instance and a slot, which answers one byte, then
 the slot's ten bands, for the slot the instance plays alone and error 0x0b for another;
 setCustomEQ (2) of an instance, the slot it plays and 00, then ten bands; and the read of
 any slot's ten bands with no byte before them (5). A band is its frequency in Hz (two
@@ -26,7 +26,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from ..hidpp import UnreadableAnswer
-from ..wording import counted, given_count, number, whole, written
+from ..wording import counted, given_count, number, whole_in, written
 
 ID = 0x020D
 WORDS = "equalizer"
@@ -36,11 +36,10 @@ BAND_BYTES = 5
 GAIN_ZERO = 120
 STEPS_A_DB = 20
 GAIN_RANGE = (-6, 6)
-#: The Q G HUB writes with each of the A50 X's presets' bands, 0x16, 0.6875 (B3, B4-06,
-#: B8).
+#: The Q G HUB writes with each of the A50 X's presets' bands, 0x16, 0.6875 (2026-10-21).
 PRESET_Q = 22
-#: A band's frequency in Hz, G HUB's Advanced mode's 20 Hz to 20 kHz (the A50 X's captures,
-#: X2, where the headset echoed 33 Hz for band 1; above 20 kHz was never sent), and its Q
+#: A band's frequency in Hz, G HUB's Advanced mode's 20 Hz to 20 kHz (the A50 X, 2026-10-21,
+#: where the headset echoed 33 Hz for band 1; above 20 kHz was never sent), and its Q
 #: byte's whole range.
 FREQ_RANGE = (20, 20000)
 Q_RANGE = (0, 0xFF)
@@ -79,13 +78,8 @@ def band_of(entry: object) -> Band:
     gives it, each checked: the frequency in FREQ_RANGE, the Q byte in Q_RANGE and the gain
     as raw_gain takes it. ValueError with the sentence for one it does not take."""
     freq, q, gain = fields_of(entry)
-    low, high = FREQ_RANGE
-    if not whole(freq) or not low <= freq <= high:
-        raise ValueError(f"a band's frequency is a whole number of Hz from {low} to {high}, "
-                         f"not {written(freq)}")
-    if not whole(q) or not Q_RANGE[0] <= q <= Q_RANGE[1]:
-        raise ValueError(f"a band's Q is a whole number from {Q_RANGE[0]} to {Q_RANGE[1]}, "
-                         f"not {written(q)}")
+    freq = whole_in(freq, *FREQ_RANGE, "a band's frequency", " of Hz")
+    q = whole_in(q, *Q_RANGE, "a band's Q byte")
     # On the wire's 0.05 dB steps, as the headset will read it back.
     return Band(freq, q, gain_of(raw_gain(gain)))
 

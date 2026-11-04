@@ -109,8 +109,7 @@ def places(board: Board) -> dict[int, Place]:
     middles = {key.zone: (key.x - board.origin_x + key.w / 2, key.y - board.origin_y + key.h / 2)
                for key in board.keys if key.zone is not None}
     for area in board.areas:
-        inside = [middles[zone] for zone in area]
-        xs, ys = [x for x, _ in inside], [y for _, y in inside]
+        xs, ys = zip(*(middles[zone] for zone in area))
         middle = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
         middles.update(dict.fromkeys(area, middle))
     return {zone: Place(x, y, x / board.width, y / board.height)

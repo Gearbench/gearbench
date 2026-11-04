@@ -9,7 +9,7 @@ not fight over one rule.
 from __future__ import annotations
 
 import weakref
-from collections.abc import Callable, Collection, Iterable, Sequence, Sized
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence, Sized
 from pathlib import Path
 from typing import Literal, NamedTuple, cast
 
@@ -17,18 +17,26 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
 
 from ..astro import name_refusal as name_problem
 from ..battery import (
-    CRITICAL_PERCENT,
     FAULT,
-    FULL,
-    LOW_PERCENT,
+    below,
     icon_name,
+    notice_levels,
     on_power,
     reading_words,
-    shown_percent,
 )
-from ..config import format_color, profile_label
+from ..config import (
+    AT_10_AND_5,
+    AT_30_AND_15,
+    BATTERY_PRESETS,
+    NO_NOTICES,
+    URGENT,
+    format_color,
+    profile_label,
+)
 from ..eq_presets import PRESETS_FULL, PRESETS_MAX
 from ..g432 import SIDETONE_MEANS
+from ..lighting import OFF
+from ..mouse import COLORLESS_EFFECTS
 from ..report import REPORT_FORM
 from ..settings_files import shown_path
 from ..tray import ASLEEP_ICON, NOT_AVAILABLE_ICON
@@ -36,6 +44,7 @@ from ..wording import (
     ASLEEP_OR_SWITCHED_OFF,
     NOT_READ as UNREAD,
     READ_AT,
+    SERVICE_JOURNAL,
     capitalized,
     clock_shown,
     numbered,
@@ -45,7 +54,22 @@ from ..wording import (
     route_of,
     word_list,
 )
-from .worker import take_typed
+from .worker import Call, LoadingGuard, take_typed
+
+#: The window's icons that the freedesktop Icon Naming Specification does not name, copied
+#: from Adwaita with its license (COPYING, beside them), as a hicolor tree of the window's
+#: own: a theme other than Adwaita may lack them, as KDE's Breeze lacks the battery's and
+#: the Macros tab's, which drew as missing images there. Its tray/ holds the tray's own
+#: signs (tray.TRAY_ICONS), which the window does not name.
+ICONS = Path(__file__).resolve().parent / "icons"
+
+
+def add_icons(theme: Gtk.IconTheme) -> None:
+    """Let `theme` find the window's own icons. GTK looks a name up in hicolor after the
+    theme in force and those it inherits, so a theme's own drawing of a name comes first and
+    these stand in where it has none."""
+    theme.add_search_path(str(ICONS))
+
 
 #: The fixed rules, which the window loads once for every tab: the swatches, the
 #: Mouse tab's stage dots, the pickers' square, strip and markers, and the board's
@@ -90,15 +114,20 @@ KEY_TEMPLATE = """
 #: and the device does not answer, switched off or asleep.
 ASLEEP = "asleep"
 #: What each tab's status row says in that state.
-MOUSE_ASLEEP = "Asleep or switched off. Move it or switch it on."
-KEYBOARD_ASLEEP = "Asleep or switched off. Press a key or switch it on."
+MOUSE_ASLEEP = "Asleep or switched off; move it or switch it on"
+KEYBOARD_ASLEEP = "Asleep or switched off; press a key or switch it on"
+#: A keyboard on its cable in that state: switched off, it leaves its cable's node, so it is
+#: not asleep or off.
+KEYBOARD_SILENT_ON_CABLE = f"Not answering; `{SERVICE_JOURNAL}` says why"
+#: A headset's next step off its link, with what it links to: its receiver or base station.
+HEADSET_NEAR = "switch it on, or bring it near its {}"
+HEADSET_ASLEEP = "Asleep or switched off; " + HEADSET_NEAR.format("receiver")
 #: The Keyboard and Mouse tabs' banner while the device seen once is away or not answering,
 #: with its model or its noun: a row whose setting lives on the device is off then, and a row
 #: Gearbench keeps stays live, so a change is saved and shows when the device is back.
 AWAY_BANNER = "Changes are saved and will show when the {} is back"
-HEADSET_ASLEEP = "Asleep or switched off. Switch it on, or bring it near its receiver."
-#: The green dot's name, and a headset page's reason for a refusal that gives none; and a
-#: row's subtitle where the daemon gave no value.
+#: The green dot's name, and the Mouse tab's and a headset page's reason for a refusal that
+#: gives none; and a row's subtitle where the daemon gave no value.
 NOT_FOUND, CONNECTED = "Not found", "Connected"
 NOT_READ = UNREAD.capitalize()
 #: A Battery row with no device there.
@@ -114,10 +143,14 @@ LOOKING = "Looking for the headset…"
 #: A headset page's sidetone row title, and its slider's name for a screen reader.
 SIDETONE = f"Sidetone: {SIDETONE_MEANS}"
 #: The group of the levels a base station sends out of its stream port, on each page that
-#: has one.
+#: has one, and its line, which says the mix is not what the headset plays.
 STREAM_MIX = "Stream mix"
-#: The live Game and Voice mix the headset's own buttons or dial set: a reading.
+STREAM_HELP = "What the base station's stream port sends"
+#: The Game and Voice mix: on the A50s a reading, which the headset's own buttons or dial
+#: set; on another headset the Outputs group's slider.
 BALANCE = "Balance"
+#: A unit's switch row whose state did not read, with why.
+COULD_NOT_READ = "Could not be read ({})"
 
 #: Each device indicator state's icon, style class and label. A shape and words,
 #: so the state reaches a screen reader and anyone who cannot tell the colors
@@ -141,7 +174,6 @@ def set_dot(dot: Gtk.Image, state: bool | str) -> None:
     """Show a device as found, not available or not answering (ASLEEP), in place of a
     spinner (spin_dot)."""
     icon, style, label = DOT_STATES[state]
-    dot.set_visible(True)
     dot.set_from_icon_name(icon)
     for other in {s for _i, s, _l in DOT_STATES.values()} - {style}:
         dot.remove_css_class(other)
@@ -155,15 +187,14 @@ STARTING = "starting"
 
 
 def spin_dot(dot: Gtk.Image, label: str) -> None:
-    """Draw a dot as a spinner, named `label` for a screen reader: a state still being found,
-    a unit only starting (put_dot) or a headset page's first look (show_looking)."""
+    """Draw a dot as a spinner for a state still being found, named `label` for a screen
+    reader."""
     # A new spinner starts from its first frame: a read of a state still being found keeps the
     # one that turns. set_dot's icon drops it, so the next one is new.
     if not isinstance(dot.get_paintable(), Adw.SpinnerPaintable):
         dot.set_from_paintable(Adw.SpinnerPaintable(widget=dot))
     for _icon, style, _label in DOT_STATES.values():
         dot.remove_css_class(style)
-    dot.set_visible(True)
     dot.update_property([Gtk.AccessibleProperty.LABEL], [label])
 
 
@@ -188,17 +219,25 @@ def put_dot(row: Adw.ActionRow, dot: Gtk.Image, state: bool | str | None, label:
 
 def displayable(text: str) -> str:
     """`text` with U+FFFD for each lone surrogate, on which PyGObject raises
-    UnicodeEncodeError. surrogateescape file names and json.loads of an
-    escape such as "\\udce9" both make them."""
-    return "".join("\ufffd" if "\ud800" <= c <= "\udfff" else c for c in text)
+    UnicodeEncodeError, and for each NUL, where PyGObject's C copy of the text ends.
+    surrogateescape file names and json.loads of an escape such as "\\udce9" make the
+    first; a device's firmware name (hidpp.firmware_entity) and json.loads of "\\u0000"
+    the second."""
+    return "".join("\ufffd" if c == "\0" or "\ud800" <= c <= "\udfff" else c for c in text)
 
 
 def say_in_place(listbox: Gtk.ListBox, title: str, detail: str = "",
                  waiting: bool = False) -> None:
-    """Empty `listbox` and say why in its placeholder, dimmed, with a spinner while it is read:
-    a state drawn as a row reads as an item of that name. Plain text, lone surrogates as
-    U+FFFD: `detail` can be an error naming a path."""
+    """Empty `listbox` and say why in its placeholder (in_place)."""
     listbox.remove_all()
+    listbox.set_placeholder(in_place(title, detail, waiting))
+
+
+def in_place(title: str, detail: str = "", waiting: bool = False) -> Gtk.Widget:
+    """A list's placeholder, which it shows while no row is shown: `title` dimmed, `detail`
+    under it, and a spinner while the list is read. A state drawn as a row reads as an item
+    of that name. Plain text, lone surrogates as U+FFFD: `detail` can be an error naming a
+    path."""
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=12,
                   margin_bottom=12, margin_start=12, margin_end=12)
     if waiting:
@@ -207,7 +246,7 @@ def say_in_place(listbox: Gtk.ListBox, title: str, detail: str = "",
     if detail:
         box.append(Gtk.Label(label=displayable(detail), wrap=True,
                              css_classes=["dimmed", "caption"]))
-    listbox.set_placeholder(box)
+    return box
 
 
 def plain_row[R: Adw.ActionRow | Adw.ExpanderRow](kind: type[R], title: str, subtitle: str,
@@ -332,25 +371,37 @@ def name_refusal(name: str) -> str | None:
     return None if refused is None else capitalized(refused)
 
 
-#: libadwaita's style class that draws an entry red: a preset's name's while name_refusal
-#: refuses its text (watch_name).
+#: libadwaita's style class that draws an entry red: an entry's while the window would refuse
+#: its text (watch_refused).
 REFUSED_STYLE = "error"
 
 
-def mark_name(entry: Gtk.Entry | Adw.EntryRow) -> None:
-    """Give `entry`, a preset's name, REFUSED_STYLE while name_refusal refuses its text, and
-    take it off once its text is taken."""
-    if name_refusal(entry.get_text().strip()) is None:
-        entry.remove_css_class(REFUSED_STYLE)
-    else:
+def mark_refused(entry: Gtk.Entry | Adw.EntryRow, refused: Callable[[str], bool]) -> None:
+    """Give `entry` REFUSED_STYLE while `refused` holds for its text, stripped, and take it
+    off once it does not."""
+    if refused(entry.get_text().strip()):
         entry.add_css_class(REFUSED_STYLE)
+    else:
+        entry.remove_css_class(REFUSED_STYLE)
+
+
+def watch_refused(entry: Gtk.Entry | Adw.EntryRow, refused: Callable[[str], bool]) -> None:
+    """Mark `entry` (mark_refused) now and at each change of its text: every entry whose text
+    the window checks before it sends, beside the toast or the words that say why. Its text
+    stays after a refusal, to be fixed."""
+    mark_refused(entry, refused)
+    entry.connect("changed", mark_refused, refused)
+
+
+def blank(text: str) -> bool:
+    """True for no text: the check watch_refused takes for a name entry that refuses a blank
+    name."""
+    return not text
 
 
 def watch_name(entry: Gtk.Entry | Adw.EntryRow) -> None:
-    """Mark `entry` (mark_name) now and at each change of its text: the name dialog's entry
-    and the Name rows, beside the words that say why."""
-    mark_name(entry)
-    entry.connect("changed", mark_name)
+    """watch_refused for a preset's name on its Name rows."""
+    watch_refused(entry, lambda name: name_refusal(name) is not None)
 
 
 #: An equalizer's Preset row on the headset pages, and its last choice and what the row says
@@ -365,40 +416,46 @@ PRESET_NAME = "Preset name"
 
 
 def answer_on_enter(entry: Gtk.Entry, key: str) -> None:
-    """Enter in a dialog's name entry answers `key`, while that response is enabled. The dialog
-    is found as the entry's ancestor, not held: a handler that held it would make a cycle
-    through GTK that Python's collector cannot see."""
+    """Enter in a dialog's name entry answers `key` once, while that response is enabled. The
+    dialog is found as the entry's ancestor, not held: a handler that held it would make a
+    cycle through GTK that Python's collector cannot see. The response is turned off as it is
+    given: over an Adw window the entry keeps the cursor while the dialog slides away, and a
+    second Enter then answered again (libadwaita 1.9.1, measured 2026-10-31)."""
     found = cast("Adw.AlertDialog", entry.get_ancestor(Adw.AlertDialog))
     if found.get_response_enabled(key):
+        found.set_response_enabled(key, False)
         found.emit("response", key)
         found.force_close()
 
 
 def ask_name(parent: Gtk.Widget, name: str, then: Callable[[str], None],
-             heading: str, body: str = "",
-             response: str = SAVE_BUTTON) -> Adw.AlertDialog:
-    """Ask for a preset's name, `name` to start, under `heading`; `then` takes the name on
-    `response`, which waits for one name_refusal takes. While it refuses one, its sentence
-    is the body in place of `body`, as the Name rows toast it: a refusal said in words, and
-    the entry is red (watch_name), as the Name rows are."""
-    dialog = Adw.AlertDialog(heading=heading, body=name_refusal(name.strip()) or body)
+             heading: str, body: str = "", response: str = SAVE_BUTTON, label: str = PRESET_NAME,
+             refusal: Callable[[str], str | None] = name_refusal) -> Adw.AlertDialog:
+    """Ask for a name, a preset's unless `refusal` and `label`, the entry's name for a screen
+    reader, say otherwise, `name` to start, under `heading`; `then` takes the name on
+    `response`, which waits for one `refusal` takes. While it refuses one, its sentence is
+    the body in place of `body`, as the Name rows toast it: a refusal said in words, and
+    the entry is red (watch_refused), as the Name rows are."""
+    dialog = Adw.AlertDialog(heading=heading, body=refusal(name.strip()) or body)
     key = response.lower()
     entry = Gtk.Entry(text=name)
-    entry.update_property([Gtk.AccessibleProperty.LABEL], [PRESET_NAME])
-    watch_name(entry)
+    entry.update_property([Gtk.AccessibleProperty.LABEL], [label])
+    watch_refused(entry, lambda text: refusal(text) is not None)
     dialog.set_extra_child(entry)
     respond(dialog, key, response, Adw.ResponseAppearance.SUGGESTED)
-    dialog.set_response_enabled(key, name_refusal(entry.get_text().strip()) is None)
+    dialog.set_response_enabled(key, refusal(entry.get_text().strip()) is None)
 
     # The entry's handlers find the dialog as its ancestor, which it is from here on:
     # holding it would make a cycle through GTK that Python's collector cannot see.
     def allowed(entry: Gtk.Entry) -> None:
         found = cast("Adw.AlertDialog", entry.get_ancestor(Adw.AlertDialog))
-        refusal = name_refusal(entry.get_text().strip())
-        found.set_response_enabled(key, refusal is None)
-        found.set_body(refusal or body)
+        refused = refusal(entry.get_text().strip())
+        found.set_response_enabled(key, refused is None)
+        found.set_body(refused or body)
 
     entry.connect("changed", allowed)
+    # Not through `activates-default`: the entry's default action is the window's, not the
+    # dialog's, so it did nothing, measured on libadwaita 1.9.
     entry.connect("activate", answer_on_enter, key)
     dialog.connect("response", lambda _d, answer: then(entry.get_text().strip())
                    if answer == key else None)
@@ -406,14 +463,23 @@ def ask_name(parent: Gtk.Widget, name: str, then: Callable[[str], None],
     return dialog
 
 
-def offer_save_new(row: Gtk.Widget, usable: bool, presets: Sized | None,
-                   tooltip: str) -> None:
-    """A page's Save as new row: sensitive while `usable`, unless `presets`, its preset file's
-    as last read, leave no room for one more (PRESETS_MAX), when PRESETS_FULL is its tooltip
-    in place of `tooltip`. None, for a file not read, leaves the row to `usable`."""
+def presets_full(presets: Sized | None) -> str | None:
+    """Why a preset file, `presets` as last read, takes no new preset once it holds
+    PRESETS_MAX: PRESETS_FULL, capitalized, for the line of the row that adds one, or of
+    its group where that row is a button row with no line of its own. None while it has
+    room, or for None, a file not read."""
     full = presets is not None and len(presets) >= PRESETS_MAX
-    row.set_sensitive(usable and not full)
-    row.set_tooltip_text(capitalized(PRESETS_FULL) if full else tooltip)
+    return capitalized(PRESETS_FULL) if full else None
+
+
+def offer_save_new(row: Gtk.Widget, usable: bool, presets: Sized | None) -> str | None:
+    """A row that adds a preset to a preset file, Save as new or the A50 dialog's Add row:
+    sensitive while `usable`, unless `presets`, the file's as last read, leave no room for one
+    more. Returns presets_full's line, which the caller shows; None for `presets`, a file
+    not read, leaves the row to `usable`."""
+    line = presets_full(presets)
+    row.set_sensitive(usable and line is None)
+    return line
 
 
 def save_new_row(tooltip: str, activated: Callable[..., object],
@@ -426,34 +492,73 @@ def save_new_row(tooltip: str, activated: Callable[..., object],
     return row
 
 
-def delete_preset_row(subtitle: str, clicked: Callable[..., object],
-                      *data: object) -> tuple[Adw.ActionRow, Gtk.Button]:
-    """A page's Delete preset row and its Delete… button, `clicked` with `data` at a click.
-    The button is plain: the red is on the confirmation's Delete, which does it. It is named
-    for a screen reader by its row's job (name_button)."""
-    row = plain_row(Adw.ActionRow, DELETE_PRESET, subtitle)
-    button = Gtk.Button(label=DELETE_OPENER, valign=Gtk.Align.CENTER)
-    name_button(button, DELETE_PRESET)
+def opener_row(title: str, subtitle: str, opener: str, clicked: Callable[..., object],
+               *data: object) -> tuple[Adw.ActionRow, Gtk.Button]:
+    """A row of `title` and its line `subtitle`, such as a page's Delete preset row, and its
+    plain button `opener`, such as Delete…, `clicked` with `data` at a click: the red is on
+    the question's own response, which does it. The button is named for a screen reader by
+    its row's job, `title` (name_button)."""
+    row = plain_row(Adw.ActionRow, title, subtitle)
+    button = Gtk.Button(label=opener, valign=Gtk.Align.CENTER)
+    name_button(button, title)
     button.connect("clicked", clicked, *data)
     row.add_suffix(button)
     return row, button
 
 
-def name_button(button: Gtk.Button, name: str) -> None:
+def widgets_under(parent: Gtk.Widget) -> Iterator[Gtk.Widget]:
+    """Each widget under `parent`, depth first in the order GTK holds them, the private
+    children a libadwaita widget hands out no getter for included."""
+    stack = [parent.get_first_child()]
+    while stack:
+        widget = stack.pop()
+        if widget is None:
+            continue
+        yield widget
+        stack += [widget.get_next_sibling(), widget.get_first_child()]
+
+
+def first_under[W: Gtk.Widget](parent: Gtk.Widget, kind: type[W]) -> W:
+    """The first `kind` under `parent` (widgets_under): an Adw.ComboRow has its popover and
+    the list in it from the start, and hands out neither. LookupError where none is."""
+    found = next((widget for widget in widgets_under(parent) if isinstance(widget, kind)), None)
+    if found is None:
+        raise LookupError(f"no {kind.__name__} under {type(parent).__name__}")
+    return found
+
+
+def name_button(button: Gtk.Widget, name: str) -> None:
     """Name `button` `name` for a screen reader. A button made with a label is named by it,
     through a relation GTK takes before LABEL, so the relation goes; set_label keeps the
-    label child it finds, and adds no relation back."""
+    label child it finds, and adds no relation back. Libadwaita names a button row, and an
+    entry row's text, by its title through the same relation."""
     button.reset_relation(Gtk.AccessibleRelation.LABELLED_BY)
     button.update_property([Gtk.AccessibleProperty.LABEL], [name])
 
 
 def preset_label(number: int, name: str | None) -> str:
-    """An EQ preset as a dropdown lists it: its number, and its name when there is one."""
-    return numbered(number, name) if name else f"Preset {number}"
+    """An EQ preset as a dropdown lists it: its number and its name, or, without a name,
+    its slot: a library preset always has a name, a base station's slot can read none."""
+    return numbered(number, name) if name else f"Slot {number}"
+
+
+def show_choice(loading: LoadingGuard, row: Adw.ComboRow, labels: Sequence[str],
+                index: int | None) -> None:
+    """A headset setting's dropdown on entry `index` of `labels`, its own values, or for None,
+    not read, on one more entry after them, NOT_READ, as the G432's Auto shut-off is while no
+    time is read, with no subtitle to say it again. A row gets the same `labels` at each
+    call, so the count of its entries tells whether NOT_READ is among them."""
+    shown = [*labels] if index is not None else [*labels, NOT_READ]
+    # Each such row is built on its list.
+    if cast("Gio.ListModel", row.get_model()).get_n_items() != len(shown):
+        loading.put_model(row, Gtk.StringList.new(shown))
+    loading.put_selected(row, len(labels) if index is None else index)
 
 
 #: Why a page or Load preset to headset shows no preset of its library: the file could not
-#: be read.
+#: be read; also the toast line of a library read that failed, on a headset page or in Load
+#: preset to headset, when the failure is too long for a toast, the whole failure behind
+#: Details.
 LIBRARY_UNREAD = "The library could not be read"
 #: The toast line of a Save as new that failed, on every headset page, when the failure is
 #: too long for a toast.
@@ -464,15 +569,15 @@ DELETE_PRESET = "Delete preset"
 NOT_RENAMED = "The name did not change"
 NOT_DELETED = "The preset was not deleted"
 
-#: The A50's Import row's title, and that of the chooser it opens (astroeq_dialog).
-ASTROEQ_IMPORT = "Import from Astro Command Center…"
+#: The title of the chooser the A50's Import row opens (astroeq_dialog), and the row's.
 ASTROEQ_TITLE = "Import from Astro Command Center"
+ASTROEQ_IMPORT = f"{ASTROEQ_TITLE}…"
 #: The A50's Import row's refusal of the file, with its name and why, and the toast's line
 #: when it is too long for one.
 ASTROEQ_REFUSED = "{} could not be imported: {}"
 ASTROEQ_NOT_IMPORTED = "The file was not imported"
-#: The Reset to default rows' words: the A50's title, which writes at once, and the G432's
-#: with the ellipsis of the question it opens (g432_page.RESET_OPENER).
+#: The Reset to default rows' title: the A50's, a button row that writes at once, and the
+#: G432's, whose button opens a question (g432_eq_card.RESET_OPENER).
 PRESET_RESET = "Reset to default"
 #: The row that writes back what the A50 Gen 4 keeps in its flash.
 REVERT_TO_SAVED = "Revert to saved"
@@ -499,7 +604,7 @@ SLIDER_WIDTH = 280
 #: The Effect row's words for an effect named for something with a name of its own, whose
 #: case the row's sentence case would lose: G HUB's names for the Falcon's two. And Off for
 #: disabled, which says what the lights do, on every Effect row; the CLI keeps disabled (the
-#: user's decision of 2026-10-27).
+#: owner's decision of 2026-10-27).
 EFFECT_LABELS = {"millennium-falcon": "Millennium Falcon",
                  "millennium-falcon-inactive": "Millennium Falcon, inactive",
                  "disabled": "Off"}
@@ -513,7 +618,7 @@ EFFECT_TIPS = {"static": "One color on every light.",
                "cycle": "The lights run through every color together.",
                "wave": "Colors roll across the lights.",
                "disabled": "The lights are off."}
-EFFECT_TIP = "One of the device's own effects, by the name it lists."
+EFFECT_TIP = "One of the device's own effects, under the device's name for it."
 
 
 def effect_tips(names: list[str]) -> list[str]:
@@ -547,7 +652,8 @@ def spoken_scale(low: float, high: float, label: str, page: float = 10, origin: 
                  spoken: Callable[[int], str] = percent) -> Gtk.Scale:
     """A Headset tab slider, named `label` for a screen reader; `origin` False for a
     balance or a gain, where a fill from the left end would read as a level. `spoken` is
-    its value as a screen reader says it, the words its row shows: a percent by default."""
+    its value for a screen reader: the words its row shows, as a screen reader should say
+    them; a percent by default."""
     scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, draw_value=False, hexpand=False,
                       valign=Gtk.Align.CENTER, has_origin=origin,
                       adjustment=Gtk.Adjustment(lower=low, upper=high, value=low,
@@ -562,6 +668,18 @@ def spoken_scale(low: float, high: float, label: str, page: float = 10, origin: 
     scale.connect("value-changed", say)
     say(scale)
     return scale
+
+
+def between(scale: Gtk.Scale, start: str, end: str) -> Gtk.Box:
+    """A balance slider with its two sides, `start` and `end`, dimmed under its ends: beside
+    it, a word would push it out of line with the other sliders."""
+    words = Gtk.CenterBox(
+        start_widget=Gtk.Label(label=start, css_classes=["dimmed", "caption"]),
+        end_widget=Gtk.Label(label=end, css_classes=["dimmed", "caption"]))
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+    box.append(scale)
+    box.append(words)
+    return box
 
 
 class PointerChange(NamedTuple):
@@ -667,17 +785,18 @@ def picked_path(dialog: Gtk.FileDialog, result: Gio.AsyncResult,
 
 
 #: What a group's spinner is called while a write one of its rows started is in flight, by
-#: where the write goes: a mouse's onboard profile 1, a loaded game profile's file, or no
-#: profile, for a report rate set live alone.
+#: where the write goes: a mouse's onboard profile 1, a loaded game profile's file, no
+#: profile, for a report rate set live alone, or an A50 Gen 4's base station.
 WRITING_PROFILE = "Writing to onboard profile 1…"
 SAVING_GAME = "Saving to the game profile…"
 SETTING_RATE = "Setting the report rate…"
+WRITING_BASE = "Writing to the base station…"
 
 
 def header_spinner(group: Adw.PreferencesGroup) -> Adw.Spinner:
     """A spinner in `group`'s header, hidden until a write one of its rows started is in
-    flight: in the header of the group whose row was written. Named for a write to profile 1
-    until a write names where it goes (show_header_spinner)."""
+    flight. Named for a write to profile 1 until a write names where it goes
+    (show_header_spinner)."""
     spinner = Adw.Spinner(valign=Gtk.Align.CENTER, visible=False)
     spinner.update_property([Gtk.AccessibleProperty.LABEL], [WRITING_PROFILE])
     group.set_header_suffix(spinner)
@@ -701,11 +820,11 @@ DELETE_HEADING = "Delete {}?"
 
 
 def respond(dialog: Adw.AlertDialog, key: str, label: str,
-            appearance: Adw.ResponseAppearance, cancel: str = "Cancel") -> None:
-    """`cancel`, answered as "cancel", and `label` on `dialog`. Escape answers `cancel`, and
-    Enter `label` unless it is destructive, when it answers `cancel` (the GNOME HIG's
+            appearance: Adw.ResponseAppearance) -> None:
+    """Cancel, answered as "cancel", and `label` on `dialog`. Escape answers Cancel, and
+    Enter `label` unless it is destructive, when it answers Cancel (the GNOME HIG's
     dialogs). The one home of that rule."""
-    dialog.add_response("cancel", cancel)
+    dialog.add_response("cancel", "Cancel")
     dialog.add_response(key, label)
     dialog.set_response_appearance(key, appearance)
     destructive = appearance == Adw.ResponseAppearance.DESTRUCTIVE
@@ -714,21 +833,20 @@ def respond(dialog: Adw.AlertDialog, key: str, label: str,
 
 
 def offer(dialog: Adw.AlertDialog, key: str, label: str,
-          appearance: Adw.ResponseAppearance, then: Callable[[], object],
-          cancel: str = "Cancel") -> None:
-    """`cancel` and `label` on `dialog` (respond); `then` runs on `label`."""
-    respond(dialog, key, label, appearance, cancel)
+          appearance: Adw.ResponseAppearance, then: Callable[[], object]) -> None:
+    """Cancel and `label` on `dialog` (respond); `then` runs on `label`."""
+    respond(dialog, key, label, appearance)
     dialog.connect("response", lambda _d, r: then() if r == key else None)
 
 
 def confirm(parent: Gtk.Widget, heading: str, body: str, response: str,
-            then: Callable[[], None], destructive: bool = True,
-            cancel: str = "Cancel") -> None:
-    """A confirmation over `parent`; `then` runs on `response` (offer)."""
-    dialog = Adw.AlertDialog(heading=heading, body=body)
+            then: Callable[[], None], destructive: bool = True) -> None:
+    """A confirmation over `parent`; `then` runs on `response` (offer). A lone surrogate in
+    `body`, as in a folder's name that is not UTF-8, shows as U+FFFD (displayable)."""
+    dialog = Adw.AlertDialog(heading=heading, body=displayable(body))
     offer(dialog, response.lower(), response,
           Adw.ResponseAppearance.DESTRUCTIVE if destructive else Adw.ResponseAppearance.DEFAULT,
-          then, cancel)
+          then)
     dialog.present(parent)
 
 
@@ -741,7 +859,8 @@ def explain(dialog: Adw.AlertDialog, paragraphs: tuple[str, ...],
             bullets: tuple[str, ...] = ()) -> None:
     """Put the dialog's text, left-aligned, in its extra child, with hanging bullets.
 
-    The built-in body is centered, and centered bullets have no common left edge.
+    The built-in body is centered, and centered bullets have no common left edge. A lone
+    surrogate, as in a folder's name that is not UTF-8, shows as U+FFFD (displayable).
     """
     # set_content_width has no effect while the dialog follows its content size.
     dialog.set_follows_content_size(False)
@@ -749,11 +868,12 @@ def explain(dialog: Adw.AlertDialog, paragraphs: tuple[str, ...],
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
                   margin_top=4, margin_bottom=4)
     for text in paragraphs:
-        box.append(Gtk.Label(label=text, xalign=0.0, wrap=True, max_width_chars=64))
+        box.append(Gtk.Label(label=displayable(text), xalign=0.0, wrap=True,
+                             max_width_chars=64))
     for text in bullets:
         line = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         line.append(Gtk.Label(label="•", xalign=0.0, valign=Gtk.Align.START))
-        line.append(Gtk.Label(label=text, xalign=0.0, wrap=True,
+        line.append(Gtk.Label(label=displayable(text), xalign=0.0, wrap=True,
                               max_width_chars=60, hexpand=True))
         box.append(line)
     dialog.set_extra_child(box)
@@ -761,7 +881,7 @@ def explain(dialog: Adw.AlertDialog, paragraphs: tuple[str, ...],
 
 #: A device tab's status page title while the daemon does not answer and the
 #: device has not been seen, a wait that lasts, as LOOKING's. The reason under it is
-#: `unreachable`'s; the window's banner carries Start it.
+#: `unreachable`'s; the window's banner carries Start daemon.
 DAEMON_WAIT = "Waiting for the daemon…"
 
 
@@ -774,15 +894,19 @@ class DeviceView:
     says why the device is not there: the daemon's reason, or `unreachable`'s
     while the daemon does not answer. A device seen once keeps its editor when
     it goes; its status row says it is away. The editor scrolls, under the
-    tab's top bars.
+    tab's top bars. `under`, where given, shows under the status page's words
+    until the device is seen, then last in the editor: groups that work without
+    the device.
     """
 
-    def __init__(self, editor: Gtk.Widget, icon: str, looking: str) -> None:
+    def __init__(self, editor: Gtk.Box, icon: str, looking: str,
+                 under: Gtk.Widget | None = None) -> None:
         #: The device's icon, shown once the spinner stops.
         self.icon = icon
         #: The device has been seen since the window opened.
         self.seen = False
-        self.status = Adw.StatusPage(title=looking)
+        self._editor, self._under = editor, under
+        self.status = Adw.StatusPage(title=looking, child=under)
         # A status page takes a paintable, not a widget; set_icon_name later replaces it.
         self.status.set_paintable(Adw.SpinnerPaintable(widget=self.status))
         self.stack = Gtk.Stack()
@@ -791,7 +915,10 @@ class DeviceView:
             hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True, child=editor), "editor")
 
     def found(self) -> None:
-        """The device is there: the editor, from now on."""
+        """The device is there: the editor, from now on, `under` moved to its end."""
+        if not self.seen and self._under is not None:
+            self.status.set_child(None)
+            self._editor.append(self._under)
         self.seen = True
         self.stack.set_visible_child_name("editor")
 
@@ -806,8 +933,7 @@ class DeviceView:
 def top_switcher(stack: Gtk.Stack) -> Gtk.StackSwitcher:
     """The row of buttons at the top of a tab that picks the device it shows, hidden until
     there are two to pick from."""
-    return Gtk.StackSwitcher(stack=stack, halign=Gtk.Align.CENTER, margin_top=12,
-                             visible=False)
+    return Gtk.StackSwitcher(stack=stack, halign=Gtk.Align.CENTER, margin_top=12, visible=False)
 
 
 def switched_off_title(name: str, off: bool) -> str:
@@ -897,53 +1023,77 @@ LIST_DIALOG_HEIGHT = 640
 
 
 #: The longest text a toast carries whole; about 105 characters of its one line
-#: fit in the window. A longer refusal shows refusal_line, a longer note short_note.
+#: fit in the window. A longer refusal shows refusal_line, a longer note short_note, or
+#: refusal_line where it is worded as a refusal (toast_clause).
 TOAST_MAX = 80
 
 
 def refusal_line(refusal: str, fallback: str) -> str | None:
     """A refusal's toast line when it is longer than TOAST_MAX: its first clause, before
-    "; ", or `fallback` when that is too long too; None when the refusal fits whole. Not cut
-    at ". ": a refusal is a fragment (wording.capitalized), so a period in it is inside a
-    name or a path, as in the shipped game profile R.E.P.O."""
+    "; ", or `fallback` when that is too long too, or when a double quote is on each side of
+    the cut; None when the refusal fits whole. Not cut at ". ": a refusal is a fragment
+    (wording.capitalized), so a period in it is inside a name or a path, as in the shipped
+    game profile R.E.P.O. A name is in double quotes (wording.quoted) and can hold "; " and
+    a double quote of its own, so a cut with a quote on each side can be inside one, and the
+    clause would name something else."""
     if len(refusal) <= TOAST_MAX:
         return None
-    first = refusal.split("; ", 1)[0]
-    return first if len(first) <= TOAST_MAX else fallback
+    first, _cut, rest = refusal.partition("; ")
+    return fallback if len(first) > TOAST_MAX or ('"' in first and '"' in rest) else first
 
 
 def short_note(note: str, fallback: str, one_sentence: bool = False) -> str | None:
-    """A note's toast line when it is longer than TOAST_MAX: its first sentence,
-    or `fallback` when that is too long too; None when the note fits.
-    `one_sentence` gives `fallback` for a one-sentence note, as a game profile's
+    """A note's toast line when it is longer than TOAST_MAX: its first sentence with no final
+    period, or `fallback` when that is too long too; None when the note fits. `one_sentence` gives `fallback` for a one-sentence note, as a game profile's
     name in it can hold ". " (R.E.P.O.)."""
     if len(note) <= TOAST_MAX:
         return None
-    first = note if one_sentence else note.split(". ", 1)[0].rstrip(".") + "."
+    first = note if one_sentence else note.split(". ", 1)[0].rstrip(".")
     line = first if len(first) <= TOAST_MAX else fallback
     return line[:1].upper() + line[1:]
 
 
 def toast_note(toast: Callable[..., object], note: str, fallback: str,
                one_sentence: bool = False) -> None:
-    """Toast `note` whole, or short_note's line with the note behind Details."""
+    """Toast `note` whole with no final period, as the window's one-line texts end, or
+    short_note's line with the note behind Details, where it keeps its periods."""
     short = short_note(note, fallback, one_sentence)
     if short is None:
-        toast(note)
+        toast(note.removesuffix("."))
     else:
         toast(short, full=note)
 
 
+def toast_clause(toast: Callable[..., object], note: str, fallback: str) -> None:
+    """Toast `note`, a fragment with "; " before a second clause, whole, or refusal_line's
+    line with the note behind Details."""
+    line = refusal_line(note, fallback)
+    if line is None:
+        toast(note)
+    else:
+        toast(line, full=note)
+
+
 #: The toast's line for the note of a layer change too long for one: why the keyboard does
 #: not show what the daemon saved (Keyboard.apply_profile).
-NOT_SHOWN_LINE = "The keyboard does not show it"
+NOT_SHOWN_LINE = "The keyboard does not show the change"
 
 
-def say_not_shown(toast: Callable[..., object], reply: dict | None) -> None:
-    """Toast the note of a layer change's reply, if it has one: why the keyboard does not show
-    the layer the daemon saved, or that its lights are down."""
-    if reply is not None and reply.get("note"):
-        toast_note(toast, capitalized(reply["note"]), NOT_SHOWN_LINE)
+def say_not_shown(toast: Callable[..., object], reply: dict | None,
+                  line: str = NOT_SHOWN_LINE) -> None:
+    """Toast a reply's note, if it has one: why the keyboard does not show the layer or did not
+    get the idle times the daemon saved, or that its lights are down; `line` where it is too
+    long. The device's words (the reply's `detail`), where the note does not quote them, go
+    under the note behind Details, headed by `line`, as the command line prints them on a
+    detail line."""
+    if reply is None or not reply.get("note"):
+        return
+    note = capitalized(reply["note"])
+    detail = str(reply.get("detail") or "")
+    if not detail or detail in reply["note"]:
+        toast_note(toast, note, line)
+    else:
+        toast(short_note(note, line) or note.removesuffix("."), detail, full=note, heading=line)
 
 
 #: A save that failed: where it went and its cause in words, and the toast's line when that
@@ -961,7 +1111,8 @@ def toast_not_saved(toast: Callable[..., object], path: Path, error: OSError) ->
 
 def editing_text(overlay: str | None, auto: bool, processes: list[str], active: int,
                  name: str, program: str | None) -> str:
-    """Which layer the window edits, for the line on the Keyboard and Mouse tabs.
+    """Which layer the window edits, for the Editing rows on the Keyboard and Mouse tabs and
+    in the Headset tab's G keys group.
 
     `program` is the one that loaded `overlay`, from the status's
     `auto_process`. Without it, `processes`, the loaded profile's programs as
@@ -978,26 +1129,35 @@ def editing_text(overlay: str | None, auto: bool, processes: list[str], active: 
     return f"Editing {overlay}, loaded for {word_list(processes)}"
 
 
-def battery_icon(battery: dict | None, cabled: bool = False) -> tuple[str, str | None]:
+def battery_icon(battery: dict | None, cabled: bool = False,
+                 preset: object = None) -> tuple[str, str | None]:
     """battery.icon_name's icon for a reading, `cabled` passed on, and its style class:
     `error` for a fault, and unless the reading is full or on external power (on_power),
-    `warning` below LOW_PERCENT and `error` below CRITICAL_PERCENT, both for the whole
-    percent battery_text shows, as the notices and the tray compare it."""
+    `warning` below the first level of the device's `preset` (battery.notice_levels) and
+    `error` below its second, both for the whole percent battery_text shows, as the notices
+    and the tray compare it."""
+    low, critical = notice_levels(preset)
     reading = battery or {}
     name = icon_name(reading, cabled)
-    state, percent = reading.get("state"), reading.get("percent")
-    if state == FAULT:
+    if reading.get("state") == FAULT:
         return name, "error"
-    if state == FULL or on_power(reading) or not isinstance(percent, int | float):
-        return name, None
-    shown = shown_percent(percent)
-    return name, ("error" if shown < CRITICAL_PERCENT
-                  else "warning" if shown < LOW_PERCENT else None)
+    value = reading.get("percent")
+    percent = value if isinstance(value, int | float) else None
+    state, powered = reading.get("state"), on_power(reading)
+    if below(percent, state, powered, critical):
+        return name, "error"
+    return name, "warning" if below(percent, state, powered, low) else None
 
 
-def set_battery(icon: Gtk.Image, battery: dict | None, cabled: bool = False) -> None:
-    """Put `battery_icon`'s icon and style on a battery row's image."""
-    name, style = battery_icon(battery, cabled)
+def show_battery(row: Adw.ActionRow, icon: Gtk.Image, battery: dict | None,
+                 at: float | None = None, cabled: bool = False, gone: bool = False,
+                 preset: object = None) -> None:
+    """A Battery row and its icon from one reading: battery_text's words, given `at`,
+    `cabled` and `gone` as it takes them, and battery_icon's icon and style, whose color goes
+    by the whole percent the words show against the levels of the device's `preset`, its
+    reply's battery_notices. `cabled` says it is a keyboard on its cable."""
+    row.set_subtitle(battery_text(battery, at, cabled, gone))
+    name, style = battery_icon(battery, cabled, preset)
     icon.set_from_icon_name(name)
     for other in {"warning", "error"} - {style}:
         icon.remove_css_class(other)
@@ -1005,31 +1165,89 @@ def set_battery(icon: Gtk.Image, battery: dict | None, cabled: bool = False) -> 
         icon.add_css_class(style)
 
 
-def show_battery(row: Adw.ActionRow, icon: Gtk.Image, battery: dict | None,
-                 at: float | None = None, cabled: bool = False, gone: bool = False) -> None:
-    """A Battery row and its icon from one reading: battery_text's words, given `at`,
-    `cabled` and `gone` as it takes them, and set_battery's icon, whose color goes by the
-    whole percent the words show. `cabled` says it is a keyboard on its cable."""
-    row.set_subtitle(battery_text(battery, at, cabled, gone))
-    set_battery(icon, battery, cabled)
+#: The Battery notices row's title, each preset's choice by its word (config.BATTERY_PRESETS),
+#: its tooltip where the urgent preset is offered (the owner's decision 10 of 2026-10-28), and
+#: for a device whose battery the desktop warns of itself (a reply's desktop_warns), by the
+#: desktop's name, its line, where urgent is not the preset already and where it is, and its
+#: tooltip (the owner's decision of 2026-10-28, "The 'also warns' rule goes by desktop").
+BATTERY_NOTICES = "Battery notices"
+NOTICE_CHOICES = {AT_30_AND_15: "At 30% and 15%", AT_10_AND_5: "At 10% and 5%",
+                  NO_NOTICES: "Off", URGENT: "At 30% and 15%, urgent"}
+URGENT_HELP = "Urgent: GNOME shows the 15% notice over full-screen games"
+ALSO_WARNS = "{} also warns, so no urgent choice"
+ALSO_WARNS_NOT_URGENT = f"{{}} also warns, so {notice_levels(URGENT)[1]}% is not urgent"
+ALSO_WARNS_HELP = "An urgent notice would come on top of {}'s own"
 
 
-def status_rows(group: Adw.PreferencesGroup
-                ) -> tuple[Adw.ActionRow, Gtk.Image, Adw.ActionRow, Gtk.Image]:
-    """A device tab's state row with its dot (set_dot) and its Battery row with its icon
-    (show_battery), added to `group` and returned in that order. Not markup: the subtitles
-    are the daemon's words and a node path. The Battery row has no subtitle or icon until
-    the page's first show_battery."""
-    state_row = Adw.ActionRow(title="Status", use_markup=False)
-    dot = status_dot()
-    state_row.add_prefix(dot)
-    group.add(state_row)
-    battery_row = Adw.ActionRow(title="Battery", use_markup=False)
-    # Presentation: the row's subtitle says the reading in words.
-    icon = Gtk.Image(valign=Gtk.Align.CENTER, accessible_role=Gtk.AccessibleRole.PRESENTATION)
-    battery_row.add_prefix(icon)
-    group.add(battery_row)
-    return state_row, dot, battery_row, icon
+class NoticesRow:
+    """A device tab's Battery notices row, added to `group`: the device's preset of
+    config.json's battery_notices, and a pick sent as `battery_notices`.
+    The urgent preset is offered only where no desktop warns of the device's battery itself,
+    or where it is the preset already."""
+
+    def __init__(self, group: Adw.PreferencesGroup, call: Call) -> None:
+        self.row = Adw.ComboRow(title=BATTERY_NOTICES, use_markup=False, visible=False)
+        self.row.connect("notify::selected", self.on_picked)
+        group.add(self.row)
+        self._call = call
+        self._loading = LoadingGuard()
+        #: The presets the row lists, in its order; the request's field and value naming the
+        #: device, None while none is shown; the preset its reply gave; and the picks out.
+        self._presets: list[str] = []
+        self._device: dict | None = None
+        self._preset: str | None = None
+        self._out = 0
+
+    def show(self, device: dict | None, reply: dict | None) -> None:
+        """The row for the device `device` names, as {"keyboard": "c33e"}, from its reply's
+        battery_notices and desktop_warns; hidden for none, and for a reply with no preset
+        this version knows. A pick out holds the row where it is."""
+        preset = None if reply is None else reply.get("battery_notices")
+        if device is None or preset not in BATTERY_PRESETS:
+            self._device = None
+            self.row.set_visible(False)
+            return
+        desktop = cast("dict", reply).get("desktop_warns")
+        warns = desktop if isinstance(desktop, str) else None
+        presets = [p for p in BATTERY_PRESETS
+                   if p != URGENT or warns is None or preset == URGENT]
+        if presets != self._presets:
+            self._presets = presets
+            self._loading.put_model(self.row, Gtk.StringList.new(
+                [NOTICE_CHOICES[p] for p in presets]))
+        self._device, self._preset = device, cast("str", preset)
+        if not self._out:
+            self._loading.put_selected(self.row, presets.index(self._preset))
+        if warns is None:
+            self.row.set_subtitle("")
+            self.row.set_tooltip_text(URGENT_HELP)
+        else:
+            line = ALSO_WARNS_NOT_URGENT if preset == URGENT else ALSO_WARNS
+            self.row.set_subtitle(line.format(warns))
+            self.row.set_tooltip_text(ALSO_WARNS_HELP.format(warns))
+        self.row.set_visible(True)
+
+    def on_picked(self, row: Adw.ComboRow, _pspec: GObject.ParamSpec | None) -> None:
+        """Send a preset picked by hand, unless it is the reply's and no pick is out. A
+        refusal, which the window says, puts the reply's back once no pick is out."""
+        # Each model set is the program's, under the guard: a pick is one of its entries.
+        if self._loading.active:
+            return
+        picked = self._presets[row.get_selected()]
+        if picked == self._preset and not self._out:
+            return
+        self._out += 1
+
+        def done(reply: dict | None) -> None:
+            self._out -= 1
+            if reply is not None:
+                self._preset = picked
+            elif not self._out:
+                self._loading.put_selected(self.row,
+                                           self._presets.index(cast("str", self._preset)))
+        # A pick comes from a row shown, which show() gave a device.
+        self._call({"command": "battery_notices", "value": picked, **cast("dict", self._device)},
+                   done)
 
 
 #: The device pages' row for a model not yet tested on the hardware
@@ -1037,11 +1255,11 @@ def status_rows(group: Adw.PreferencesGroup
 #: when the browser does not open, with the form's address behind Details.
 UNTESTED_TITLE = "Not yet tested on this model"
 #: A write held on a model not yet tested, said once before a click at the narrowest scope that
-#: holds every grayed row: a group's line, or a row's own (the user's decision of
+#: holds every grayed row: a group's line, or a row's own (the owner's decision of
 #: 2026-10-27). The cause stays the CLI's, the refusal toast's and Details'.
 TEST_WAIT = "for a test on this model"
 CHANGES_WAIT = f"Changes wait {TEST_WAIT}"
-PROFILE_WRITES_WAIT = f"Writes to profile 1 wait {TEST_WAIT}"
+PROFILE_WRITES_WAIT = f"Writes to onboard profile 1 wait {TEST_WAIT}"
 WAITS_FOR_TEST = f"Waits {TEST_WAIT}"
 UNTESTED_SUBTITLE = "Run `gearbench-ctl report` in a terminal and paste its block into the form"
 REPORT_BUTTON = "Device report"
@@ -1065,6 +1283,22 @@ def untested_row(group: Adw.PreferencesGroup, toast: Callable[..., object]) -> A
 def show_untested(row: Adw.ActionRow, untested: object) -> None:
     """Show the row where a reply's `untested` is true, and hide it for any other model."""
     row.set_visible(untested is True)
+
+
+def firmware_row(group: Adw.PreferencesGroup) -> Adw.ActionRow:
+    """A device tab's Firmware row, hidden until its page shows it, added to `group`."""
+    row = plain_row(Adw.ActionRow, FIRMWARE, "", visible=False)
+    group.add(row)
+    return row
+
+
+def show_firmware(row: Adw.ActionRow, firmware: object) -> None:
+    """The row with a reply's `firmware`, the device's own text, under its title where it
+    gives a version; hidden where it gives none, as for a model that has none to read or a
+    read that failed."""
+    version = firmware if isinstance(firmware, str) else ""
+    row.set_subtitle(displayable(version))
+    row.set_visible(bool(version))
 
 
 def open_report_form(widget: Gtk.Widget, toast: Callable[..., object]) -> None:
@@ -1095,25 +1329,41 @@ FOLLOW = "Follow the {}"
 #: The line under a mouse's and a headset's follow switch: in Per-key mode a synced device
 #: follows the background, black unless one was set, so the row says so. Its brightness and
 #: idle dimming: the owner's decision of 2026-09-28.
-SYNC_HELP = "Takes its color (under Per-key, the background) and dims with it"
+SYNC_HELP = "Takes the keyboard's color (under Per-key, the background) and dims with it"
 #: The row that gives a device's lighting back to it, on the Mouse tab and a headset of the
 #: G432's family, and the Lighting group's line on whose lighting the device shows.
 LIGHTS_OWN = "Show its own lighting"
 OWN_LIGHTING_SHOWN = "Shows its own lighting until Gearbench sends a color or effect"
 GEARBENCH_LIGHTING_SHOWN = "Shows the lighting Gearbench sends"
+#: The Lighting group's line on a device that shows Gearbench's lighting from its setup: a
+#: stop gives it back its own.
+LIGHTING_HOLDS = "Holds only while the daemon runs"
+#: The grayed-out Color picker's line under Off, and under an effect with no color of its own
+#: (lighting.COLORLESS, mouse.COLORLESS_EFFECTS), with the effect's name, on the Keyboard tab,
+#: the Mouse tab and a headset of the G432's family.
+OFF_PICKER_HELP = "The lights are off; none to pick"
+COLORLESS_PICKER_HELP = "{} takes no color; none to pick"
+
+
+def no_color_line(effect: str | None) -> str | None:
+    """The grayed-out Color picker's line under `effect`, by its name, where it takes no
+    color: Off, or one of mouse.COLORLESS_EFFECTS. None under one that takes a color, or
+    none."""
+    if effect in COLORLESS_EFFECTS:
+        return COLORLESS_PICKER_HELP.format(effect_label(effect))
+    return OFF_PICKER_HELP if effect == OFF else None
 
 #: The title of the import dialogs' checklist page, G HUB's and the pack's: the G HUB one
 #: offers the desktop default beside the profiles.
 CHOOSE_WHAT = "Choose what to import"
 
-#: A status row's route words (wording.route).
+#: A status row's route words on its cable (wording.route).
 ON_CABLE = capitalized(route("cable"))
-ON_RECEIVER = capitalized(route("receiver"))
 
 
 def show_looking(row: Adw.ActionRow, dot: Gtk.Image) -> None:
     """A headset page's Status row before its first reply: LOOKING, with a spinner where the
-    dot goes, as the other device pages' status page has while it looks (the user's decision
+    dot goes, as the other device pages' status page has while it looks (the owner's decision
     of 2026-10-27); set_dot puts the dot there."""
     row.set_subtitle(LOOKING)
     spin_dot(dot, LOOKING)
@@ -1169,6 +1419,12 @@ def swatch_class(color: int) -> str:
     return f"{SWATCH_PREFIX}{color:06x}"
 
 
+def swatch_sheet(colors: Iterable[int]) -> str:
+    """A swatch rule for each color, sorted so an unchanged list gives the same sheet."""
+    return "".join(f".{swatch_class(c)} {{ background-color: {format_color(c)}; }}"
+                   for c in sorted(colors))
+
+
 def key_class(color: int) -> str:
     """CSS class that fills a key button with `color` and picks its text."""
     return f"{KEY_PREFIX}{color:06x}"
@@ -1183,20 +1439,16 @@ def take_color_class(widget: Gtk.Widget, prefix: str, wanted: str) -> None:
     widget.add_css_class(wanted)
 
 
-def color_rules(colors: Iterable[int]) -> str:
+def stylesheet(unit: float, colors: Collection[int]) -> str:
+    """The Keyboard tab's sheet: the key rule at this key size, then a swatch rule for each
+    color (swatch_sheet) and a key rule for each."""
     # Sorted: the Keyboard tab passes a set, whose order follows how it was built,
     # and Styler.update skips a sheet only when its text is the same.
-    return "\n".join(
-        f".{swatch_class(c)} {{ background-color: {format_color(c)}; }}"
-        f".{key_class(c)} {{ background-image: none;"
-        f" background-color: {format_color(c)}; color: {readable_on(c)}; }}"
-        for c in sorted(colors))
-
-
-def stylesheet(unit: float, colors: Iterable[int]) -> str:
-    """The Keyboard tab's sheet: the key rule at this key size, then the colors."""
     return (KEY_TEMPLATE.format(font=max(6, int(unit * 0.30)), radius=KEY_RADIUS)
-            + color_rules(colors))
+            + swatch_sheet(colors) + "\n".join(
+                f".{key_class(c)} {{ background-image: none;"
+                f" background-color: {format_color(c)}; color: {readable_on(c)}; }}"
+                for c in sorted(colors)))
 
 
 class Styler:

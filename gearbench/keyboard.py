@@ -112,8 +112,8 @@ class KeyboardModel:
     assignments_tested: bool = False
     #: What one of the G keys its custom assignments bind is called in a line, and what they
     #: do while no file of Gearbench's sets them to report: what an unbound one does, but on a
-    #: model with reports_unbound what each does without Gearbench or with its custom
-    #: assignments off.
+    #: model with reports_unbound what each sends in the keyboard's host mode or with its
+    #: custom assignments off.
     own_key: str = "F key"
     unbound: str = "type their own keys"
     #: Whether its custom assignments set each of those G keys to report to Gearbench, bound or
@@ -148,11 +148,10 @@ class KeyboardModel:
     #: The 0x8070 zone that lights each of its board's areas (layout.Board.areas), in their
     #: order, on a model with zone_lighting whose areas take a color each. Empty otherwise.
     area_zones: tuple[int, ...] = ()
-    #: The whole-board effects its 0x8071 cluster 0xff, its whole board's,
-    #: is read for where its device info counts effects on it (lighting.Lighting.whole_board),
-    #: each run there where the cluster lists its id and a counted cluster lacks it: on the G515
-    #: generation's wave, ripple and Pulsar Point (G515_WHOLE_BOARD), and on the G512 X pair's
-    #: three more (G512X_WHOLE_BOARD). With none, nothing is read there.
+    #: The whole-board effects its 0x8071 cluster 0xff, its whole board's, is read for where
+    #: its device info counts effects on it (lighting.Lighting.whole_board), each run there
+    #: where the cluster lists its id and a counted cluster lacks it. With none, nothing is
+    #: read there.
     whole_board: tuple[str, ...] = ()
 
     @property
@@ -210,14 +209,14 @@ G512X_WHOLE_BOARD = (*G515_WHOLE_BOARD, *SIGNATURES)
 # while unbound (the owner's decisions of 2026-10-18, "Bindable, F keys by default" and "Their
 # own", and of 2026-10-21, "Build it, test the write first"); that write is refused until it
 # passes its hardware test. It keeps its brightness when switched off: 0x8040 fn 1 read 12
-# after a replug with no daemon running on 2026-10-22, as G HUB's capture A5c read 13.
+# after a replug with no daemon running on 2026-10-22, and 13 after one on Windows on 2026-10-21.
 # The G515 LIGHTSPEED TKL is taken to be the same, and its brightness is written untested on the
 # wired one's evidence (the owner's decision of 2026-10-22, "Lets test with the keyboard we have
 # and allow."); through its receiver it answers on a node of its own (MODEL_OF). Its key ids
 # are its own control list's (the owner's decision of 2026-10-23, "All four lessons"). Its
 # cluster 0xff is read for Pulsar Point, as on the whole G515 generation (the owner's decision
 # of 2026-10-23, "Before the install", under "every feature its hardware can do"): the wired
-# one's lists it (0x0018), and G HUB wrote it there at its start (Windows capture A2,
+# one's lists it (0x0018), and G HUB wrote it there at its start (on Windows,
 # 2026-10-21); G HUB's records give it to both G515s, the G915 X trio and the G512 X pair.
 G515_TKL = KeyboardModel("G515 TKL", F_RGB, G515_BOARD, wave_directions=G915_WAVE,
                          cut_to_board=True, custom_assignments=True, key_ids=G515_KEY_IDS,
@@ -287,11 +286,9 @@ G213 = KeyboardModel("G213 Prodigy", F_COLOR_LED, G213_BOARD,
 
 def g515_generation(name: str, board: Board, fn_keys: frozenset[int],
                     whole_board: tuple[str, ...] = G515_WHOLE_BOARD) -> KeyboardModel:
-    """One of the G515 generation's other keyboards, untested and driven as the G515
-    LIGHTSPEED TKL is, its G keys' key ids read off its own control list by `control_ids`
-    and its cluster 0xff read for `whole_board` where its device info counts effects on it,
-    but its brightness, read at each setup, is written at each apply. `whole_board` is the
-    G515s' unless its record lists more."""
+    """One of the G515 generation's other keyboards, untested: driven as the G515 LIGHTSPEED
+    TKL is, but with its trigger_numbers not known and its brightness, read at each setup,
+    written at each apply."""
     return KeyboardModel(name, F_RGB, board, wave_directions=G915_WAVE, cut_to_board=True,
                          custom_assignments=True, control_ids=F_ROW_CONTROLS, fn_keys=fn_keys,
                          reads_brightness=True, whole_board=whole_board)
@@ -319,7 +316,7 @@ def g515_generation(name: str, board: Board, fn_keys: frozenset[int],
 # unit has been read at. The G915 X's table is the wired G515 TKL's index for index to 0x16, and
 # the G915 X LIGHTSPEED's through its receiver the G515 LIGHTSPEED TKL's to 0x1A, where on its
 # cable 0x1D4B and 0x1004 put 0x8071 at 0x08 (Solaar issues 3113, 3137 and 3328; the G915 X
-# LIGHTSPEED's two read so on 2026-10-23, its device reports and Windows captures G1 and G5d);
+# LIGHTSPEED's two read so on 2026-10-23, its device reports and G HUB's traffic on Windows);
 # the G915 X LIGHTSPEED TKL's is taken to be the G915 X LIGHTSPEED's, as G HUB
 # gives it its capabilities less G-key lighting; the G316 X pair's and the G512 X pair's are
 # their firmware images' (G HUB's 175.0.16, 186.01.7, 181.5.20 and 177.5.20). The G512 X's
@@ -339,10 +336,11 @@ G915_X_OWN_KEY = "G key"
 G915X_G_CONTROLS = tuple(range(0x018F, 0x0198))
 # The G915 X's G keys take the G915 X LIGHTSPEED's rule, an unbound one doing nothing, once its
 # custom assignments are tested (the owner's decision of 2026-10-23, "Yes, same rule"); until
-# then its writes are refused and they do what they do without Gearbench.
+# then its writes are refused and they send what the keyboard sends for them in its host mode,
+# which the daemon puts it in, tested or not.
 G915_X = replace(g515_generation("G915 X", G915X_BOARD, G915X_FN_KEYS), own_key=G915_X_OWN_KEY,
-                 unbound="do what they do without Gearbench", control_ids=G915X_G_CONTROLS,
-                 reports_unbound=True)
+                 unbound="send what the keyboard sends for them in its host mode",
+                 control_ids=G915X_G_CONTROLS, reports_unbound=True)
 #: The G915 X LIGHTSPEED's G1 to G9 key ids: each printed its letter when remapped there, on the
 #: owner's on 2026-10-23 (the G-key plan's step 6).
 G915_X_LIGHTSPEED_KEY_IDS = (0x6E, 0x77, 0x6F, 0x78, 0x70, 0x79, 0x71, 0x7A, 0x72)
@@ -357,7 +355,7 @@ G915_X_LIGHTSPEED_TRIGGER_NUMBERS = tuple(range(0x02, 0x0B))
 # 2026-10-23, "Turn them on"). Each is set to report, bound or not, so an unbound one does
 # nothing while Gearbench runs (the owner's decision of 2026-10-23, "Nothing"): with no file,
 # G1, G2, G8 and G9 sent F13, F14, F20 and F21 from the keyboard in host and on-board mode
-# alike, and G3 to G7 F15 to F19 in host mode (Windows captures G5b, G5c and X1, 2026-10-23),
+# alike, and G3 to G7 F15 to F19 in host mode (measured on Windows, 2026-10-23),
 # and GNOME takes F13 for Settings, F20 for mic mute and F21 for the touchpad. It
 # keeps its brightness when it loses power: the 13 its own Brightness button set read 13 again
 # after the cable was out and the keyboard switched off 5 s (the first connect's step 17), so it
@@ -398,7 +396,7 @@ G512_X_98 = g515_generation("G512 X 98", G512X98_BOARD, G512X98_FN_KEYS,
 #: alone (G HUB's records). G HUB names the pair's 40B5 and 40B6 and gives their receiver's
 #: kind, LS2, as it gives the G515 LIGHTSPEED TKL's and the PRO X TKL's, and not its id: the
 #: G915 X LIGHTSPEED's was a c547, which the installed kernel's hid-logitech-dj binds, on
-#: 2026-10-23 (its first connect and Windows capture G5e), and the TKL's is assumed to be one.
+#: 2026-10-23 (its first connect, and on Windows), and the TKL's is assumed to be one.
 MODEL_OF: dict[int, KeyboardModel] = {
     0xC33E: G915,
     0xC541: G915,
@@ -448,8 +446,8 @@ def followed(key: str | None) -> str:
 
 
 def key_name(key: str) -> str:
-    """The name of the model whose key (MODEL_IDS) is `key`, for a line or a label: "keyboard c999"
-    for any other id, a model's other ids included."""
+    """The name of the model whose key (MODEL_IDS) is `key`, for a line or, capitalized, a label:
+    "keyboard c999" for any other id, a model's other ids included."""
     model = model_named(key)
     return f"keyboard {key}" if model is None else model.name
 
@@ -721,8 +719,32 @@ def untested_assignment_words(product: int) -> str:
             f"until that is tested on this model, so they {model.unbound}")
 
 
+#: The idle line of a keyboard lit through 0x8070's zones (KeyboardModel.zone_lighting), {} its
+#: model's name, which keeps no idle times: a state apart from the Never dim switch's, "never
+#: dims". The daemon's note after a set of the times says it too, so `idle` prints that note alone.
+NO_IDLE_TIMES = "the {} has no idle times"
+
+#: The note of a bind that leaves a key bound on the G-Shift layer alone where
+#: needs_base_binding, the key's name put in. The window toasts it whole, so with an F key's
+#: name it stays within a toast's length (gui.style.TOAST_MAX).
+BASE_BINDING_TOO = "{} types its own key while G-Shift is held: bind it on the base layer too"
+
+
+def needs_base_binding(key: str, base: str | None, shifted: str | None) -> bool:
+    """Whether the key bound under `key`, bound to `base` on the base layer and to `shifted`
+    on the G-Shift layer, None for nothing there, is bound on the G-Shift layer alone on a
+    model whose custom assignments set a key to report only while its base layer binds it
+    (custom_assignments without reports_unbound, the G515s' generation but the G915 X pair;
+    KeyControl.wanted): that key types its own while G-Shift is held. The owner's decision of
+    2026-10-28 has a bind say so (BASE_BINDING_TOO), with the assignments' write unchanged."""
+    return base is None and shifted is not None and any(
+        model.custom_assignments and not model.reports_unbound and key in model.g_key_names
+        for model in MODEL_OF.values())
+
+
 def typed_words(product: int | None) -> str | None:
     """What the G keys of the keyboard of id `product` type while unbound, for a line or a
-    label: "F1 to F12" on the G915 TKL. None where keystroke gives none."""
+    label: "F1 to F12" on the G915 TKL. None for a model whose unbound G keys type nothing
+    (KeyboardModel.g_key_defaults), and with no keyboard found yet."""
     typed = () if product is None else MODEL_OF[product].g_key_defaults
     return f"{typed[0].upper()} to {typed[-1].upper()}" if typed else None

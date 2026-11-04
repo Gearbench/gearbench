@@ -24,7 +24,7 @@
 # reason it gives. Linux 7.0's hid-logitech-hidpp binds the G935's
 # interface and keeps its hidraw node, which this rule grants alike.
 #
-# install.sh puts this in /usr/local/lib/udev/rules.d/; the .deb puts it in
+# install.sh puts this in /usr/local/lib/udev/rules.d/; the package puts it in
 # /usr/lib/udev/rules.d/. Either way, reload with:
 #   sudo udevadm control --reload
 #   sudo udevadm trigger --subsystem-match=hidraw --action=add

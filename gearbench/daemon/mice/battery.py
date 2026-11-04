@@ -11,11 +11,15 @@ import time
 from typing import TYPE_CHECKING
 
 from ...battery import on_power, read as read_mouse_battery, unified as unified_battery
-from ...mouse import CELLS, MouseError
+from ...mouse import CELLS, model_ids as mouse_model_ids
+from ...sensor import MouseError
+from ...tray import Battery
 from ..shared import KEYBOARD_BATTERY_INTERVAL, BatteryNotices, look_due
-from .attached import AttachedMouse, dpi_keys
+from .attached import AttachedMouse, kept_routes
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from .. import Daemon
     from . import Mice
 
@@ -38,13 +42,27 @@ class MouseBattery(BatteryNotices):
     BATTERY_POWERED = "is on external power"
     BATTERY_BODY = "Charge it or replace its battery."
 
-    def __init__(self, daemon: Daemon, name: str) -> None:
+    def __init__(self, daemon: Daemon, name: str, product: int) -> None:
         self.d = daemon
-        #: The model's name, in the notice and the journal.
+        #: The model's name, in the notice and the journal, and the product id of its route.
         self.name = name
+        self.product = product
+        #: The node of the mouse last attached on its route (MouseBatteries.notices_of).
+        self.node: Path | None = None
+        #: Whether that mouse probed a battery (Mouse.capabilities).
+        self.found = False
 
     def battery_names(self) -> tuple[str, str]:
         return self.name, f"the {self.name}"
+
+    def battery_ids(self) -> tuple[str, ...]:
+        return mouse_model_ids(f"{self.product:04x}")
+
+    def battery_node(self) -> Path | None:
+        return self.node
+
+    def battery_found(self) -> bool:
+        return self.found
 
 
 class MouseBatteries:
@@ -63,18 +81,34 @@ class MouseBatteries:
         in wall-clock seconds (`at`, now by default), and warn of it."""
         attached.battery = reading
         attached.battery_at = round(time.time()) if at is None else at
-        self._notices.setdefault(attached.product, MouseBattery(self.d, attached.name)
-                                 ).warn_battery(reading)
+        self.notices_of(attached).warn_battery(reading)
         if not on_power(reading):
             return
-        # On power on one route: what the model's other routes warned of ends too where no
-        # mouse answers on them, taken for this mouse moved here, as Routes.left_route takes a
-        # route gone silent. A second mouse of the model answering there keeps its notices.
+        # On power on one route: what the model's other routes (kept_routes) warned of ends
+        # too where no mouse answers on them, taken for this mouse moved here, as
+        # Routes.left_route takes a route gone silent. A second mouse of the model answering
+        # there keeps its notices.
         answering = {m.product for m in self.mice.attached if not m.silent}
-        for key in dpi_keys(attached.product)[1:]:
-            left = self._notices.get(int(key, 16))
-            if left is not None and int(key, 16) not in answering:
+        for route in kept_routes(attached.product)[1:]:
+            left = self._notices.get(route)
+            if left is not None and route not in answering:
                 left.warn_battery(reading)
+
+    def notices_of(self, attached: AttachedMouse) -> MouseBattery:
+        """The notices of `attached`'s route, made at the first ask, on its node and with
+        whether it lists a battery."""
+        notices = self._notices.setdefault(attached.product,
+                                           MouseBattery(self.d, attached.name, attached.product))
+        notices.node = attached.dev.path
+        notices.found = "battery" in attached.mouse.capabilities
+        return notices
+
+    def tray_batteries(self) -> list[Battery]:
+        """The tray's line for each mouse attached that has a battery, keyed by its product
+        id: its last reading, with when it was taken while it does not answer."""
+        return [self.notices_of(m).tray_line(f"{m.product:04x}", m.name, m.battery,
+                                             answering=not m.silent, read_at=m.battery_at)
+                for m in self.mice.attached if "battery" in m.mouse.capabilities]
 
     def take_report(self, attached: AttachedMouse, data: bytes) -> None:
         """Keep the battery a mouse reported by itself, with when, for `mouse`, and warn of it.
@@ -83,10 +117,12 @@ class MouseBatteries:
 
         A silent mouse is marked answering. Otherwise `heard_at` is left as it was: a battery
         report says nothing about the DPI or the rate, so it does not make the other readings
-        due.
+        due. It still says the mouse is awake (`reported_at`), for a color in flight whose
+        answer was lost (MouseLighting.check_mouse_write).
         """
         if attached.silent:
             self.mice.mark_answering(attached)
+        attached.reported_at = time.monotonic()
         reading = unified_battery(data)
         attached.battery_reports = True
         log.debug("%s reported its battery: %.0f%% %s", attached.name,

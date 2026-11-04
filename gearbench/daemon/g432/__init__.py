@@ -1,8 +1,9 @@
 """The Logitech G432 and the other HID++ headsets of gearbench.g432's MODELS: finding one,
-its firmware version, sidetone, battery, power-off time and the equalizer in the headset
-of a model that has one, its lights where it lists them (lights.py, which gives the
-`g432_lights` command), what its G keys do on it (key_action), and the `g432`,
-`g432_sidetone`, `g432_auto_off` and `g432_headset_eq` commands.
+one at a time, each other plugged in beside it a problem (_not_driven), its firmware
+version, sidetone, battery, power-off time and the equalizer in the headset
+of a model that has one, its lights where it lists them, with their commands (lights.py),
+what its G keys do on it (key_action), and the `g432`, `g432_sidetone`, `g432_auto_off`
+and `g432_headset_eq` commands.
 
 A headset speaks HID++ on its own node, cabled, on long reports alone (gearbench.g432). The
 daemon sends it only what g432.SENT names, and its lights only what headset_lights.SENT
@@ -19,10 +20,11 @@ startup effect, where it lists each, and while they follow the keyboard that lea
 the battery's read, the power-off time's write and read, the equalizer's reads and RAM
 gains, and the lights' claim, effects and release, their startup effect's write and read,
 and the effects they keep; while the lights follow the keyboard, its color at each change of
-it, and again at a return and after a battery read where it is owed; as it is let go, the
-lights' release again while Gearbench holds them or held them before a return with Follow
-the keyboard off, or at a power-off while they follow the keyboard, black in its place with
-the claim kept (lights.py), and the G keys' events turned off (fn 2 `00`) while they are on;
+it, and again at a return, after a battery read and after `g432`'s read where it is owed;
+as it is let go, the lights' release again while Gearbench holds them or held them before a
+return with Follow the keyboard off, or at a power-off while they follow the keyboard, black
+in its place with the claim kept (lights.py), and the G keys' events turned off (fn 2 `00`)
+while they are on;
 every KEYBOARD_BATTERY_INTERVAL and after a resume the battery's read; after a battery read that
 goes through, and at `g432`'s read, each read of the attach whose value is still unknown again:
 the sidetone's, the power-off time's and the equalizer's, then the preset picked's RAM gains
@@ -77,6 +79,7 @@ from ...g432 import (
     Equalizer,
     HeadsetModel,
     auto_off_words,
+    find_each_g432,
     find_g432,
     kept_refusal,
     not_listed,
@@ -94,9 +97,10 @@ from ...keys import F_GKEY, KeyEvent
 from ...report import untested_note
 from ...settings_files import ConfigError, shown_path, unprefixed
 from ...tray import Battery
-from ...wording import reason, route
+from ...wording import escaped, reason, route
 from ..shared import (
     DEVICE_GONE,
+    DEVICE_NO_REPLY_WIRED,
     DEVICE_NOT_SET_UP,
     KEYBOARD_BATTERY_INTERVAL,
     NODE_DENIED,
@@ -107,6 +111,7 @@ from ..shared import (
     failure_reason,
     hidpp_refusal,
     look_due,
+    refusal,
 )
 from .lights import HeadsetLighting
 
@@ -116,6 +121,12 @@ if TYPE_CHECKING:
 log = logging.getLogger("gearbench")
 
 NO_G432 = "no G432 or other headset of its family found; plug in its USB adapter, receiver or cable"
+#: A headset of the family plugged in beside the one attached, which is not driven, since
+#: Gearbench drives one at a time (the owner's decision of 2026-10-28, "Two G432-family
+#: headsets at once: name the other"): its name, the attached one's, or "other" in its place
+#: where both are one model, and what plugs the attached one in. Short enough that the
+#: tray's menu shows it whole (tray.PROBLEM_MAX) for any two models of the family.
+NOT_DRIVEN = "{other} not driven; unplug the {driven}'s {plug} to use it"
 #: The level a G key turns sidetone on at where it turned none off: the middle of
 #: SIDETONE_RANGE.
 SIDETONE_ON = 50
@@ -155,6 +166,25 @@ class G432Headset(BatteryNotices):
         self.d = daemon
         self.dev: G432 | None = None
         self.path: Path | None = None
+        #: Its lights, where it lists them (lights.py).
+        self.lights = HeadsetLighting(daemon, self)
+        #: By product id, the sidetone level a G key turned off, which the next turns on.
+        self._sidetone_was: dict[int, int] = {}
+        #: By product id, the level the first read since the daemon started found, kept
+        #: across a replug, and each id written: a read after a write finds the daemon's own
+        #: level, so only a read before any write is kept.
+        self._first: dict[int, int] = {}
+        self._written: set[int] = set()
+        #: When to look for a headset again, and the node whose lookup got no answer.
+        self._lookout = Lookout()
+        #: A node refused to this user and why a found headset's setup failed, for
+        #: problems() and the journal (AttachNotes).
+        self._notes = AttachNotes()
+        self._clear()
+
+    def _clear(self) -> None:
+        """Forget what the attached headset said and what is owed it. What is kept by product
+        id across a replug, and the battery notices' state, stay."""
         #: The level last read or written, None while unknown.
         self.level: int | None = None
         #: The firmware version read at the attach (G432.firmware), None while unknown.
@@ -174,8 +204,9 @@ class G432Headset(BatteryNotices):
         #: The equalizer in the headset as last read, on a model that has one, None before a
         #: read or without one: its active gains are location 1's, which a G933 does not play
         #: (EQ_ACTIVE), so the reply gives _playing's; the gains of the last write it answered
-        #: since the attach or the switch-on; and the name of the preset picked for the model,
-        #: which _send_picked sends again, None for none.
+        #: since the attach, the switch-on or a read that lists other bands (_read_eq); and
+        #: the name of the preset picked for the model, which _send_picked sends again, None
+        #: for none.
         self.eq: Equalizer | None = None
         self.sent_gains: tuple[int, ...] | None = None
         self.picked: str | None = None
@@ -192,23 +223,6 @@ class G432Headset(BatteryNotices):
         #: Whether the last turn-on of the G keys' events failed, which a battery read that
         #: goes through sends again (_read_unread).
         self._keys_failed = False
-        #: Its lights, where it lists them (lights.py).
-        self.lights = HeadsetLighting(daemon, self)
-        #: By product id, the sidetone level a G key turned off, which the next turns on.
-        self._sidetone_was: dict[int, int] = {}
-        #: The model the battery notices were last armed for: another's attach arms them
-        #: again, as KeyboardBattery.poll_battery does for another keyboard.
-        self._battery_of: str | None = None
-        #: By product id, the level the first read since the daemon started found, kept
-        #: across a replug, and each id written before any read found one: a read after it
-        #: finds the daemon's own level.
-        self._first: dict[int, int] = {}
-        self._written: set[int] = set()
-        #: When to look for a headset again, and the node whose lookup got no answer.
-        self._lookout = Lookout()
-        #: A node refused to this user and why a found headset's setup failed, for
-        #: problems() and the journal (AttachNotes).
-        self._notes = AttachNotes()
 
     def commands(self) -> dict[str, Callable[[dict], dict]]:
         return {"g432": self._cmd_g432, "g432_sidetone": self._cmd_g432_sidetone,
@@ -232,16 +246,15 @@ class G432Headset(BatteryNotices):
         if self.dev is None:
             return None
         return attached_entry(self.model.short, str(self.path), route(self.model.plugged_by),
-                              self.battery, self.battery_at, answering=self.answers(),
-                              battery_found=self.dev.has(F_ADC))
+                              self.battery, self.battery_at, self, answering=self.answers())
 
     def tray_battery(self) -> Battery | None:
         """The tray's line for the headset: its last reading, from a read or a broadcast,
         while one is attached."""
         if self.dev is None or self.battery is None:
             return None
-        return Battery.of(f"{self.dev.product:04x}", self.model.short, self.battery,
-                          answering=self.answering, read_at=self.battery_at)
+        return self.tray_line(f"{self.dev.product:04x}", self.model.short, self.battery,
+                              answering=self.answering, read_at=self.battery_at)
 
     def deadlines(self) -> list[float]:
         if self.dev is None:
@@ -311,9 +324,8 @@ class G432Headset(BatteryNotices):
         self._notes.attached()
         self.dev, self.path = dev, path
         self.BATTERY_PREFIX = f"{model.key}: "
-        if model.key != self._battery_of:
-            self._battery_of = model.key
-            self.battery_rearmed(f"the headset read before the {model.short} is no longer attached")
+        self.armed_for(model.key,
+                       f"the headset read before the {model.short} is no longer attached")
         self.d.selector.register(dev.fileno, selectors.EVENT_READ, "g432")
         self._try_read("firmware version", self._read_firmware)
         # A model not yet run on asks for a device report (report.untested_note).
@@ -382,11 +394,8 @@ class G432Headset(BatteryNotices):
             self.d.selector.unregister(dev.fileno)
         with contextlib.suppress(OSError):
             dev.close()
-        self.path = self.level = self.firmware = None
-        self.battery = self.power_off = self.eq = self.battery_at = self.picked = None
-        self.sent_gains = None
-        self.answering, self._back = True, False
-        self.keys_on = self._keys_owed = self._keys_failed = False
+        self.path = None
+        self._clear()
         return f"{name} let go" + (f", {lights_said}" if lights_said else "")
 
     def pending(self) -> bool:
@@ -441,7 +450,7 @@ class G432Headset(BatteryNotices):
                 # each read with error 0x05 at once (measured 2026-10-25). A wired one has no
                 # receiver to be away from.
                 if self.model.plugged_by == BY_RECEIVER:
-                    self.answering = False
+                    self._away()
         # Not while it is away, which would fail the write. Sent whatever the equalizer
         # gives, since no location gives the gains a G933 plays (EQ_ACTIVE); one still
         # unknown is _read_unread's, which sends it once it reads it.
@@ -455,9 +464,11 @@ class G432Headset(BatteryNotices):
             self._keys_on()
 
     def away(self) -> bool:
-        """Whether the headset is taken to be off or out of reach: marked not answering, or
-        its last reading of no state (battery.adc)."""
-        return not self.answering or (self.battery is not None
+        """Whether the headset is taken to be off or out of reach: marked not answering, or,
+        behind its receiver, its last reading of no state (battery.adc). A wired one has no
+        receiver to be away from: its reading of no state is a reading (_take_broadcast)."""
+        return not self.answering or (self.model.plugged_by == BY_RECEIVER
+                                      and self.battery is not None
                                       and self.battery.get("state") == UNKNOWN)
 
     def _gone(self, exc: DeviceGone) -> None:
@@ -469,14 +480,27 @@ class G432Headset(BatteryNotices):
     # -- what problems() and the refusals read -------------------------------
 
     def problems(self) -> list[tuple[str, str]]:
-        """The headset's entries for the daemon's `problems`, as (code, message). Nothing is
-        sent to it."""
+        """The headset's entries for the daemon's `problems`, as (code, message), the family's
+        others plugged in beside it last (_not_driven). Nothing is sent to it."""
         found: list[tuple[str, str]] = []
         if (denied := self._notes.denied_problem()) is not None:
             found.append(("g432_no_permission", denied))
         if self._notes.not_set_up is not None:
             found.append(("g432_not_set_up", self._notes.not_set_up))
+        found += [("g432_not_driven", message) for message in self._not_driven()]
         return found
+
+    def _not_driven(self) -> list[str]:
+        """With a headset attached, NOT_DRIVEN for each other headset of the family plugged in,
+        found in sysfs alone (find_each_g432); none with none attached, since the next look
+        attaches the first found (connect)."""
+        if self.dev is None:
+            return []
+        attached = self.model
+        return [NOT_DRIVEN.format(other=MODEL_OF[product].short, plug=attached.plugged_by,
+                                  driven="other" if MODEL_OF[product] is attached
+                                  else attached.short)
+                for path, product in find_each_g432() if path != self.path]
 
     def missing(self) -> str:
         """Why no command can go to a headset, with none attached."""
@@ -521,28 +545,35 @@ class G432Headset(BatteryNotices):
         self._take_battery(reading)
 
     def _read_eq(self) -> None:
-        """Read the equalizer in the headset. Raises HidppFailure."""
-        self.eq = cast("G432", self.dev).equalizer()
+        """Read the equalizer in the headset, the gains sent forgotten where it lists other
+        bands than the last read did: they were sent for those (_playing). Raises
+        HidppFailure."""
+        eq = cast("G432", self.dev).equalizer()
+        if self.eq is not None and eq.frequencies != self.eq.frequencies:
+            self.sent_gains = None
+        self.eq = eq
 
     def _playing(self, eq: Equalizer) -> tuple[int, ...]:
         """The gains the headset plays, as the reply gives them: those of the last write it
-        answered since the attach or the switch-on (_played), else flat, as a G933 plays at a
-        power-on (EQ_ACTIVE; the owner's decisions of 2026-10-25). After an attach whose write
-        failed or was not sent, the headset may still play what it played before."""
+        answered (_played) since the attach, the switch-on or a read that lists other bands
+        (_read_eq), else flat, as a G933 plays at a power-on (EQ_ACTIVE; the owner's decisions of
+        2026-10-25). After an attach whose write failed or was not sent, the headset may still
+        play what it played before."""
         return flat_gains(eq) if self.sent_gains is None else self.sent_gains
 
     def _played(self, gains: Sequence[int]) -> None:
         """`gains` answered by the headset: they play, whether or not a read follows or
-        answers, until the next attach or switch-on (_playing). The G933's location 1 gave the
-        same gains before and after writes the owner heard play (2026-10-25), so a read must
-        not replace them."""
+        answers, until the next attach, switch-on or read that lists other bands (_playing).
+        The G933's location 1 gave the same gains before and after writes the owner heard play
+        (2026-10-25), so a read must not replace them."""
         self.sent_gains = tuple(gains)
 
     def _read_unread(self) -> None:
         """Make again each read of the attach whose value is still unknown, in the attach's
         order: the sidetone's level, the power-off time, the equalizer, then, once it reads,
         the preset picked sent again, or flat with none picked, as at the attach
-        (_send_picked), the lights' zones, and the G keys' events turned on where their last
+        (_send_picked), the lights' zones, or their startup effect alone where only it failed
+        (HeadsetLighting.read_unread), and the G keys' events turned on where their last
         turn-on failed (_divert). Raises DeviceGone."""
         dev = cast("G432", self.dev)
         if dev.has(SIDETONE) and self.level is None:
@@ -554,12 +585,12 @@ class G432Headset(BatteryNotices):
         if (dev.has(F_EQUALIZER) and self.eq is None
                 and self._read_again("equalizer", self._read_eq)):
             self._send_picked(attach=True)
-        if self.lights.unread is not None:
-            self._read_again("lights", self.lights.read)
+        # The startup effect's failure alone is said by its own read, which keeps the zones.
+        self._read_again("lights", self.lights.read_unread)
         # A divert that failed, the attach's or a return's: a G933 attached while it was still
         # starting refused it (error 0x05) and kept its G keys to itself (measured
         # 2026-10-26). A return marked in the same pass sends it itself (tend, _keys_owed).
-        if dev.has(F_GKEY) and self._keys_failed and not self._keys_owed:
+        if self._keys_failed and not self._keys_owed:
             try:
                 self._divert()
             except DeviceGone:
@@ -595,11 +626,13 @@ class G432Headset(BatteryNotices):
         try:
             picked = g432_library.load_picked(model)
         except (OSError, ValueError) as exc:
-            # A ConfigError names the file; an OSError's reason does not.
+            # A ConfigError names the file; an OSError's reason does not. Escaped: a link's
+            # target is quoted as it is, and the journal splits a record at each newline
+            # (cli.service.JournalFormatter).
             why = (f"{g432_library.picked_path(model)}: {reason(exc)}"
                    if isinstance(exc, OSError) else reason(exc))
             log.info("%s: the preset picked could not be read, so none was sent again: %s",
-                     model.key, why)
+                     model.key, escaped(why))
             return
         if picked is None:
             if attach:
@@ -681,14 +714,24 @@ class G432Headset(BatteryNotices):
 
     def _take_broadcast(self, reading: dict) -> None:
         """A 0x1F20 broadcast: one in the unknown state from behind a receiver, which the
-        kernel takes as the headset off or out of reach (battery.ADC_STATES), marks it not
-        answering and keeps the last reading; any other is taken (_take_battery). A G933's
+        kernel takes as the headset off or out of reach (battery.ADC_STATES), marks it away
+        (_away) and keeps the last reading; any other is taken (_take_battery). A G933's
         receiver sends one with no millivolts and no flags as the headset switches off
         (measured 2026-10-25)."""
         if reading["state"] == UNKNOWN and self.model.plugged_by == BY_RECEIVER:
-            self.answering = False
+            self._away()
             return
         self._take_battery(reading)
+
+    def _away(self) -> None:
+        """The headset taken to be switched off or out of range behind its receiver: marked
+        not answering, and what its G keys hold let go, G-Shift included, and the channel's
+        mask of them forgotten (G432.forget_held), since their releases will not come
+        (Bindings.let_go_headset); a toggle macro one of them started runs on, as at a return
+        (_divert)."""
+        self.answering = False
+        self.d.bindings.let_go_headset(self.model.g_keys)
+        cast("G432", self.dev).forget_held()
 
     def _take_battery(self, reading: dict) -> None:
         # A reading from a headset away is its return, taken as a switch-on, which loses the
@@ -704,9 +747,21 @@ class G432Headset(BatteryNotices):
     def battery_names(self) -> tuple[str, str]:
         return self.model.short, f"the {self.model.short}"
 
+    def battery_ids(self) -> tuple[str, ...]:
+        """The key of the model the notices were last armed for, which an attach sets."""
+        return (cast("str", self.battery_of),)
+
+    def battery_node(self) -> Path | None:
+        return self.path
+
+    def battery_found(self) -> bool:
+        """Whether the headset attached lists 0x1F20, ADCMeasurement, its battery."""
+        return cast("G432", self.dev).has(F_ADC)
+
     def call(self, work: Callable[[], object]) -> dict | None:
-        """Run `work` on the headset: None when it went through, else the refusal. A node
-        gone tears the headset down."""
+        """Run `work` on the headset: None when it went through, else the refusal, which
+        for a wired headset that did not answer asks for a replug. A node gone tears the
+        headset down."""
         model = self.model
         try:
             work()
@@ -716,6 +771,9 @@ class G432Headset(BatteryNotices):
         except HidppFailure as exc:
             if not isinstance(exc, HidppTimeout | UnreadableAnswer):
                 log.info("%s: a request failed: %s", model.key, failure_reason(exc))
+            if isinstance(exc, HidppTimeout) and model.plugged_by != BY_RECEIVER:
+                return refusal(DEVICE_NO_REPLY_WIRED.format(model.short, f"its {model.plugged_by}"),
+                               exc)
             return hidpp_refusal(model.short, exc)
         return None
 
@@ -736,7 +794,7 @@ class G432Headset(BatteryNotices):
             "name": model.short,
             "model": model.key,
             # A model not yet run on, whose page asks for a device report (report.untested),
-            # and why a write the headset keeps is refused on it, null for none.
+            # and why the writes kept_refusal holds back are refused on it, null for none.
             "untested": not model.tested,
             "flash_refused": kept_refusal(model),
             "device": str(self.path),
@@ -752,6 +810,7 @@ class G432Headset(BatteryNotices):
             # the minutes of silence it powers off after, 0 for never, null where not read.
             "battery_found": dev.has(F_ADC),
             "battery": self.battery,
+            **self.notices_reply(),
             # When it was taken, and whether the headset answers its read: false once one
             # fails on a headset behind its receiver, as one switched off does (tend).
             "battery_at": self.battery_at,
@@ -760,6 +819,9 @@ class G432Headset(BatteryNotices):
             # What each G key does now, by the name it binds under, on the layer in force or
             # its default (Bindings.headset_binding); none on a model with none.
             "g_keys": {key: self.d.bindings.headset_binding(key) for key in model.g_keys},
+            # Each one's binding on the G-Shift layer in force, null where it has none there
+            # and sends what g_keys gives while G-Shift is held.
+            "g_keys_shift": {key: self.d.games.key_layer(True)[key] for key in model.g_keys},
             # On a model with an equalizer of its own, the headset's bands, their range in
             # dB, the gains it keeps (EQ_SAVED) and the ones it plays (_playing), why a write
             # is refused, null for none, and the name of the preset picked, which _send_picked
@@ -777,8 +839,9 @@ class G432Headset(BatteryNotices):
 
     def _cmd_g432(self, request: dict) -> dict:
         """The headset's state; with `read`, its sidetone and its battery read again first,
-        then what the attach could not read (_read_unread), refused as gone where a G key's
-        action the battery's read took let the headset go."""
+        then what the attach could not read (_read_unread) and the color its lights are owed
+        (HeadsetLighting.give_owed), refused as gone where a G key's action the battery's read
+        took, or that color's write, let the headset go."""
         if self.dev is None:
             return {"ok": False, "error": self.missing()}
         if request.get("read") is True:
@@ -794,6 +857,11 @@ class G432Headset(BatteryNotices):
                 return {"ok": False, "error": DEVICE_GONE.format(model.short)}
             if (refused := self.call(self._read_unread)) is not None:
                 return refused
+            # As tend gives it after its read: lights read now are owed the color they follow.
+            self.lights.give_owed()
+            if self.dev is None:
+                # The color's write found the node gone and let the headset go (call).
+                return {"ok": False, "error": DEVICE_GONE.format(model.short)}
         return self.reply()
 
     def _cmd_g432_sidetone(self, request: dict) -> dict:
@@ -810,12 +878,17 @@ class G432Headset(BatteryNotices):
             except ValueError as exc:
                 return {"ok": False, "error": str(exc)}
         if not dev.has(SIDETONE):
-            return {"ok": False, "error": not_listed(self.model, SIDETONE)}
+            return {"ok": False, "error": f"nothing was sent: {not_listed(self.model, SIDETONE)}"}
 
         def write() -> None:
             # Before the write: a write that fails part way may still have reached it.
             self._written.add(dev.product)
-            dev.set_sidetone(level)
+            try:
+                dev.set_sidetone(level)
+            except HidppFailure:
+                # Unknown, for the same reason, until _read_unread or a read finds it.
+                self.level = None
+                raise
             log.info("%s: sidetone set to %d", self.model.key, level)
             self.level = level
             self._read()
@@ -831,7 +904,7 @@ class G432Headset(BatteryNotices):
             return {"ok": False, "error": self.missing()}
         dev, model = self.dev, self.model
         if not dev.has(F_ADC):
-            return {"ok": False, "error": not_listed(model, F_ADC)}
+            return {"ok": False, "error": f"nothing was sent: {not_listed(model, F_ADC)}"}
 
         def write() -> None:
             minutes = request.get("minutes")
@@ -859,11 +932,13 @@ class G432Headset(BatteryNotices):
         name = self.model.key
         reply = steps[action]()
         if not reply["ok"]:
-            log.info("%s: %s did nothing: %s", name, key, reply["error"])
+            # Escaped, as _send_picked's line: a library's refusal quotes a link's target.
+            log.info("%s: %s did nothing: %s", name, key, escaped(reply["error"]))
 
     def _next_preset(self) -> dict:
         """The preset after the one picked in the model's library, or its first after the
-        last or with none picked, picked as `g432_headset_eq` with `preset` picks it. Refused
+        last or with none picked, past any preset whose bands the headset does not play
+        where its equalizer was read, picked as `g432_headset_eq` with `preset` picks it. Refused
         before any read on a model with no equalizer of its own, as the G635, whose
         `<key>-eq.json` holds its equalizer on the computer, another library."""
         if not self.model.onboard_eq:
@@ -876,7 +951,14 @@ class G432Headset(BatteryNotices):
             return {"ok": False, "error": NO_PRESETS}
         names = [preset.name for preset in presets]
         after = names.index(self.picked) + 1 if self.picked in names else 0
-        return self._cmd_g432_headset_eq(presets[after % len(presets)].request())
+        turn = presets[after:] + presets[:after]
+        if self.eq is not None:
+            # A preset of other bands is refused with nothing picked, so the next press
+            # would come back to it.
+            frequencies = self.eq.frequencies
+            turn = tuple(preset for preset in turn
+                         if g432_library.fits(preset, frequencies)) or turn
+        return self._cmd_g432_headset_eq(turn[0].request())
 
     def _toggle_sidetone(self) -> dict:
         """Sidetone off where it is on, its level kept by product id, or on again at that
@@ -891,18 +973,18 @@ class G432Headset(BatteryNotices):
         """The equalizer in the headset: `gains`, a whole dB a band, written to its RAM; or
         `preset`, a library preset's name with its `bands`, its gains written there and the
         preset kept to send again (_pick); or with `flat` 0 dB on every band written there
-        and the preset picked forgotten; then read again, the gains written standing as the
-        playing ones (_played), and a pick kept or forgotten where the headset plays them
-        (_plays), whether or not the read after the write answers, a read that fails being the
-        reply's refusal. With none, read again. Refused on a model with no equalizer of its
-        own, and, with nothing sent, for more than one of the three (ONE_CHANGE)."""
+        and the preset picked forgotten (_flat); then read again, the gains written standing
+        as the playing ones (_played), and a pick kept or forgotten where the headset plays
+        them (_plays), whether or not the read after the write answers, a read that fails
+        being the reply's refusal. With none, read again. Refused on a model with no equalizer
+        of its own, and, with nothing sent, for more than one of the three (ONE_CHANGE)."""
         if self.dev is None:
             return {"ok": False, "error": self.missing()}
         dev, model = self.dev, self.model
         if not model.onboard_eq:
             return {"ok": False, "error": NO_HEADSET_EQ.format(model.short)}
         if not dev.has(F_EQUALIZER):
-            return {"ok": False, "error": not_listed(model, F_EQUALIZER)}
+            return {"ok": False, "error": f"nothing was sent: {not_listed(model, F_EQUALIZER)}"}
         flat = request.get("flat") is True
         if sum((request.get("gains") is not None, request.get("preset") is not None,
                 flat)) > 1:
@@ -912,12 +994,21 @@ class G432Headset(BatteryNotices):
         eq = cast("Equalizer", self.eq)
         if request.get("preset") is not None:
             return self._pick(eq, request)
-        gains = flat_gains(eq) if flat else request.get("gains")
+        if flat:
+            return self._flat(eq)
+        gains = request.get("gains")
         if gains is None:
             return self.call(self._read_eq) or self.reply()
+        return self._set_gains(eq, gains, "equalizer gains set to") or self.reply()
+
+    def _flat(self, eq: Equalizer) -> dict:
+        """`g432_headset_eq` with `flat`: 0 dB on every band to the RAM, then the preset
+        picked forgotten where the headset plays them (_plays), with the read's refusal where
+        the read after the write failed."""
+        model, gains = self.model, flat_gains(eq)
         refused = self._set_gains(eq, gains, "equalizer gains set to")
-        if not flat or (refused is not None and not self._plays(gains)):
-            return refused or self.reply()
+        if refused is not None and not self._plays(gains):
+            return refused
         try:
             if g432_library.drop_picked(model):
                 log.info("%s: no preset is sent again at its attach now", model.key)

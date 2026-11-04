@@ -9,7 +9,10 @@ under `lighting`, by keyboard model; version 1 kept one at the top of the file, 
 G915's (config.V1_KEYBOARD). Version 3 keeps the mouse bindings by mouse model; versions 1 and
 2 kept one set, read as the G502 X PLUS's (config.V2_MOUSE). `mouse_color`, the color a synced
 mouse shows while the profile is loaded, came after version 3 without a new one: a Gearbench
-that does not know it reads the file without it.
+that does not know it reads the file without it. Version 4, config.json's too, keeps what came
+after Gearbench 1.2.1, the mouse's G-Shift layer (`mouse_shift`) and a G key's binding to
+nothing on the G-Shift layer among it, which 1.2.1 and every earlier Gearbench refuse by its
+version (config.py).
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-from .apps import MAX_PROGRAM_BYTES
+from .apps import MAX_PROGRAM_BYTES, program_bytes
 from .config import (
     BINDABLE_KEYS,
     KEYBOARD_MODEL,
@@ -28,8 +31,10 @@ from .config import (
     REPORT_RATES,
     V1_KEYBOARD,
     VERSION,
+    Layers,
     Lighting,
     Profile,
+    Said,
     by_model,
     entry_under,
     expect,
@@ -40,6 +45,7 @@ from .config import (
     mouse_json,
     parse_color,
     read_mouse_bindings,
+    read_mouse_shift,
     refuse_controls,
 )
 from .library_files import (
@@ -56,6 +62,7 @@ from .onboard import DPI_HIGHEST, DPI_LOWEST, DPI_STAGES, dpi_fits
 from .settings_files import (
     FIRST_VERSION,
     FIX_AND_RELOAD,
+    SAVE_OVER,
     ConfigError,
     FileUnreadable,
     backup_dir,
@@ -68,7 +75,7 @@ from .settings_files import (
     sync_removal,
     write_json,
 )
-from .wording import GAME_PROFILE_NEEDS_A_NAME, kind_of, whole, written
+from .wording import GAME_PROFILE_NEEDS_A_NAME, both_ends, kind_of, whole, written
 
 #: The most programs a game profile may load for: the daemon's scan compares each with every
 #: running program every five seconds, on the thread that carries the G keys and macros.
@@ -100,7 +107,7 @@ class MouseTuning:
     `default` and `shift` need `dpi_stages`."""
 
     dpi_stages: tuple[int, ...] | None = None
-    #: Each one of `dpi_stages`: the DPI the profile loads at, and the one the paddle drops to.
+    #: Each one of `dpi_stages`: the DPI the profile loads at, and the one the paddle goes to.
     default: int | None = None
     shift: int | None = None
     report_rate: int | None = None
@@ -187,8 +194,8 @@ def check_programs(processes: object, where: str) -> list[str]:
         # Names match whole (apps.names_match) and the scan drops an empty one
         # (apps.match_names), so a blank name would never load the profile.
         if not isinstance(process, str) or not process.strip():
-            raise ConfigError(f"{where}[{i}] is a program name, not {written(process)}")
-        size = len(process.strip().encode(errors="replace"))
+            raise ConfigError(f"{where}[{i}] is a program name, not {both_ends(written(process))}")
+        size = program_bytes(process.strip())
         if size > MAX_PROGRAM_BYTES:
             raise ConfigError(f"{where}[{i}]: a program name of {size} bytes is "
                               f"longer than the {MAX_PROGRAM_BYTES} a file name may be")
@@ -196,14 +203,14 @@ def check_programs(processes: object, where: str) -> list[str]:
     return [process.strip() for process in programs]
 
 
-def game_lighting(data: object, where: str) -> Lighting:
+def game_lighting(data: object, where: str, said: Said) -> Lighting:
     """One keyboard model's lighting as a game profile's file writes it: config.Lighting's
     fields with its Static color as `base`, and no `params`, which only an M profile has."""
-    return Lighting.from_json(data, where, color_field="base", with_params=False)
+    return Lighting.from_json(data, where, color_field="base", with_params=False, said=said)
 
 
 def lighting_json(entry: Lighting) -> dict:
-    """`entry` as a game profile's file writes it (game_lighting), its keys sorted."""
+    """`entry` as a game profile's file writes it (game_lighting), its `keys` sorted by name."""
     return {
         "mode": entry.mode,
         "effect": entry.effect,
@@ -229,11 +236,15 @@ class GameProfile:
     #: Its mouse bindings by mouse model, each by button name, as an M profile's
     #: (config.Profile.mouse).
     mouse: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: Its mouse bindings on the G-Shift layer, sparse, as an M profile's
+    #: (config.Profile.mouse_shift).
+    mouse_shift: dict[str, dict[str, str]] = field(default_factory=dict)
     #: Its own DPI stages and report rate by mouse product id; a mouse with none runs profile 1's
     #: stages and the rate in force without a game profile (Dpi.rate_for).
     mouse_tuning: dict[str, MouseTuning] = field(default_factory=dict)
-    #: The color a synced mouse shows while it is loaded, one for every mouse, or None for the
-    #: color the keyboard shows around its painted keys (the owner's decision of 2026-10-23).
+    #: The color a synced mouse (the owner's decision of 2026-10-23) and a synced headset's
+    #: lights show while it is loaded, one for every mouse, or None for the color the keyboard
+    #: shows around its painted keys.
     mouse_color: int | None = None
     #: Where it was loaded from, so save() can overwrite in place.
     path: Path | None = field(default=None, compare=False)
@@ -244,6 +255,19 @@ class GameProfile:
     #: Why its file would not load at the last `reload` or scan, which kept this copy as it
     #: was; None once it is written.
     unreadable: str | None = field(default=None, compare=False, repr=False)
+    #: Whether `gearbench-ctl save` can write over its file while it is `unreadable`: the
+    #: library read the file, and it would not load (library_files.Folder.invalid). Not one
+    #: that could not be opened, which the save reads first, nor one in a folder that could
+    #: not be listed, which the save writes through.
+    save_over: bool = field(default=False, compare=False, repr=False)
+
+    @property
+    def layers(self) -> Layers:
+        return Layers(self.bindings, self.shift, self.mouse, self.mouse_shift)
+
+    @layers.setter
+    def layers(self, layers: Layers) -> None:
+        self.bindings, self.shift, self.mouse, self.mouse_shift = layers
 
     def tuning(self, keys: list[str]) -> MouseTuning | None:
         """Its own stages and rate for the mouse `keys` name, its own product
@@ -270,24 +294,28 @@ class GameProfile:
             "bindings": layer_json(self.bindings),
             "shift": layer_json(self.shift),
             "mouse": mouse_json(self.mouse),
+            "mouse_shift": mouse_json(self.mouse_shift),
             "mouse_tuning": {k: t.to_json() for k, t in sorted(self.mouse_tuning.items())},
             "mouse_color": mouse_color_json(self.mouse_color),
         }
 
     @classmethod
-    def from_json(cls, data: object, where: str) -> GameProfile:
+    def from_json(cls, data: object, where: str, said: Said | None = None) -> GameProfile:
         """A game profile from its file's JSON: version 1's lighting, at the top of the file
         with its defaults for any field it lacks, is V1_KEYBOARD's, and an older format's mouse
-        bindings are config.read_mouse_bindings'."""
+        bindings are config.read_mouse_bindings'. What it says once goes in `said`, the
+        caller's record across its reads; None starts a record of this read alone."""
+        said = set() if said is None else said
         if not isinstance(data, dict):
             # After a colon, which a row or a line titled with the file's name drops
             # (library_files.unread_reason).
             raise ConfigError(f"{where}: a game profile is a JSON object, not {kind_of(data)}")
         version = check_version(data, where, VERSION, FIRST_VERSION)
         if version == FIRST_VERSION:
-            lighting = {V1_KEYBOARD: game_lighting(data, where)}
+            lighting = {V1_KEYBOARD: game_lighting(data, where, said)}
         else:
-            lighting = by_model(data.get("lighting"), f"{where}.lighting", game_lighting,
+            lighting = by_model(data.get("lighting"), f"{where}.lighting",
+                                lambda raw, at: game_lighting(raw, at, said),
                                 KEYBOARD_MODEL, "keyboard")
         # Only null is the default, as in config.json: false, 0 or "" is a wrong type, which
         # read as the default would be saved over the hand edit.
@@ -303,6 +331,7 @@ class GameProfile:
             bindings=g_key_layer(data.get("bindings"), f"{where}.bindings"),
             shift=g_key_layer(data.get("shift"), f"{where}.shift", shift=True),
             mouse=read_mouse_bindings(data.get("mouse"), f"{where}.mouse", version),
+            mouse_shift=read_mouse_shift(data.get("mouse_shift"), f"{where}.mouse_shift"),
             mouse_tuning=read_tuning(data.get("mouse_tuning"), f"{where}.mouse_tuning"),
             mouse_color=read_mouse_color(data.get("mouse_color"), f"{where}.mouse_color"),
         )
@@ -310,20 +339,20 @@ class GameProfile:
     # -- persistence -----------------------------------------------------
 
     @classmethod
-    def load(cls, path: Path) -> GameProfile:
+    def load(cls, path: Path, said: Said | None = None) -> GameProfile:
+        """The game profile in `path`, its file and stamp on it; `said` is from_json's."""
         stamp = file_stamp(path)
-        profile = from_file(path, lambda raw: cls.from_json(raw, path.name))
+        profile = from_file(path, lambda raw: cls.from_json(raw, path.name, said))
         profile.path, profile.disk_stamp = path, stamp
         return profile
 
     def check_unchanged(self) -> None:
         """Raise ConfigError if its file would not load when last read (`unreadable`) or has
         changed on disk since. A reload does not take a file that still will not load, so that
-        refusal names `gearbench-ctl save` too, unless the folder could not be listed: the
-        save writes through that folder."""
+        refusal names `gearbench-ctl save` too where the save can write over it
+        (`save_over`)."""
         if self.unreadable is not None:
-            save = ("" if self.unreadable.startswith(FOLDER_UNLISTED.partition("{}")[0])
-                    else ", or `gearbench-ctl save` writes the daemon's copy over it")
+            save = f", or {SAVE_OVER}" if self.save_over else ""
             raise FileUnreadable(f"{self.path} could not be read ({self.unreadable}); nothing "
                                  f"is saved over it; {FIX_AND_RELOAD}{save}")
         if self.changed():
@@ -391,10 +420,11 @@ class GameProfile:
         return target
 
 
-def layers_of(keys: dict, shift: dict, mouse: dict[str, dict[str, str]]) -> list[dict]:
-    """A profile's layers of bindings, an M profile's or a game profile's: its G keys', its MR
-    layer's and each mouse model's."""
-    return [keys, shift, *mouse.values()]
+def layers_of(keys: dict, shift: dict, mouse: dict[str, dict[str, str]],
+              mouse_shift: dict[str, dict[str, str]]) -> list[dict]:
+    """A profile's layers of bindings, an M profile's or a game profile's: its G keys' and each
+    mouse model's, on the base layer and on the G-Shift layer."""
+    return [keys, shift, *mouse.values(), *mouse_shift.values()]
 
 
 def layer_in_force(overlay: GameProfile | None, profile: Profile) -> GameProfile | Profile:
@@ -402,11 +432,23 @@ def layer_in_force(overlay: GameProfile | None, profile: Profile) -> GameProfile
     return overlay if overlay is not None else profile
 
 
+def key_layer_in_force(overlay: GameProfile | None, profile: Profile,
+                       shift: bool = False) -> dict[str, str | None]:
+    """The G key bindings of the layer in force (layer_in_force), its G-Shift layer's with
+    `shift`: the profile's own dict, so a bind written to it lands in the profile. The
+    daemon's key presses and the window's board both read it, so the board shows what a
+    key sends."""
+    layers = layer_in_force(overlay, profile).layers
+    return layers.shift if shift else layers.keys
+
+
 class Library(FolderLibrary[GameProfile]):
     """The set of game profiles on disk."""
 
     def __init__(self, directory: Path | None = None) -> None:
         super().__init__(directory or profiles_dir(), "game profile")
+        #: What its reads have said once: the daemon's library reads every 5 s.
+        self.said: Said = set()
 
     def names(self) -> list[str]:
         return [p.name for p in self.all()]
@@ -417,19 +459,19 @@ class Library(FolderLibrary[GameProfile]):
         return list_folder(self.directory)
 
     def all(self) -> list[GameProfile]:
-        return self.read(GameProfile.load)
+        return self.read(lambda path: GameProfile.load(path, self.said))
 
     def get(self, name: str) -> GameProfile | None:
         return by_name(self.all(), name)
 
-    def why_unread(self, file: str | None) -> str | None:
+    def why_unread(self, file: str) -> str | None:
         """Why the last `all()` did not read `file`, in words: while the folder could not be
         listed, FOLDER_UNLISTED's; else its entry in `unread()`, or None, as for a file it read,
         one shadowed or one not there. A message that names the file holds the folder's path,
         so the folder's part gives only the reason."""
         if self.unlisted_reason is not None:
             return FOLDER_UNLISTED.format(self.unlisted_reason)
-        return None if file is None else dict(self.unread()).get(file)
+        return dict(self.unread()).get(file)
 
     def delete(self, name: str) -> bool:
         profile = self.get(name)

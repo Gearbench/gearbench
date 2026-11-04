@@ -49,6 +49,10 @@ class LightingState:
     direction: str
     #: Pulsar Point's second color, for the Second color row.
     second_color: int = DEFAULT_SECOND_COLOR
+    #: The background as the file holds it, kept while the board is disabled and drawn
+    #: black, for the switch to Static or an animation (choose_mode). Taken from the file and
+    #: each paint sent (LightingCard.push_lighting), since the daemon saves its base.
+    stored_background: int = DEFAULT_BACKGROUND
 
     @classmethod
     def placeholder(cls) -> LightingState:
@@ -73,13 +77,17 @@ class LightingState:
         (the owner's decision of 2026-09-23), since `color` can hold the brush or the black a
         disabled board is drawn in, and sending it would save it over the Static color. An
         animation runs in the Static color too. Off, the disabled effect, draws both colors
-        black, as adopt_lighting draws a disabled board. The brush is not kept."""
+        black, as adopt_lighting draws a disabled board; Static or an animation after it
+        brings the stored background back, so the next Per-key paint does not save black
+        over it. Per-key straight from Off keeps the black. The brush is not kept."""
         shown = 0x000000 if mode == OFF else self.static_color
         moved = mode != PER_KEY and self.color != shown
         if moved:
             self.color = shown
         if mode == OFF:
             self.background = 0x000000
+        elif mode != PER_KEY:
+            self.background = self.stored_background
         self.mode = mode
         return moved
 
@@ -140,12 +148,14 @@ def adopt_lighting(overlay: GameProfile | None, profile: Profile,
     the profile's own, never inferred from its keys; an animation shows in its place, with the
     Static color it takes (the owner's decision of 2026-09-24). An animation the keyboard lacks
     shows the mode, as the board shows it static (Paint.write_lit). Off shows in place of
-    Static under the disabled effect, where the keyboard reports it (the user's decision of
+    Static under the disabled effect, where the keyboard reports it (the owner's decision of
     2026-10-27); a Per-key layout's keys show over it, so Per-key shows there. The lighting is
     the model's own, or what copy first gives it, as the daemon shows it
     (keyboard.shown_lighting).
     """
-    layer = shown_lighting(layer_in_force(overlay, profile).lighting, *shown_on)[0]
+    layer = shown_lighting(layer_in_force(overlay, profile).lighting, shown_on.model,
+                           shown_on.leader, shown_on.effects, shown_on.per_key,
+                           follows=shown_on.follows)[0]
     stored = layer.color
     # Drawn dark, but `stored` is kept for the switch back to Static once a paint turns the
     # board on (the owner's call of 2026-09-23).
@@ -158,4 +168,4 @@ def adopt_lighting(overlay: GameProfile | None, profile: Profile,
     else:
         shown = layer.effect if layer.effect in animations else layer.mode
     return LightingState(shown, static, background, dict(layer.keys), stored, speeds, direction,
-                         layer.second_color)
+                         layer.second_color, layer.background)

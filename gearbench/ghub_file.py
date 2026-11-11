@@ -10,6 +10,7 @@ hands ghub.py the document to map. Nothing here writes the file or a setting.
 from __future__ import annotations
 
 import contextlib
+import re
 import sqlite3
 import tempfile
 import time
@@ -41,6 +42,14 @@ MAX_SCHEMA_SQL_BYTES = 16 << 10
 #: parses the whole schema, unselected views included. The limit is process-wide and can only
 #: be lowered; nothing else here uses SQLite.
 HEAP_BYTES = 256 << 20
+
+#: How SQLite stores a table's schema entry: CREATE TABLE and then the name, whatever the
+#: statement said between them. Written by hand, an entry can say CREATE TABLE IF NOT EXISTS
+#: data, which SQLite skips where a view or a virtual table already has the name in another
+#: case, so the entry says "table" and the SELECT reads the other (SQLite 3.46.1, measured
+#: 2026-11-06). Nothing need follow the name here: SQLite calls an entry malformed whose
+#: statement makes a table of another name.
+STORED_TABLE = re.compile(r"""CREATE TABLE ["'`\[]?data""")
 
 #: The refusal of a -wal owned by a different account from the entry it sits beside.
 OTHER_OWNER = "{wal}: owned by a different account from {db}; copy both into a folder of your own"
@@ -194,8 +203,11 @@ def _check_schema(connection: sqlite3.Connection, name: str) -> None:
     calls too big. A view, a virtual table or a generated column is code the
     file's author wrote, which the SELECT would run."""
     try:
+        # NOT INDEXED: an entry can put an index on SQLite's own table, and a covering one
+        # answers this query from its own bytes, not the entries SQLite loaded (SQLite
+        # 3.46.1, measured 2026-11-06).
         found = connection.execute(
-            "SELECT type, sql FROM sqlite_schema WHERE name = 'data'").fetchall()
+            "SELECT type, sql FROM sqlite_schema NOT INDEXED WHERE name = 'data'").fetchall()
     except sqlite3.DataError as exc:
         # This first query parses every schema entry under SQLITE_LIMIT_SQL_LENGTH,
         # so a TOOBIG here is the schema's, not the settings row's. One entry over it
@@ -206,7 +218,7 @@ def _check_schema(connection: sqlite3.Connection, name: str) -> None:
         raise GhubError(f"{name} is not G HUB's settings database: a schema entry is "
                         f"larger than {size_words(MAX_SCHEMA_SQL_BYTES)}") from None
     if (len(found) != 1 or found[0][0] != "table"
-            or not str(found[0][1]).startswith("CREATE TABLE")):
+            or STORED_TABLE.match(str(found[0][1])) is None):
         raise GhubError(f"{name} is not G HUB's settings database: it has no plain data table")
     if any(column[6] for column in connection.execute("PRAGMA table_xinfo(data)")):
         raise GhubError(f"{name} is not G HUB's settings database: its data table has a "

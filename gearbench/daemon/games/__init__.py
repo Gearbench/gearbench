@@ -256,8 +256,9 @@ class Games:
         """What `reload` and `status` say while the loaded profile's file
         was not read at the last reload or at a scan (scan_library), until a
         reload reads it or `save` writes over it, which fails where the file could not be
-        opened, since the save reads it first, or the folder could not be listed, since the
-        write goes through that folder (GameProfile.save_over)."""
+        opened, since the save reads it first, a folder is at its name, which the save cannot
+        replace, or the folder could not be listed, since the write goes through that folder
+        (GameProfile.save_over)."""
         overlay = self.overlay
         if overlay is None or overlay.unreadable is None:
             return None

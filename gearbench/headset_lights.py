@@ -14,8 +14,10 @@ fn 8 answers invalid function gives no such guard, so whether its effects persis
 unknown: its writes are refused (`NO_CONTROL`), the effect never sent.
 
 Each color of an effect in RAM goes out `corrected`, as G HUB sends a G933's: sent as it is,
-a dark red showed pink on a G933 and an orange yellow (the owner's eye, 2026-10-26). A
-stored effect's color goes as it is, as G HUB stores it.
+a dark red showed pink on a G933 and an orange yellow (the owner's eye, 2026-10-26). The
+correction is the last step before the wire, after the daemon has scaled a color for the
+brightness: what the user is shown and what is saved stay the color asked for. A stored
+effect's color goes as it is, as G HUB stores it.
 """
 
 from __future__ import annotations

@@ -150,8 +150,9 @@ class Battery:
 
     def words(self) -> str:
         """`G915: 80%, charging`, one line of the menu and the tooltip, the reading in the
-        window's words (battery.level_words), and a device that does not answer in its Status
-        dot's, but a keyboard on its cable, which is only "not answering"."""
+        window's words (battery.level_words). A device that does not answer adds when a kept
+        reading was taken, or else is "asleep or switched off", but a keyboard on its cable, which
+        is only "not answering"."""
         said = level_words(self.percent, self.approximate, self.state)
         if not said and not self.cabled:
             unread = f"battery {NOT_READ}" if self.answering else ASLEEP_OR_SWITCHED_OFF

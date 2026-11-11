@@ -13,7 +13,7 @@
 %global py3_shebang_flags I
 
 Name:           gearbench
-Version:        1.3.0
+Version:        1.3.1
 Release:        1%{?dist}
 Summary:        Lighting, G keys, DPI and macros for Logitech G keyboards, mice and headsets
 License:        GPL-3.0-or-later AND CC0-1.0 AND Apache-2.0 AND (LGPL-3.0-only OR CC-BY-SA-3.0)

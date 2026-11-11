@@ -30,6 +30,7 @@ from .settings_files import (
     ConfigError,
     behind_link,
     link_to_nothing,
+    save_writes_over,
     shown_path,
     sync_removal,
     version_problem,
@@ -250,9 +251,7 @@ class Folder[N: Titled]:
     unlisted: str | None = None
     #: The files in `skipped` that loaded, left out for another file of the same name.
     shadowed: set[str] = field(default_factory=set)
-    #: The files in `skipped` whose read raised a ConfigError, which a save may write over;
-    #: not one whose read raised an OSError, such as Permission denied, which a save that
-    #: reads the file first meets too.
+    #: The files in `skipped` a save may write over (save_writes_over).
     invalid: set[str] = field(default_factory=set)
 
 
@@ -367,7 +366,7 @@ def read_folder[N: Titled](directory: Path, load: Callable[[Path], N],
             # stops loading looks deleted and a macro that stops working like a lost binding.
             warnings.skip(path, failure)
             folder.skipped.append((path.name, reason(failure)))
-            if isinstance(exc, ConfigError):
+            if save_writes_over(path, exc):
                 folder.invalid.add(path.name)
     # One file per slug, since every lookup goes by slug: a second file with the same name,
     # a file manager's copy say, could be listed but never addressed, and one that sorts

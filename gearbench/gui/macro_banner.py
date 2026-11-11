@@ -15,6 +15,7 @@ from gi.repository import Adw, GLib
 
 from ..macros import MACRO_RUNNING as RUNNING, MACRO_STARTS, REPEAT_WORDS
 from ..wording import countdown_seconds, number
+from .style import displayable
 
 if TYPE_CHECKING:                       # pragma: no cover
     from .worker import Call
@@ -84,12 +85,12 @@ class MacroBanner:
         name, repeat, due = self.running
         now = time.monotonic()
         if due is not None and (left := countdown_seconds(due - now)) > 0:
-            self.banner.set_title(MACRO_STARTS.format(name=name, seconds=left))
+            self.banner.set_title(displayable(MACRO_STARTS.format(name=name, seconds=left)))
             # The count drops once `due - now` falls to `left - 1`: 1 to 1000 ms from now.
             wait = math.ceil((due - now - (left - 1)) * 1000)
         else:
-            self.banner.set_title(
-                MACRO_RUNNING.format(name=name, mode=REPEAT_WORDS.get(repeat, repeat)))
+            self.banner.set_title(displayable(
+                MACRO_RUNNING.format(name=name, mode=REPEAT_WORDS.get(repeat, repeat))))
             wait = MACRO_WATCH_MS
         self.banner.set_revealed(True)
         self._watch = GLib.timeout_add(wait, self._on_watch)

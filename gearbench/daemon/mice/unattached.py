@@ -3,11 +3,13 @@ whose setup was refused at its last attach (`setup_refused`; not once its probe 
 unanswered, `probe_unanswered`), each said once in the journal. They give `problems` its first
 entries and the error of a command that needs a mouse while none is attached
 (`none_attached`), and tell `attached.asked` why the mouse it was asked for is missing
-(`found`)."""
+(`found`). It also holds a kept node's notifications back once an attach one started goes
+unanswered (`notice_missed`, `holds_back`). Nothing here sends anything to a mouse."""
 
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from ...hidpp import NO_RULE, DeviceGone, HidppFailure
@@ -15,6 +17,7 @@ from ...mouse import CABLED_IDS as MOUSE_CABLED, MODELS, find_attached_mice
 from ...wording import reason
 from ..shared import (
     DEVICE_NOT_SET_UP,
+    MOUSE_RETRY,
     NODE_DENIED,
     failure_reason,
     node_denied,
@@ -37,7 +40,8 @@ def denied_problem(path: Path, product: int) -> str:
 
 
 class Unattached:
-    """The mice found and not attached, and what the journal said of each."""
+    """The mice found and not attached, what the journal said of each, and until when each
+    kept node's notifications start no attach."""
 
     def __init__(self, mice: Mice) -> None:
         self.mice = mice
@@ -49,6 +53,9 @@ class Unattached:
         self._not_set_up: dict[str, tuple[int, str]] = {}
         #: By path, the line said for the mouse whose setup was refused there (said_once).
         self._not_set_up_said: dict[str, str] = {}
+        #: By path, until when a notification on a kept node starts no attach (notice_missed),
+        #: monotonic.
+        self._held_back: dict[str, float] = {}
 
     def open_refused(self, path: Path, exc: PermissionError) -> None:
         """Say that the mouse node at `path` cannot be opened: at warning once per node, a repeat
@@ -82,6 +89,27 @@ class Unattached:
         its setup is not (setup_refused)."""
         log.debug("mouse on %s did not answer the probe: %s", path, exc)
         self._not_set_up.pop(str(path), None)
+
+    def notice_missed(self, path: str) -> float:
+        """Say that the attach a notification started on the kept node at `path` went
+        unanswered, and hold that node's notifications back for MOUSE_RETRY (holds_back), since a
+        probe that misses costs the loop 1.5 s and each report queued would start one. Answers
+        when that ends: one held back may be the mouse's link-up, so the retry asks it by then."""
+        log.info("the mouse on %s did not answer; still waiting for it", path)
+        self._held_back[path] = until = time.monotonic() + MOUSE_RETRY
+        return until
+
+    def holds_back(self, path: str) -> bool:
+        """Whether a notification on the kept node at `path` starts no attach yet."""
+        return time.monotonic() < self._held_back.get(path, 0.0)
+
+    def hold_left(self) -> float:
+        """Seconds until the first hold in force on a kept node's notifications ends, inf with
+        none: a retry that misses inside one comes again by then, since one held back may be
+        the mouse's link-up."""
+        now = time.monotonic()
+        return min((until - now for until in self._held_back.values() if until > now),
+                   default=float("inf"))
 
     def set_up(self, path: Path) -> None:
         """Forget what was said of the node at `path`, whose mouse is set up now."""
@@ -123,7 +151,9 @@ class Unattached:
                 *self.not_set_up()]
 
     def problems(self) -> list[tuple[str, str]]:
-        """`problems`' entries for the mice found and not attached, as (code, message)."""
+        """`problems`' entries for the mice found and not attached, as (code, message):
+        mouse_no_permission for each of denied_mice, then mouse_not_set_up for each of
+        not_set_up."""
         return [*(("mouse_no_permission", denied_problem(path, product))
                   for path, product in self.denied_mice()),
                 *(("mouse_not_set_up", why) for _product, why in self.not_set_up())]

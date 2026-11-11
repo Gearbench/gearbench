@@ -171,7 +171,7 @@ def read_cookie(number: int, environ: Mapping[str, str],
     try:
         data = read_capped(path, MAX_XAUTHORITY)
     except (ConfigError, OSError) as exc:
-        log.debug("no X cookie: %s", exc)
+        log.debug("no X cookie: %s", escaped(exc))
         return None
     # gethostname decodes the kernel's bytes with surrogateescape, and libxcb compares those
     # bytes: a strict encode raises on a name that is not UTF-8.

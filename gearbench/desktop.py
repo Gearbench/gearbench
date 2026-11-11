@@ -28,7 +28,7 @@ from .dbusloop import (
     utf8,
 )
 from .sni import SHELL, TrayExport
-from .wording import SERVICE
+from .wording import SERVICE, escaped
 
 if TYPE_CHECKING:
     from gi.repository import Gio, GLib
@@ -124,7 +124,6 @@ def session_class() -> str | None:
     # and times out in GDBus's 25 s.
     cancellable = Gio.Cancellable()
     timer = threading.Timer(CALL_TIMEOUT, cancellable.cancel)
-    timer.daemon = True
     try:
         timer.start()
         conn = Gio.DBusConnection.new_for_address_sync(
@@ -294,7 +293,7 @@ class Desktop:
         """A connect that failed, or a bus that hung up right after Hello, which no "closed"
         handler tries again: said once a topic, and tried again further apart."""
         self._loop.say(f"connect {bus.name}", f"cannot connect to the {bus.name} bus at "
-                       f"{bus.address}: {why}; {trying_again()}")
+                       f"{escaped(bus.address)}: {why}; {trying_again()}")
         self._retry(bus)
 
     def _connected(self, bus: Bus) -> None:
@@ -303,7 +302,7 @@ class Desktop:
             log.info("connected to the %s bus again", bus.name)
             self._lost.discard(bus.name)
         else:
-            log.debug("connected to the %s bus at %s", bus.name, bus.address)
+            log.debug("connected to the %s bus at %s", bus.name, escaped(bus.address))
         if bus is self._system:
             self._setup_system(bus)
         else:
@@ -707,7 +706,7 @@ class Desktop:
             (watch_id,) = reply
             if self._session.owners.get(IDLE_MONITOR) != owner:
                 return          # that owner is gone, and its watches with it
-            if epoch != self._watch_epochs.get(group, 0) or group not in self._wanted:
+            if epoch != self._watch_epochs[group] or group not in self._wanted:
                 self._loop.call(self._session, owner, IDLE_MONITOR_PATH, IDLE_MONITOR,
                                 "RemoveWatch", self._loop.glib.Variant("(u)", (watch_id,)),
                                 None)
@@ -718,7 +717,7 @@ class Desktop:
 
         def refused(err: GLib.Error) -> None:
             if (self._session.owners.get(IDLE_MONITOR) != owner
-                    or epoch != self._watch_epochs.get(group, 0)):
+                    or epoch != self._watch_epochs[group]):
                 return          # that owner is gone, or the group's watch was removed since
             self._adding.discard(group)
             if not self._loop.benign(err):
@@ -727,7 +726,7 @@ class Desktop:
                 # The daemon may not ask for this group's watch again: a synced
                 # mouse's is asked for once, as the desktop goes idle.
                 self._loop.timeout(RETRY, lambda: self.add_user_active_watch(group)
-                                   if epoch == self._watch_epochs.get(group, 0) else None)
+                                   if epoch == self._watch_epochs[group] else None)
         self._loop.call(self._session, owner, IDLE_MONITOR_PATH, IDLE_MONITOR,
                         "AddUserActiveWatch", None, "(u)", added, refused)
 

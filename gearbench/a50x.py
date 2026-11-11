@@ -421,7 +421,9 @@ def open_a50x(path: str | os.PathLike[str], model: Model, framing: Framing) -> A
 
 class A50X:
     """A model's channel and the requests its record sends (Model.sent), each feature at the
-    index the root lookup found."""
+    index the root lookup found. It gives the node's queue and events itself (`pending`,
+    `pump`, `next_event`), so a caller reads no name on the channel, the bridge's or the
+    node's."""
 
     def __init__(self, dev: Centurion, model: Model) -> None:
         #: The node's channel, and the channel the requests go on: the node's, or for a

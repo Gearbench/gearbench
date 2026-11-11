@@ -25,7 +25,13 @@ from ..mouse import (
 from ..onboard import stage_dpi, stages_words
 from ..settings_files import backup_dir, shown_path
 from ..wording import capitalized, word_list
-from .style import PROFILE_WRITES_WAIT, explain, header_spinner, show_header_spinner
+from .style import (
+    PROFILE_WRITES_WAIT,
+    displayable,
+    explain,
+    header_spinner,
+    show_header_spinner,
+)
 
 if TYPE_CHECKING:                       # pragma: no cover
     from .mouse_page import OfferWrite
@@ -307,7 +313,7 @@ class OnboardCard:
         self._other = other_profile(onboard.get("running_profile"))
         if not onboard:
             self.enable_row.set_subtitle(
-                capitalized(NO_ONBOARD.format(info.get("name") or "mouse")))
+                displayable(capitalized(NO_ONBOARD.format(info.get("name") or "mouse"))))
             return
         # Neither is said of a profile in doubt: Re-apply…'s dialog would say the write
         # changes nothing, and an edit over a bad CRC is refused.

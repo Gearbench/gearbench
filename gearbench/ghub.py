@@ -782,9 +782,10 @@ class _Reader:
                    where: str) -> tuple[str, int]:
         """Which of `holders`, the keys (device, number) bound under the name `key`, the G key
         at `where` takes its card from on `layer` (bank, shifted): of those whose slot of it
-        holds a card id, the first whose card is the user's, not its factory_card, else the
-        first; else the first with a slot of it; else the first of all. Another with a card
-        of the user's, not the same, is said in `skipped`."""
+        holds a card id, the first whose card is the user's, not its factory_card, so the
+        G915's before the G815's, by KEYBOARDS' order (the owner's decision of 2026-10-19),
+        else the first; else the first with a slot of it; else the first of all. Another
+        with a card of the user's, not the same, is said in `skipped`."""
         on = {(device, n): slots[device, f"g{n}", *layer] for device, n in holders
               if (device, f"g{n}", *layer) in slots}
         # A slot with no card id holds no card (card_action) to take over another keyboard's.

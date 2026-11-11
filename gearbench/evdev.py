@@ -192,7 +192,8 @@ class EventReader:
         still queued (evdev_handle_get_val), so a change made after the drain's last read is
         only in that state. Nothing tells it from one a drop lost, so it goes in the place of
         the first drop no press, release or autorepeat of its key follows, and at the end only
-        where one follows the last drop."""
+        where one follows the last drop. Where the key state's read fails, nothing is added.
+        Both placements come from the kernel's source and are not yet checked on the mouse."""
         kept: list[tuple[int, int, int] | None] = []  # None in each drop's place
         skipping = False
         for event in events:

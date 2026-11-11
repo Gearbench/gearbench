@@ -54,7 +54,8 @@ def start_daemon(run: pipewire_client.Run = subprocess.run) -> tuple[int, str]:
     so the read that follows finds one running, and 0 and NOT_LISTENING if none does within
     SOCKET_WAIT.
     """
-    done = run(START_COMMAND, check=False, capture_output=True, text=True, timeout=START_TIMEOUT)
+    done = run(START_COMMAND, check=False, capture_output=True, text=True, errors="replace",
+               timeout=START_TIMEOUT)
     if done.returncode != 0:
         return done.returncode, done.stderr.strip()
     deadline = time.monotonic() + SOCKET_WAIT

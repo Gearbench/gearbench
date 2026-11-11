@@ -153,11 +153,9 @@ class Readings:
         kept = self._standing()
         if kept is not None:
             return kept[2]
-        dev = cast("Hidpp", keyboard.dev)
-        unread = self._battery_unread
-        if (unread is not None and unread[0] is dev
-                and time.monotonic() - unread[1] < KEYBOARD_BATTERY_INTERVAL):
+        if self._read_held():
             return None
+        dev = cast("Hidpp", keyboard.dev)
         try:
             reading = read_battery(dev, keyboard.keyboard_product, keyboard.model_name())
             if reading is not None:
@@ -183,6 +181,13 @@ class Readings:
                 keyboard.keyboard_answers()
             self._unread(dev)
             return None
+
+    def _read_held(self) -> bool:
+        """Whether a read of the handle attached now gave no reading within
+        KEYBOARD_BATTERY_INTERVAL (_battery_unread)."""
+        unread = self._battery_unread
+        return (unread is not None and unread[0] is self.keyboard.dev
+                and time.monotonic() - unread[1] < KEYBOARD_BATTERY_INTERVAL)
 
     def _unread(self, dev: Hidpp) -> None:
         """Note a read of `dev` behind its receiver that gave no reading (_battery_unread),
@@ -235,12 +240,17 @@ class Readings:
         """The keyboard's reading for the battery notices, or None. On its cable the keyboard is
         charging and not asked. A reading already counted is read again, so one cannot count
         twice, after a probe on RECEIVER_SW_CONTROL's budget: behind its receiver, the only
-        route left here, one asleep answers past the probe's own 1.5 s."""
+        route left here, one asleep answers past the probe's own 1.5 s. While a read that gave
+        none holds reads off (_read_held), neither the read nor its probe goes, and a report
+        kept stands."""
         if (power := self.cable_power()) is not None:
             return power
         keyboard = self.keyboard
         kept = self._standing()
         if kept is None or kept[1] == self._battery_counted:
+            if self._read_held():
+                # No read would follow: a report kept stands, and no probe goes.
+                return None
             if not keyboard.keyboard_answers(RECEIVER_SW_CONTROL):
                 return None
             self.battery_read = None

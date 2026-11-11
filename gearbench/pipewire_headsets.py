@@ -3,7 +3,7 @@ card and output are found in pw-dump's objects and the words that name them (HEA
 HEADSET_KEYED), which of them are plugged in with their output (present, card_of, output_of)
 and which one the chain plays to (pick), and the ones plugged in with nothing to play to
 (stranded). Standard library only, and of the package pipewire_client, g432's models and
-hidpp's vendor id alone, so the Spatial unit's process loads no device module.
+hidpp's vendor id alone, so the Spatial unit's process loads neither a50x nor centurion.
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ from . import pipewire_client
 from .g432 import MODELS as G432_MODELS
 from .hidpp import VENDOR_ID
 
+#: The A50 Gen 4's card, outputs and profile set as PipeWire names them, defined here alone:
+#: the tests hold its WirePlumber rule and Gearbench's profile set to them.
 CARD = "alsa_card.usb-Astro_Gaming_Astro_A50-00"
 GAME = "alsa_output.usb-Astro_Gaming_Astro_A50-00.stereo-game"
 #: Hard-coded in the WirePlumber rule; the tests hold the rule to it.

@@ -6,9 +6,11 @@ used up its inotify instances, they keep their own pace.
 
 Any account can put events on the watch: utimensat(2) lets an account that may write a node
 set its times, every account may write /dev/null, and each such call is an IN_ATTRIB on the
-watch (inotify(7)). So the watch is read at most once a READ_GAP, and a full queue runs the
-looks within CABLE_LOOK and at their pace without the watch (pump), but brings the mice's
-attach retry forward only with a node's own event among them (named)."""
+watch (inotify(7)). So an IN_ATTRIB counts only on a node this user could not open at its last
+event, or at a node's first event since the start (_open); the watch is read at most once a
+READ_GAP; and a full queue runs the looks within CABLE_LOOK and at their pace without the
+watch (pump), but brings the mice's attach retry forward only with a node's own event among
+them (named)."""
 
 from __future__ import annotations
 
@@ -19,7 +21,15 @@ import selectors
 import time
 from typing import TYPE_CHECKING, cast
 
-from ..plug_watch import DEV, IN_CREATE, IN_Q_OVERFLOW, open_watch, read_events
+from ..plug_watch import (
+    DEV,
+    IN_ATTRIB,
+    IN_CREATE,
+    IN_DELETE,
+    IN_Q_OVERFLOW,
+    open_watch,
+    read_events,
+)
 from ..wording import reason
 from .shared import CABLE_LOOK, look_due, node_denied
 
@@ -62,6 +72,9 @@ class Plugs:
         self.fd: int | None = None
         #: A node came, went or was opened to this user since the looks last ran.
         self._news = False
+        #: The nodes this user could open at their last event: a further IN_ATTRIB on one opens
+        #: nothing, and any account that may write the node can bring it (pump).
+        self._open: set[str] = set()
         #: A node's own event came since the looks last ran, one made among them: a full
         #: queue names none (came).
         self._named = False
@@ -100,15 +113,16 @@ class Plugs:
         return unwatched if self.fd is None else LOOK_BACKSTOP
 
     def pump(self) -> None:
-        """Read what the watch reported. A hidraw node removed, or there and open to this
-        user, makes the looks due; one made that this user may not open yet, as the kernel
-        makes every node before udev grants it, is looked for at the IN_ATTRIB of udev's
-        grant, and at most CABLE_LOOK, the looks' own pace, after it was made in any case: one
-        made while another waits shares that one's time. So a node udev never grants is found
-        and its refusal said as soon as without the watch. A full queue makes them due
-        CABLE_LOOK after the watch last ran them, at once where that is past, or shares the
-        time a node made or an earlier full queue set. The watch then goes unread for READ_GAP
-        (came)."""
+        """Read what the watch reported. A hidraw node removed, made open to this user or with
+        an IN_ATTRIB that may have opened it to this user, at its first event or after one it
+        could not be opened at (_open), makes the looks due; one made that this user may not
+        open yet, as the kernel makes every node before udev grants it, is looked for at the
+        IN_ATTRIB of udev's grant, and at most CABLE_LOOK, the looks' own pace, after it was
+        made in any case: one made while another waits shares that one's time. So a node udev
+        never grants is found and its refusal said as soon as without the watch. A full queue
+        makes them due CABLE_LOOK after the watch last ran them, at once where that is past, or
+        shares the time a node made or an earlier full queue set. The watch then goes unread
+        for READ_GAP (came)."""
         # The loop reads the watch only while it runs and is not in its gap: start and came
         # register it, this and close unregister it.
         fd = cast("int", self.fd)
@@ -123,15 +137,21 @@ class Plugs:
                     self._grant_by = self._overflow_by
             elif not name.startswith(NODE_PREFIX):
                 continue
-            elif not node_denied(DEV / name):
+            elif node_denied(DEV / name):
+                self._open.discard(name)
+                if mask & IN_CREATE:
+                    self._named = True
+                    if self._grant_by is None:
+                        log.debug("%s made, not yet open to Gearbench; waiting for udev",
+                                  DEV / name)
+                        self._grant_by = now + CABLE_LOOK
+            elif not (mask & IN_ATTRIB and name in self._open):
                 log.debug("%s changed (inotify %#x); looking for devices now", DEV / name, mask)
                 self._news = self._named = True
-            elif mask & IN_CREATE:
-                self._named = True
-                if self._grant_by is None:
-                    log.debug("%s made, not yet open to Gearbench; waiting for udev",
-                              DEV / name)
-                    self._grant_by = now + CABLE_LOOK
+                if mask & IN_DELETE:
+                    self._open.discard(name)
+                else:
+                    self._open.add(name)
 
     def deadlines(self) -> list[float]:
         """When a node made waits no longer for udev's grant, or a full queue for its looks

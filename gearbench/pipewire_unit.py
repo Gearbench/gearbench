@@ -4,15 +4,16 @@ systemd and PipeWire give it, the wait after its start and the runtime folder a 
 OSError comes from (switch_folder); a node a unit of Gearbench's made (made_in), and each such
 node of some names (unit_nodes), and the node a chain's stream aims at (aimed_at); the default
 output or input, read and picked (default_sink, users_defaults, pick_default), and a
-pw-metadata write's outcome (written). Standard library only; every outside program goes
-through a `run` argument and `pipewire_client.run_program`, and a failure is a
-`pipewire_client.StepError` in words.
+pw-metadata write's outcome (written), or that of several (wrote_to, reached). Standard
+library only; every outside program goes through a `run` argument and
+`pipewire_client.run_program`, and a failure is a `pipewire_client.StepError` in words.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Collection, Sequence
+import re
+from collections.abc import Callable, Collection, Iterator, Sequence
 from pathlib import Path
 from typing import Literal, cast
 
@@ -37,13 +38,27 @@ RUNS_OR_STARTS = ("active", "activating")
 #: A switch-on's refusal when its unit stopped as it started, by the unit's description
 #: and its name.
 STOPPED = "{} stopped as it started: `journalctl --user -u {}` says why"
-#: Why a pw-metadata write did not go (written): WirePlumber keeps the "default" metadata.
+#: Why a pw-metadata write did not go (wrote_to): WirePlumber keeps the "default" metadata.
 NO_METADATA = "pw-metadata found no default metadata, which WirePlumber keeps"
+#: pw-metadata 1.6.2's line for the Metadata it took, by the id pw-dump lists it under, read
+#: from its format string (2026-11-06): it comes before the write's own line, which holds a
+#: name a client chose.
+FOUND = re.compile(r'^Found "default" metadata (\d+)$', re.MULTILINE)
+#: Why a write went to a Metadata default_metadatas does not count.
+NOT_WIREPLUMBERS = ("pw-metadata wrote to a default metadata another program made, not "
+                    "WirePlumber's: close that program")
 #: Why a pick that went did not show: WirePlumber did not make it the default in time.
 NOT_SHOWN = f"WirePlumber did not make it the default within {pipewire_client.SETTLE:g} s"
 #: What the "default" metadata keeps a default node of, as its keys end: an output, "sink",
 #: or an input, "source".
 type DefaultKind = Literal["sink", "source"]
+
+
+class WentUnread(str):
+    """Why a write's outcome is not known, in words: the write went, and the pw-dump after it
+    failed (reached, pick_default). A str to whatever says it."""
+
+    __slots__ = ()
 
 
 def transient_argv(unit: str, description: str, bound_to: str, *, after: str) -> list[str]:
@@ -128,7 +143,9 @@ def unit_nodes(objects: Sequence[object], names: Collection[str], unit: str
     systemd's `unit` made (pipewire_client.unit_of_process), as (id, props, pid), each of a
     name made twice included, by the pid PipeWire took from its client's socket
     (pipewire_client.node_pids): any client can name a node so, a sandboxed app and
-    pipewire-pulse for a pulse client among them, and a node with no maker (pipewire_client.node_client) is no unit's."""
+    pipewire-pulse for a pulse client among them, and a node with no maker
+    (pipewire_client.node_client) is no unit's. The gap: an unsandboxed program of the same
+    user can move itself into a cgroup of the unit's name."""
     return [(node, props, pid) for node, _info, props, pid in pipewire_client.node_pids(objects)
             if props.get("node.name") in names and pipewire_client.unit_of_process(pid) == unit]
 
@@ -140,20 +157,38 @@ def default_key(kind: DefaultKind, *, configured: bool = False) -> str:
     return f"default.{'configured.' if configured else ''}audio.{kind}"
 
 
-def default_named(objects: Sequence[object], key: str) -> str | None:
-    """The node name the "default" Metadata in pw-dump's objects holds under `key` for the
-    whole session, subject 0; None for none. A client that may use PipeWire's metadata
-    factory can make a Metadata of that name and fill it, so one counts only where its
-    client.id, which the factory sets, names a Client PipeWire did not restrict
-    (pipewire_client.trusted_clients); one with no client.id counts for none, as
-    pipewire_client.card_nodes' Devices."""
+def default_metadatas(objects: Sequence[object]) -> Iterator[dict]:
+    """Each "default" Metadata in pw-dump's objects that counts. A client that may use
+    PipeWire's metadata factory can make a Metadata of that name and fill it, so one counts
+    only where its client.id, which the factory sets, names a Client PipeWire did not
+    restrict (pipewire_client.trusted_clients); one with no client.id counts for none, as
+    pipewire_client.card_nodes' Devices. With PipeWire 1.6.2 and WirePlumber 0.5.13, the
+    session's "default" Metadata's client.id named WirePlumber's Client, whose
+    pipewire.access was unrestricted (measured 2026-10-30)."""
     trusted = pipewire_client.trusted_clients(objects)
     for obj in objects:
         if (isinstance(obj, dict) and obj.get("type") == "PipeWire:Interface:Metadata"
                 and isinstance(obj.get("props"), dict)
                 and obj["props"].get("metadata.name") == "default"
-                and pipewire_client.as_whole(obj["props"].get("client.id")) in trusted
-                and isinstance(obj.get("metadata"), list)):
+                and pipewire_client.as_whole(obj["props"].get("client.id")) in trusted):
+            yield obj
+
+
+def default_metadata(objects: Sequence[object]) -> int | None:
+    """The object.serial of the "default" Metadata in pw-dump's objects (default_metadatas),
+    None for none. PipeWire counts serials up, so a new one is a new Metadata, with none of
+    the old one's entries: WirePlumber makes it (scripts/metadata.lua), and it goes at each
+    of WirePlumber's stops."""
+    return next((serial for obj in default_metadatas(objects)
+                 if (serial := pipewire_client.as_whole(obj["props"].get("object.serial")))
+                 is not None), None)
+
+
+def default_named(objects: Sequence[object], key: str) -> str | None:
+    """The node name the "default" Metadata in pw-dump's objects (default_metadatas) holds
+    under `key` for the whole session, subject 0; None for none."""
+    for obj in default_metadatas(objects):
+        if isinstance(obj.get("metadata"), list):
             for item in obj["metadata"]:
                 value = item.get("value") if isinstance(item, dict) else None
                 if (isinstance(value, dict) and item.get("subject") == 0
@@ -189,14 +224,41 @@ def default_argv(name: str, kind: DefaultKind = "sink") -> list[str]:
 
 
 def written(run: pipewire_client.Run, argv: list[str]) -> str | None:
-    """Why the pw-metadata write `argv` did not go, in words; None once it went."""
+    """Why the pw-metadata write `argv` did not reach a Metadata default_metadatas counts, in
+    words; None once it did. pw-metadata 1.6.2 takes the first Metadata of the name PipeWire
+    lists and has no option to pick one (getopt_long with "hVr:lmdn:"), so a client's that
+    stayed through a WirePlumber restart would take the write: read from their sources, not
+    run. This says so with one pw-dump a write, and cannot stop the write; a WentUnread where
+    that pw-dump fails."""
+    return reached(run, [wrote_to(run, argv)])[0]
+
+
+def wrote_to(run: pipewire_client.Run, argv: list[str]) -> int | str:
+    """The id of the Metadata the pw-metadata write `argv` took (FOUND), else why it did not
+    go, in words."""
     try:
         done = pipewire_client.run_program(run, argv)
     except pipewire_client.StepError as err:
         return str(err)
-    # pw-metadata 1.6.2 says "set property:" for a write that went, and exits 0 saying
-    # nothing for a metadata it does not find (measured 2026-10-17).
-    return None if "set property:" in done.stdout else NO_METADATA
+    # pw-metadata 1.6.2 exits 0 saying nothing for a metadata it does not find (measured
+    # 2026-10-17).
+    found = FOUND.search(done.stdout)
+    return NO_METADATA if found is None else int(found[1])
+
+
+def reached(run: pipewire_client.Run, taken: Sequence[int | str]) -> list[str | None]:
+    """written's answer for each of `taken` (wrote_to), by one pw-dump for them all and none
+    where no write went: a client sets how many streams a caller moves."""
+    if all(isinstance(took, str) for took in taken):
+        return [str(took) for took in taken]
+    try:
+        counted = pipewire_client.dumped(
+            run, lambda objects: {obj.get("id") for obj in default_metadatas(objects)})
+    except pipewire_client.StepError as err:
+        unread = WentUnread(err)
+        return [took if isinstance(took, str) else unread for took in taken]
+    return [took if isinstance(took, str) else None if took in counted else NOT_WIREPLUMBERS
+            for took in taken]
 
 
 def aim_argv(stream: int, target: str) -> list[str]:
@@ -213,8 +275,9 @@ def pick_default(run: pipewire_client.Run, name: str, kind: DefaultKind = "sink"
                  ) -> str | None:
     """Make `name` the default of `kind`, the default output unless told, and wait up to
     pipewire_client.SETTLE for WirePlumber to pick it, which moves the streams that follow
-    the default with it: None once WirePlumber shows the pick, else why not, in words. A pick
-    not seen is not known to have gone, so the sound may still go where it did."""
+    the default with it: None once WirePlumber shows the pick, else why not, in words, a
+    WentUnread where a pw-dump failed after the write. A pick not seen is not known to have
+    gone, so the sound may still go where it did."""
     if (failed := written(run, default_argv(name, kind))) is not None:
         return failed
 
@@ -223,7 +286,7 @@ def pick_default(run: pipewire_client.Run, name: str, kind: DefaultKind = "sink"
             shown = pipewire_client.dumped(
                 run, lambda objects: default_named(objects, default_key(kind)))
         except pipewire_client.StepError as err:
-            return str(err)
+            return WentUnread(err)
         return None if shown == name else NOT_SHOWN
     return pipewire_client.waited(look, lambda failed: failed is not NOT_SHOWN)
 

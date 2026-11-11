@@ -97,7 +97,7 @@ def labels_of(app: outputs_state.App) -> tuple[str, ...]:
     """An App row's entries: CHOICE_LABELS, then where the program plays while elsewhere, so
     that Default output is a pick that moves it."""
     if elsewhere(app):
-        return (*CHOICE_LABELS, displayable(PLAYS_ON.format(app.plays_on)))
+        return (*CHOICE_LABELS, PLAYS_ON.format(app.plays_on))
     return CHOICE_LABELS
 
 
@@ -245,7 +245,8 @@ class OutputsGroup:
             self._balance_stop = stop_of(state.settings.balance)
             self._loading.put_value(self.balance, self._balance_stop)
         # The switch, not state.enabled, as for the switch itself above. A headset that sets
-        # its own balance has a Balance row of its own on its page.
+        # its own balance has a Balance row of its own on its page (the owner's decision of
+        # 2026-10-28).
         on = self.switch_row.get_active()
         self.balance_row.set_visible(on and self._headset not in outputs_unit.OWN_BALANCE)
         self.apps_row.set_visible(on)
@@ -269,8 +270,8 @@ class OutputsGroup:
                 self.apps_row.add_row(row)
         for app in apps:
             row = self.app_rows[app.key]
-            row.set_title(displayable(app.title))
-            row.set_subtitle(displayable(app_line(app)))
+            row.set_title(app.title)
+            row.set_subtitle(app_line(app))
             labels = labels_of(app)
             if labels != self._row_labels[app.key]:
                 self._row_labels[app.key] = labels
@@ -327,15 +328,16 @@ class OutputsGroup:
         self._worker.run(work, lambda result: self._acted(result, failed))
 
     def _acted(self, result: Result, failed: str) -> None:
-        """An action's end: each note a switch gave, or a move's, toasted, or its failure;
-        then the state read again, and once more FOLLOW_UP_MS later, as the Spatial sound
-        group reads after its actions."""
+        """An action's end: each note a switch gave, or a move's, toasted, or its failure,
+        and the window told (kept_up) of a failure or a note of a failed step; then the state
+        read again, and once more FOLLOW_UP_MS later, as the Spatial sound group reads after
+        its actions."""
         self._acting = False
         self._set_sensitive()
         notes = [result] if isinstance(result, str) else result if isinstance(result, list) else []
         for note in notes:
             toast_clause(self._toast, capitalized(note), outputs.DESCRIPTION)
-        if isinstance(result, Exception):
+        if isinstance(result, Exception) or pipewire_client.step_failed(notes):
             self._kept_up()
         if isinstance(result, OSError):
             # Only saving outputs.json raises one: systemctl's and PipeWire's arrive as

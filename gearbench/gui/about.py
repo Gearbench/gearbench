@@ -32,7 +32,7 @@ from ..mouse import MODELS as MOUSE_MODELS, find_attached_mice
 from ..settings_files import shown_path
 from ..uinput import UINPUT as UINPUT_NODE
 from ..wording import SERVICE, capitalized, ended, escaped, home_shortened
-from .style import ICONS
+from .style import ICONS, displayable
 from .worker import unreachable
 
 #: The journal section's command: the daemon's last lines and the user manager's about it.
@@ -209,5 +209,6 @@ def about_dialog() -> Adw.AboutDialog:
     dialog.add_legal_section(
         "Adwaita icons",
         "Icons from the Adwaita icon theme, the GNOME Project. https://www.gnome.org",
-        Gtk.License.CUSTOM, ADWAITA_LICENSE.format(GLib.markup_escape_text(shown_path(ICONS))))
+        Gtk.License.CUSTOM, ADWAITA_LICENSE.format(
+            GLib.markup_escape_text(displayable(shown_path(ICONS)))))
     return dialog

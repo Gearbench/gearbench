@@ -44,7 +44,7 @@ class UinputBanner:
                  if p["code"] in UINPUT_PROBLEMS}
         message = next((found[code] for code in UINPUT_PROBLEMS if code in found), None)
         if message is not None:
-            self.banner.set_title(f"{capitalized(message)}; {SEE_GUIDE}")
+            self.banner.set_title(displayable(f"{capitalized(message)}; {SEE_GUIDE}"))
         self.banner.set_revealed(message is not None)
 
 
@@ -60,7 +60,7 @@ class ToolsBanner:
         found = [p["message"] for p in status.get("problems") or ()
                  if p["code"] == "other_hid_tool"]
         if found:
-            self.banner.set_title("\n".join(found))
+            self.banner.set_title(displayable("\n".join(found)))
         self.banner.set_revealed(bool(found))
 
 

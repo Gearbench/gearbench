@@ -10,7 +10,7 @@ from gi.repository import Gio, GLib, Gtk
 
 from ..desktop import APP_NAME
 from ..sni import REGISTERING
-from ..wording import home_shortened, reason
+from ..wording import escaped, home_shortened, reason
 from . import import_dialog, pack_dialog
 from .about import about_dialog, gather
 from .keyboard_page import confirm_reload
@@ -87,9 +87,10 @@ class MainMenu:
                 return
             where = (f"{result.filename}: " if isinstance(result, OSError) and result.filename
                      else "")
-            # Pasted into a public issue, as debug_info's text is: no login in a path.
-            dialog.set_debug_info(home_shortened(
-                f"The debugging information could not be gathered: {where}{reason(result)}"))
+            # Pasted into a public issue, as debug_info's text is: no login in a path, and
+            # each control character as its escape.
+            dialog.set_debug_info(escaped(home_shortened(
+                f"The debugging information could not be gathered: {where}{reason(result)}")))
         self.win.worker.run(gather, gathered)
         dialog.present(self.win)
 

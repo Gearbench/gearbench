@@ -50,6 +50,7 @@ from ..settings_files import (
     FileUnreadable,
     changed_on_disk,
     file_stamp,
+    save_writes_over,
 )
 from ..uinput import UinputError, VirtualKeyboard, VirtualMouse
 from ..wording import (
@@ -207,16 +208,78 @@ LAYER_EDITS = {
 }
 
 
+#: How long systemctl and busctl each get to answer whether the machine is going down, in
+#: seconds: a stop that waits on them holds the power-off.
+SHUTDOWN_ASK_TIMEOUT = 2.0
+#: busctl's answer while logind prepares a power-off, reboot or halt (busctl(1)'s
+#: get-property prints the signature, then the value).
+PREPARING = "b true"
+
+
+def systemd_stopping() -> bool:
+    """Whether `systemctl is-system-running` answers "stopping", as it does for the whole of a
+    shutdown once systemd's own jobs have begun. Any other answer, an error or none is logged
+    and counts as not stopping."""
+    try:
+        done = subprocess.run(
+            ["systemctl", "is-system-running"],  # noqa: S607 -- the PATH is the user's own
+            check=False, capture_output=True, text=True, errors="replace",
+            timeout=SHUTDOWN_ASK_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        # A timeout's own text quotes the command as a Python list.
+        why = (f"took over {exc.timeout:g} s" if isinstance(exc, subprocess.TimeoutExpired)
+               else f"did not run ({reason(exc)})")
+        log.info("could not ask systemd whether the system is stopping: systemctl %s", why)
+        return False
+    state, error = done.stdout.strip(), done.stderr.strip()
+    # Any other answer, or an error, may be a power-off taken for a plain stop.
+    expected = state in ("running", "stopping") and not error
+    # A signal's end is no exit status (wording.ended).
+    how = (f"exit {done.returncode}" if done.returncode >= 0
+           else ended("systemctl", done.returncode).removeprefix("systemctl "))
+    log.log(logging.DEBUG if expected else logging.INFO,
+            "systemctl is-system-running answered %r, %s%s", state, how,
+            f": {escaped(error)}" if error else "")
+    return state == "stopping"
+
+
+def logind_preparing() -> bool:
+    """Whether logind's PreparingForShutdown is true. A desktop's session can end, and stop the
+    daemon with it, before systemd's own jobs begin: at a power-off on the owner's desktop
+    (2026-11-08) logind said the system would power off 36 ms before GNOME's session stopped
+    the daemon, and said it was powering down 18 ms after, and the daemon took the stop for a
+    plain one. A true answer is logged, since systemd's did not say so; an error or an answer
+    other than false is logged and counts as false."""
+    try:
+        done = subprocess.run(
+            ["busctl", "get-property", "org.freedesktop.login1",  # noqa: S607 -- as above
+             "/org/freedesktop/login1", "org.freedesktop.login1.Manager",
+             "PreparingForShutdown"],
+            check=False, capture_output=True, text=True, errors="replace",
+            timeout=SHUTDOWN_ASK_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        why = (f"took over {exc.timeout:g} s" if isinstance(exc, subprocess.TimeoutExpired)
+               else f"did not run ({reason(exc)})")
+        log.info("could not ask logind whether the system is shutting down: busctl %s", why)
+        return False
+    answer, error = done.stdout.strip(), done.stderr.strip()
+    preparing = answer == PREPARING and done.returncode == 0
+    log.log(logging.INFO if preparing or answer != "b false" or error else logging.DEBUG,
+            "logind's PreparingForShutdown answered %r, %s%s", answer,
+            f"exit {done.returncode}" if done.returncode >= 0
+            else ended("busctl", done.returncode).removeprefix("busctl "),
+            f": {escaped(error)}" if error else "")
+    return preparing
+
+
 class Daemon:
     def __init__(self) -> None:
         #: config.json's file_stamp at its last read or write here: a save refuses once it
         #: differs. Taken before the read, so an edit between the two is not taken as read.
         self._config_stamp = file_stamp(config_path())
         #: config.json's file_stamp when the last reload could not use it, why, and whether
-        #: `gearbench-ctl save` writes over it: not where the read failed, since the save
-        #: reads the file first for its backup (settings_files.keep_old_version). While the
-        #: file keeps that stamp, no reload takes it, so a refusal gives that error instead.
-        #: A save drops it.
+        #: `gearbench-ctl save` writes over it (save_writes_over). While the file keeps that
+        #: stamp, no reload takes it, so a refusal gives that error instead. A save drops it.
         self._reload_refused: tuple[tuple[int, int, int, int] | None, str, bool] | None = None
         #: config_error: why config.json could not be used at startup, or at a reload refused
         #: since, or None. While it is set, nothing is written over the file until a reload
@@ -591,7 +654,7 @@ class Daemon:
             keyboard.teardown_device()
             return hidpp_refusal(keyboard.model_name(), exc)
         except HidppFailure as exc:
-            return hidpp_refusal(self.keyboard.model_name(), exc)
+            return self.keyboard.refused(exc)
         except MouseError as exc:
             return mouse_refusal(exc)
         except (LightingError, UinputError) as exc:
@@ -756,7 +819,7 @@ class Daemon:
         try:
             config = Config.load(said=self.config_said)
         except (ConfigError, OSError) as exc:
-            self._reload_refused = (stamp, unusable(exc), isinstance(exc, ConfigError))
+            self._reload_refused = (stamp, unusable(exc), save_writes_over(config_path(), exc))
             if self.config_error is not None:
                 self.config_error = self._reload_refused[1]
             if isinstance(exc, ConfigError):
@@ -1102,34 +1165,14 @@ class Daemon:
     # -- shutdown --------------------------------------------------------
 
     def system_is_stopping(self) -> bool:
-        """Whether the machine is going down (a power-off, reboot or halt), not the daemon alone.
-
-        systemd answers "stopping" for the whole of a shutdown or reboot. Any other answer, or
-        none, counts as not shutting down: a keyboard wrongly lit is better than one wrongly dark.
-        GEARBENCH_ASSUME_SHUTDOWN=1 forces it, the only way to run the path without a reboot.
-        """
+        """Whether the machine is going down (a power-off, reboot or halt), not the daemon alone:
+        systemd says it is stopping, or logind that it is preparing to shut down. No answer from
+        either counts as not shutting down: a keyboard wrongly lit is better than one wrongly
+        dark. GEARBENCH_ASSUME_SHUTDOWN=1 forces it, the only way to run the path without a
+        reboot."""
         if os.environ.get("GEARBENCH_ASSUME_SHUTDOWN") == "1":
             return True
-        try:
-            done = subprocess.run(
-                ["systemctl", "is-system-running"],  # noqa: S607 -- the PATH is the user's own
-                check=False, capture_output=True, text=True, timeout=2.0)
-        except (OSError, subprocess.SubprocessError) as exc:
-            # A timeout's own text quotes the command as a Python list.
-            why = (f"took over {exc.timeout:g} s" if isinstance(exc, subprocess.TimeoutExpired)
-                   else f"did not run ({reason(exc)})")
-            log.info("could not ask systemd whether the system is stopping: systemctl %s", why)
-            return False
-        state, error = done.stdout.strip(), done.stderr.strip()
-        # Any other answer, or an error, may be a power-off taken for a plain stop.
-        expected = state in ("running", "stopping") and not error
-        # A signal's end is no exit status (wording.ended).
-        how = (f"exit {done.returncode}" if done.returncode >= 0
-               else ended("systemctl", done.returncode).removeprefix("systemctl "))
-        log.log(logging.DEBUG if expected else logging.INFO,
-                "systemctl is-system-running answered %r, %s%s", state, how,
-                f": {error}" if error else "")
-        return state == "stopping"
+        return systemd_stopping() or logind_preparing()
 
     def shutdown(self) -> None:
         """Let go of everything, and say in one line what was let go."""

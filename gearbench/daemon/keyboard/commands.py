@@ -105,11 +105,14 @@ def parse_zones(raw: object, field: str) -> dict[int, int]:
         raise TypeError(f"{field} is an object of zone ids and colors, not {kind_of(raw)}")
     zones = {}
     for z, c in raw.items():
-        # int() also reads "1_0" and "+10" as 10, which would name zone 10 twice.
+        # As str() writes it: int() also reads "1_0", "+10", " 10" and "010" as 10, which would
+        # name zone 10 twice.
         try:
             zone = whole_number(z, field)
         except ValueError:
-            raise ValueError(f"{field}: {z!r} is not a zone id") from None
+            zone = None
+        if zone is None or str(zone) != z:
+            raise ValueError(f"{field}: {z!r} is not a zone id")
         zones[zone] = parse_color(c, f"{field}.{z}")
     return zones
 

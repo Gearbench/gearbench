@@ -11,6 +11,7 @@ from collections.abc import Iterable
 
 from ..config import BALANCE_ACTIONS, G_SHIFT, NOTHING, macro_name
 from ..uinput import shown_spec
+from .style import displayable
 
 #: The actions a key of every kind and a mouse button take, (binding, label), in the order a
 #: row and the capture dialog's Actions group list them: G-Shift held while the key is
@@ -39,12 +40,13 @@ def outputs_line(bound: str, outputs_off: bool) -> str | None:
 
 def shown_binding(bound: str) -> str:
     """A binding in the window's words: NOTHING_ACTION or one of SHARED_ACTIONS by its label,
-    `Macro: name` for a macro, the key spec on one line otherwise."""
+    `Macro: name` for a macro (displayable: a macro's file holds its name), the key spec on one
+    line otherwise."""
     label = dict((NOTHING_ACTION, *SHARED_ACTIONS)).get(bound)
     if label is not None:
         return label
     macro = macro_name(bound)
-    return f"Macro: {macro}" if macro is not None else shown_spec(bound)
+    return f"Macro: {displayable(macro)}" if macro is not None else shown_spec(bound)
 
 
 #: What a key or a row on the G-Shift layer with no binding there says it does with G-Shift
@@ -57,7 +59,10 @@ FALLS_THROUGH_TIP = f"{FALLS_THROUGH}."
 #: The G-Shift layer's choice for a key or button with no binding there, which clears one
 #: (FALLS_THROUGH): a binding row's first entry on that layer (binding_rows.layer_actions),
 #: and the capture dialog's button in place of Unbind for a keyboard's G key there, beside
-#: NOTHING_ACTION, which binds nothing there (the owner's decisions of 2026-10-28).
+#: NOTHING_ACTION, which binds nothing there (the owner's decisions of 2026-10-28). An entry,
+#: since an Adw.ComboRow keeps one selected and so has no unbound look of its own:
+#: set_selected(Gtk.INVALID_LIST_POSITION) left a row on its entry (libadwaita 1.9.1,
+#: measured 2026-10-28).
 SAME_AS_BASE = "Same as Base"
 #: A binding to nothing, config.NOTHING, in the window's words: the one pair that words it.
 #: NOTHING_TIP is its tip on the G-Shift layer: in a binding row's list there

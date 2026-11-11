@@ -26,7 +26,15 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import IO, cast
 
-from . import outputs, pipewire_client, pipewire_headsets, pipewire_unit, spatial, wording
+from . import (
+    outputs,
+    pipewire_client,
+    pipewire_headsets,
+    pipewire_unit,
+    runtime_folder,
+    spatial,
+    wording,
+)
 from .g432_eq_words import WORDS as EQ_WORDS, Words as EqWords
 
 NAME = spatial.UNIT.removesuffix(".service")
@@ -52,6 +60,8 @@ CHAIN_ENDED = f"{NAME}: the chain ended ({{}})"
 MONITOR_ENDED = "{}: pw-dump --monitor ended ({})"
 #: By the unit's name, then the cause.
 NOT_NOTIFIED = "{}: its status was not sent to systemd ({})"
+#: By the unit's name, then runtime_folder.refusal's words.
+FOLDER_REFUSED = "{}: {}"
 #: Where systemd takes a service's notices (sd_notify(3)): set only with NotifyAccess=, which
 #: a unit installed before it lacks. That systemd then shows STATUS= from the main process as
 #: StatusText is from systemd.service(5), not yet checked on this unit.
@@ -95,8 +105,9 @@ def running_eq(objects: Sequence[object], headset: pipewire_headsets.Headset) ->
 
 
 def say(line: str) -> None:
-    """A line for the unit's journal."""
-    print(line, file=sys.stderr, flush=True)
+    """A line for the unit's journal, escaped: a path or a program's words it quotes can hold a
+    newline, where journald ends the record and reads a `<N>` after it as a priority."""
+    print(wording.escaped(line), file=sys.stderr, flush=True)
 
 
 def status(name: str, line: str) -> None:
@@ -237,16 +248,30 @@ def follow(monitor: IO[bytes], chain: Chain) -> str | None:
                     return ended
 
 
+def refuses_folder(name: str, what: str, conf: Path) -> bool:
+    """Whether the unit `name` may not run `what`'s chain from `conf`, as runtime_folder.refusal
+    finds of the conf's folder, said in the journal: the unit's %t, which XDG_RUNTIME_DIR need
+    not name. Another account that could write there could give `pipewire -c` a conf or a
+    PATH.d drop-in of its own, and a conf can run any program (context.exec)."""
+    refused = runtime_folder.refusal(conf.parent, what)
+    if refused is not None:
+        say(FOLDER_REFUSED.format(name, refused))
+    return refused is not None
+
+
 def main(argv: Sequence[str] | None = None,
          spawn: Callable[..., subprocess.Popen] = subprocess.Popen) -> int:
     """`python3 -m gearbench.spatial_unit run PATH`, the unit's process: follow until pw-dump
     --monitor ends, as at PipeWire's stop, or the chain ends, either of which ends the unit
-    as failed, 1."""
+    as failed, 1, as does a folder of PATH it refuses (refuses_folder)."""
     args = sys.argv[1:] if argv is None else list(argv)
     if len(args) != 2 or args[0] != "run":
         print("usage: python3 -m gearbench.spatial_unit run PATH", file=sys.stderr)
         return 2
-    chain = Chain(Path(args[1]), spatial.load_choices().headset, spawn)
+    conf = Path(args[1])
+    if refuses_folder(NAME, spatial.DESCRIPTION, conf):
+        return 1
+    chain = Chain(conf, spatial.load_choices().headset, spawn)
     return monitored(spawn, NAME, lambda monitor: follow(monitor, chain), lambda: chain.process,
                      CHAIN_ENDED)
 

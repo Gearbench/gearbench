@@ -22,10 +22,10 @@
 # into a device report. Read access to an interface that carries keystrokes
 # would be a keylogger surface.
 #
-# While Gearbench runs, the F row is taken to come on interface 02 too, as
-# 0x8010 G-key events, since in HOST mode those keys type only what Gearbench
-# types; any program with the node can set HOST mode (0x8100) and read them
-# itself.
+# While Gearbench holds the keyboard in HOST mode, the F row is taken to come
+# on interface 02 too, as 0x8010 G-key events, since in that mode those keys
+# type only what Gearbench types; any program with the node can set HOST mode
+# (0x8100), turn the keys' diversion on (0x8010 fn 2) and read them itself.
 #
 # Matched on properties, as 70-g915.rules is, for the reason it gives.
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="c343", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"

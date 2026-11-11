@@ -257,8 +257,10 @@ class GameProfile:
     unreadable: str | None = field(default=None, compare=False, repr=False)
     #: Whether `gearbench-ctl save` can write over its file while it is `unreadable`: the
     #: library read the file, and it would not load (library_files.Folder.invalid). Not one
-    #: that could not be opened, which the save reads first, nor one in a folder that could
-    #: not be listed, which the save writes through.
+    #: that could not be opened, which the save reads first, a folder at its name, which the
+    #: save cannot replace, one in a folder this account may not write, where the save's
+    #: temporary cannot go, nor one in a folder that could not be listed, which the save
+    #: writes through.
     save_over: bool = field(default=False, compare=False, repr=False)
 
     @property

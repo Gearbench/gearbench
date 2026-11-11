@@ -173,8 +173,9 @@ class NoiseRows:
 
     def _switched(self, result: Result, failed: str) -> None:
         """A switch's end: its failure toasted, or each note it gave of the default input,
-        as Outputs' switch toasts its own; then the state read again, both rows grayed out until
-        it lands."""
+        as Outputs' switch toasts its own, and the window told (kept_up) of a failure or a
+        note of a failed step; then the state read again, both rows grayed out until it
+        lands."""
         if self._closed:
             return
         # The state before the switch says nothing of the one after: unknown until the read.
@@ -185,6 +186,8 @@ class NoiseRows:
             toast_note(self._toast, words, line, one_sentence=True)
         notes = (result.notes if isinstance(result, headset_mic.Switched)
                  else result if isinstance(result, list) else [])
+        if pipewire_client.step_failed(notes):
+            self._kept_up()
         for note in notes:
             toast_clause(self._toast, capitalized(note), headset_mic.FEATURE)
         self._set_sensitive()

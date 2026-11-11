@@ -75,7 +75,7 @@ class DpiRange:
 
     def clamp(self, value: int) -> int:
         """`value` within the range, on the nearer step of the band it falls in, a tie
-        going up."""
+        going up (the owner's decision of 2026-10-24)."""
         value = max(self.minimum, min(self.maximum, value))
         low, high, step = next((band for band in self.bands if value <= band[1]),
                                (self.minimum, self.maximum, self.step))

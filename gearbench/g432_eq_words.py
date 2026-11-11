@@ -1,7 +1,8 @@
 """The names and sentences of each headset's equalizer that gearbench.g432_eq runs, the G432's
 and those of the models of its family with no equalizer of their own (EQ_MODELS): its units',
 sink's, nodes' and files' names from the model's key, its description from its name, and each
-sentence g432_eq says with those in. Standard library only, never run in the daemon.
+sentence g432_eq says with those in. Apart from g432_eq, so that module stays under its
+ceiling of code lines. Standard library only, never run in the daemon.
 """
 
 from __future__ import annotations
@@ -24,7 +25,8 @@ from .g432 import MODELS, HeadsetModel
 EQ_MODELS = tuple(model for model in MODELS if not model.onboard_eq)
 #: Each by its key, as the watch's command line names it.
 EQ_KEYED = {model.key: model for model in EQ_MODELS}
-#: The watch unit's name, by the model's key.
+#: The watch unit's name, by the model's key. packaging/user-daemons stops each model's watch
+#: at a remove by one pattern, this name with * for the key.
 WATCH_NAME_OF = "gearbench-{}-eq-watch"
 
 

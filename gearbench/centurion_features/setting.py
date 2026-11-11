@@ -68,7 +68,7 @@ class Setting:
         return self.names[self.wire.index(raw)] if self.names else raw
 
     def level(self, value: int | str) -> str:
-        """A value as the window's rows and lists and `audio` give it: its word, "never" for
+        """A value in words, as each view and the journal give it: its word, "never" for
         a 0 where the setting has that word, its number with its unit, a 0-to-100 level as a
         percent, "55%", or a number of its range's top, "3 of 6"."""
         if isinstance(value, str):

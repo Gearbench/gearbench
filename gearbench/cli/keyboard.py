@@ -156,11 +156,11 @@ def _print_probe(found: dict) -> None:
               f"0x{found['sw_control']:02x} ({state})")
 
 
-#: probe's refusal as root with no invoking user (invoking_uid), as after su - or doas: the
+#: probe's refusal as root with no invoking user (root_alone), as after su - or doas: the
 #: daemon runs as a user's own account, never in root's runtime folder, where this looks.
 PROBE_ROOT_ALONE = ("cannot tell whether the daemon is running as your own account, which root "
                     "with no invoking user cannot ask; run probe as yourself, or with sudo, run0 "
-                    "or pkexec, or pass --force to risk a misread")
+                    "or pkexec from your own account, or pass --force to risk a misread")
 
 
 def _daemon_beside() -> int | None:

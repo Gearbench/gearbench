@@ -26,8 +26,8 @@ BAND_Q = round(math.sqrt(2), 2)
 SHELF_Q = round(1 / math.sqrt(2), 2)
 BASS_FREQ = 100
 TREBLE_FREQ = 8000
-#: PipeWire's default clock.rate, which the chain runs at: a filter's frequency is below
-#: half of it, the highest a biquad at that rate has.
+#: PipeWire's default clock.rate, which the chain runs at, since its conf sets none: a
+#: filter's frequency is below half of it, the highest a biquad at that rate has.
 RATE = 48000
 
 

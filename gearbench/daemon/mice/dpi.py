@@ -3,11 +3,13 @@ return after a power cycle (`remember_dpi`, `restore_dpi`), the DPI buttons and 
 (`dpi_step`, `dpi_shift`), the stage a mouse's own DPI button moved it to
 (`take_stage_event`), the stages and rate in force (`stages_in_force`, `rate_for`), what goes
 out of force at a hand-back (`out_of_force`), a loaded game profile's own, sent live to a
-mouse in HOST mode (`tune`, `retune`, `send_rate`), and the rate `mouse_rate` sets live alone
-on a mouse in HOST mode whose onboard profile is not written (`live_rate`). What is written
-here goes to a mouse's working memory, to the game profile's file and, for a DPI the user
-chose outside a game profile's own stages and that live rate, to config.json
-(`remember_dpi`, `forget_dpi`, `live_rate`), never to the mouse's onboard profile."""
+mouse in HOST mode (`tune`, `retune`, `send_rate`) and edited by `mouse_dpi_stages` and
+`mouse_rate` (`tune_stages`, `tune_rate`), the rate `mouse_rate` sets live alone on a mouse
+in HOST mode whose onboard profile is not written (`live_rate`), and the `mouse_dpi`
+command. What is written here goes to a mouse's working memory, to the game profile's file
+and, for a DPI the user chose outside a game profile's own stages and that live rate, to
+config.json (`remember_dpi`, `forget_dpi`, `live_rate`), never to the mouse's onboard
+profile."""
 
 from __future__ import annotations
 
@@ -661,12 +663,13 @@ class Dpi:
         elif (loaded and before is not None) or undo:
             wanted, why = (self.desktop_dpi(attached),
                            "where it was before a game profile's own stages")
-        elif stages != before:
+        elif stages != before or attached.dpi_before_edit is not None:
             was, now = self.edited_lists(attached, before, stages)
             # A retry after a move it did not answer maps from the DPI before that move, which
             # may have landed, or from the one a DPI shift write sent since (edit_moved). Under
             # a held paddle that DPI is the shift's, read or kept, and follows the edit
-            # (same_place), as on profile 1.
+            # (same_place), as on profile 1. A second edit back to the list in force has
+            # nothing to map, but that move may have landed all the same.
             have = edited = (attached.dpi_before_edit
                              or self.mice.mouse_call(mouse.get_dpi, target=attached))
             if before is None and attached.dpi_before_tuning is None:

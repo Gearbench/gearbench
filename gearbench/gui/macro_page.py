@@ -54,7 +54,7 @@ from ..macros import (
 )
 from ..mouse import MODEL_IDS, bindings_of, key_name as mouse_shown, shift_bindings_of
 from ..profiles import GameProfile
-from ..wording import LEFT_OUT, MACRO_NEEDS_A_NAME, capitalized, counted, reason, word_list
+from ..wording import LEFT_OUT, MACRO_NEEDS_A_NAME, capitalized, counted, reason, up_to
 from .binding_rows import CHANGE, WITH_G_SHIFT
 from .dialogs import MACROS_UNREAD, NO_MACROS, CaptureDialog, RecordDialog
 from .style import (
@@ -66,6 +66,7 @@ from .style import (
     MOUSE_TAB,
     blank,
     confirm,
+    displayable,
     left_out_row,
     name_button,
     plain_row,
@@ -133,6 +134,12 @@ CHANGE_NAME = "Change step {}"
 #: Its tooltip, in the binding rows' form: keys only, as a macro cannot run a macro.
 CHANGE_HELP = "Pick another key for this step"
 DRAG_HELP = "Drag to move this step"
+#: The bindings a macro's row and its delete prompt name before saying how many more: each
+#: can carry a game profile's name, a G HUB file can bring 10,000 profiles
+#: (ghub_file.MAX_RECORDS), and GTK lays a row out on the main thread, at each read of the
+#: list: 270,529 characters held a window's open 9 s, the tab not shown, and 216,453 a delete
+#: prompt 12 s (measured 2026-11-06).
+SHOWN_USES = 8
 
 
 def uses_by_macro(config: Config, library: list[GameProfile]) -> dict[str, list[str]]:
@@ -178,7 +185,7 @@ def uses_by_macro(config: Config, library: list[GameProfile]) -> dict[str, list[
 def uses_summary(uses: list[str]) -> str:
     """What a macro's row says of the keys and buttons bound to it, the clause after "; " in
     its line."""
-    return f"bound to {word_list(uses, 'and')}" if uses else "not bound to a key or button"
+    return f"bound to {up_to(uses, SHOWN_USES)}" if uses else "not bound to a key or button"
 
 
 @functools.cache
@@ -482,11 +489,12 @@ class MacrosPage:
     def _uses_unknown(self) -> bool:
         """Whether a key or button the window's copy lacks may run a macro: with config.json
         unread, the M profiles are the defaults or an earlier read (Window.config); before
-        the game profiles' first read the window has none (Window.library_read); and the
+        the game profiles' first read the window has none (Window.library_read); a file
+        that read left out keeps its keys from the copy (Window.skipped_profiles); and the
         game profile loaded from a file the window could not read keeps its keys in the
         daemon (Window.profile_unread)."""
         return (self.win.config_error is not None or not self.win.library_read
-                or self.win.profile_unread())
+                or bool(self.win.skipped_profiles) or self.win.profile_unread())
 
     def refresh_uses(self) -> None:
         """Say again where each macro runs, after the window read the files."""
@@ -494,7 +502,7 @@ class MacrosPage:
         for index, macro in enumerate(self.macros):
             row = self.listbox.get_row_at_index(index)
             if isinstance(row, Adw.ActionRow):
-                row.set_subtitle(self._row_subtitle(macro, uses))
+                row.set_subtitle(displayable(self._row_subtitle(macro, uses)))
 
     def on_select(self, _box: Gtk.ListBox, row: Gtk.ListBoxRow | None) -> None:
         if self._loading.active or row is None:
@@ -531,7 +539,7 @@ class MacrosPage:
         uses = self.uses().get(slug(name), [])
         body = "The file is removed."
         if uses:
-            body += (f" {word_list(uses, 'and')} then "
+            body += (f" {up_to(uses, SHOWN_USES)} then "
                      f"{'does' if len(uses) == 1 else 'do'} nothing until rebound.")
         elif not self._uses_unknown():
             body += " No key or button runs it."
@@ -640,8 +648,8 @@ class MacrosPage:
         name = self._open_name() or "this macro"
         dialog = Adw.AlertDialog(
             heading="Discard the unsaved changes?",
-            body=f"{what} discards the unsaved changes to {name}. "
-                 f"Nothing on disk changes.")
+            body=displayable(f"{what} discards the unsaved changes to {name}. "
+                             f"Nothing on disk changes."))
         respond(dialog, "discard", "Discard", Adw.ResponseAppearance.DESTRUCTIVE)
 
         def answered(_d: Adw.AlertDialog, response: str) -> None:

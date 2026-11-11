@@ -279,7 +279,9 @@ program's first 15 bytes as its process name, so under Proton
 G HUB profiles would load for one program, as two profiles of one
 application do, the program goes to the one G HUB had active for that
 application, else to the first in the list. The other comes without it.
-In both cases the review page and the command line say which.
+In both cases the review page and the command line say which. Only where two
+profiles you replace each wait for the other's programs, the line on a program
+one of them cannot load says just that another game profile loads it.
 
 ### Names Gearbench already has
 
@@ -633,9 +635,13 @@ keeps the window open too, under the banner that says so. So does a change
 the window makes on this computer itself that fails then, with the reason
 shown: a Spatial sound action, a change in the Outputs group, a volume set
 on Game output, Chat output or Mic input, a switch of the computer's Noise
-suppression, or a change to the G432's equalizer or a preset library. A
-G432 equalizer change that is saved but not set on the equalizer does not
-keep the window open, since the change stands. Macro changes made while it
+suppression, or a change to the G432's equalizer or a preset library. So
+does a switch of Outputs, Noise suppression or the G432's equalizer with a
+step that failed, such as the default output not given back or the headset's
+own volume not put back, or a move on the Apps row not seen to land, with the
+note that says so. A G432
+equalizer change that is saved but not set on the equalizer does not keep
+the window open, since the change stands. Macro changes made while it
 waits are asked about before the window closes, unless a macro save or
 delete is still on its way.
 
@@ -1827,7 +1833,7 @@ hand edit that leaves a profile's file unreadable ends no hold-off. Nor does
 it unload a profile its program loaded while that program runs or has focus:
 the profile keeps what it held. While that profile stays loaded,
 `gearbench-ctl status` and the window's banner give the file's error until a reload reads it or, unless the profiles
-folder could not be listed or the file could not be opened, `gearbench-ctl save` writes over it. A held-off
+folder could not be listed, the file could not be opened, its folder cannot be written or a folder (or a link to one) is at its name, `gearbench-ctl save` writes over it. A held-off
 profile is not loaded, so its file gets only a dimmed row in the window and
 a warning in the journal.
 
@@ -1859,10 +1865,11 @@ has been removed, moved or replaced since. Opening a macro, New and a
 recording replace the steps. Each macro in the list says which keys and
 buttons run it, and in which profile, such as "G1 on M1" or, for a binding
 on the G-Shift layer, "G502 X PLUS G4 with G-Shift on M1"; deleting a macro
-names them. While
-`config.json` or the loaded game profile's file cannot be read, or before the
-window has read the game profiles, which it does once the daemon answers, the
-daemon may hold bindings the window does not. A macro the window finds bound to no key or button then says nothing of
+names them. Past eight, each says the first eight and how many more. While
+`config.json` or the loaded game profile's file cannot be read, while a game
+profile's file is listed dimmed, or before the window has read the game
+profiles, which it does once the daemon answers, the daemon or that file may
+hold bindings the window does not. A macro the window finds bound to no key or button then says nothing of
 which run it, and deleting it says only that the file is removed.
 
 A file that cannot be read costs only that macro, and the Macros tab lists it
@@ -3417,7 +3424,8 @@ rows under it edit the active preset:
   band's width as a multiple of its frequency (1/Q), where 2.0 is wide and
   0.5 narrow. Bands 1 and 5 are shelves and have no width. A gain is sent
   after 0.3 s at rest, a frequency or a width after 0.6 s. A frequency or a
-  width typed outside its range, or a word, puts back the value the row showed.
+  width typed outside its range, or a word, puts back the value the row showed,
+  and so does one still being typed when the rows gray out.
 
 The window waits up to 10 seconds for the base station to answer a write to
 a preset: a gain, a frequency, a width, the name, Reset to default or an
@@ -4718,6 +4726,12 @@ Gearbench Chat or Media, or on Gearbench Game for a program moved or set
 there, pauses, and stays paused until you play it again. Each program
 keeps the output you moved it to for the next time Outputs is on.
 
+GNOME's Sound settings, when they are open as the output picked there is
+unplugged, pick another output themselves, such as Gearbench Spatial, and
+that one stays the default output when the headset is back, with Outputs
+on or off (measured on GNOME Settings 50.3, 2026-11-11). Pick the headset
+again in Sound settings, or close them before you unplug it.
+
 WirePlumber keeps that choice, in
 `~/.local/state/wireplumber/stream-properties` (under `$XDG_STATE_HOME`
 where that is set), and Gearbench shows it only in the program's Apps row,
@@ -5081,8 +5095,9 @@ not show. The formatted output prints each such character as its escape,
 them itself. The names of running programs, and of the streams and the outputs
 in the reports of Gearbench Spatial and Outputs, show U+FFFD in place of such a
 character, in the window too. A stream's or output's name over 100 characters
-is cut to its first 99 and an ellipsis. G HUB's names are changed as they are
-read (see [Moving from G HUB](#moving-from-g-hub)).
+is cut to its first 99 and an ellipsis, and a line that lists streams or
+programs names the first eight, then how many more. G HUB's names are changed
+as they are read (see [Moving from G HUB](#moving-from-g-hub)).
 
 The daemon and its state:
 
@@ -5383,8 +5398,8 @@ configuration, written each time its service starts the output, is
 write in, since another account could put its own file in place of one
 of Gearbench's there. So do switching on or off the equalizer that runs on
 the computer for the G432's family, switching on the noise
-suppression that runs on the computer for any headset, and Outputs, whose
-service fails at its start. The daemon, those switches and Outputs also refuse one
+suppression that runs on the computer for any headset, and Gearbench Spatial
+and Outputs, whose services fail at their start. All of them also refuse one
 below,
 or reached through, a folder other accounts may write in without the sticky
 bit, or a folder or link that an account other than yours or root owns,
@@ -5487,7 +5502,11 @@ the file and reload, or run `gearbench-ctl save` to keep what the daemon
 holds, unless the daemon has been on its defaults since a start that could
 not read the file: then `save` is refused. If the file could not be opened,
 as with `Permission denied`, `gearbench-ctl save` reads it first and fails
-until it can be read again: fix it, then reload, or save over it.
+until it can be read again: fix it, then reload, or save over it. If a folder
+or a link to one stands at its path, it is a link into a folder that is not
+there, as a dotfiles folder not mounted, or its folder cannot be written, as
+a read-only mount, `gearbench-ctl save` has nowhere to write: fix that, then
+reload.
 
 If the loaded profile's file cannot be read, the profile keeps what it held,
 a change to it is refused, and the reply, `gearbench-ctl status` and the
@@ -5495,6 +5514,9 @@ window's banner give the file's error. Fix the file and reload, or run
 `gearbench-ctl save` to keep what the daemon holds. If the file could not be
 opened, as with `Permission denied`, `gearbench-ctl save` reads it first
 and fails until it can be read again: fix it, then reload, or save over it.
+A folder at the file's name, or a link to one, fails the save too: move it
+away first. So does a folder that cannot be written, as a read-only mount:
+make it writable first.
 If the error says the
 profiles folder could not be listed, only fixing the folder and reloading
 helps: `gearbench-ctl save` writes through that folder and fails. If its file
@@ -5568,7 +5590,7 @@ and on Fedora 44. On Arch Linux the suite is not run: there, the install from
 a git checkout and the package's install are checked in a clean container at
 each change.
 
-On 2026-10-28, and again for this release on 2026-11-03, it was tested on
+On 2026-10-28, and again for this release on 2026-11-11, it was tested on
 three more systems, each a virtual machine with a G305 mouse on its receiver
 and a G432 headset passed through to it.
 No keyboard was. On each, the package installed from its file and the
@@ -5826,12 +5848,13 @@ with its cable unplugged and plugged back in; the others are taken to. Any
 program you run can ask for them itself. It can also set one of these
 keyboards' keys to come there in place of typing, read them and type them
 back, so the control interface can carry what you type. F1 to F4 came there
-on a wired G515 TKL; other keys are taken to do the same.
+on a wired G515 TKL and G1 to G9 on a G915 X LIGHTSPEED on its cable; other
+keys are taken to do the same.
 
-While Gearbench runs, the control interface of the G915 TKL, the G913 TKL
-and the PRO X TKL LIGHTSPEED is taken to carry each press of an F key, since
-Gearbench types those keys itself. Any program you run can make the keyboard
-send them there.
+While Gearbench has the G915 TKL, the G913 TKL or the PRO X TKL LIGHTSPEED
+in host mode, that keyboard's control interface is taken to carry each press
+of an F key, since Gearbench types those keys itself. Any program you run can
+make the keyboard send them there.
 
 `70-gearbench-uinput.rules` lets any program you run create a virtual
 keyboard.
@@ -6239,6 +6262,7 @@ Find what you see, then the section that fixes it:
 | A change is refused and a banner offers Reload… | see [Settings files](#settings-files) |
 | GNOME lists one `Headphones – Astro A50` entry, not Astro A50 Game and Astro A50 Chat | see [Game and Chat](#game-and-chat) |
 | The Gearbench Spatial switch shows an amber or red sign, or a game plays on it in stereo | see [Spatial sound](#spatial-sound) |
+| A headset plugged back in is no longer the default output, and another, such as Gearbench Spatial, is | see [Outputs](#outputs) |
 | No sidetone heard on a G432 | see [The Logitech G432](#the-logitech-g432) |
 | Input level says why it cannot read | see [Input level](#input-level) |
 | No tray icon | see [The tray icon](#the-tray-icon) |

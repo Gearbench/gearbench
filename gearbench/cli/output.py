@@ -105,7 +105,7 @@ FIELD_WORDS: FieldWords = {
 
 
 def send(request: dict, timeout: float | None = None) -> dict:
-    """One request to the daemon and its reply, after `timeout` seconds at most, or
+    """One request to the daemon and its reply, read within `timeout` seconds, or
     send_command's own wait. Every subcommand sends through here: the one place the
     command line looks send_command up."""
     return send_command(request) if timeout is None else send_command(request, timeout=timeout)
@@ -293,7 +293,7 @@ def failed(exc: Exception, written: Callable[[], Path]) -> int:
     step writes: the error's own filename can be none, or the temporary beside the file,
     removed by then."""
     if isinstance(exc, OSError):
-        print(f"error: {_escaped(written())}: {reason(exc)}", file=sys.stderr)
+        print(f"error: {_escaped(written())}: {_escaped(reason(exc))}", file=sys.stderr)
     else:
         print(f"error: {_escaped(exc)}", file=sys.stderr)
     return 1

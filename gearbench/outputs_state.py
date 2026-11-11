@@ -15,7 +15,7 @@ and pipewire_client.run_program, and a failure is a pipewire_client.StepError in
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from . import (
@@ -69,12 +69,15 @@ MUSIC_NOTE = "moves every music player"
 #: A stream that names its output in its props: the program asked for it, or libpulse did
 #: from PULSE_SINK, which a game's launch option sets. Relies on pipewire-pulse 1.6.2
 #: setting target.object from the one sink name libpulse 17.0 sends either way, so no prop
-#: tells the two apart and the words fit both.
+#: tells the two apart and the words fit both (libpulse's src/pulse/client-conf.c load_env
+#: and stream.c create_stream, pipewire-pulse's module-protocol-pulse/pulse-server.c
+#: do_create_playback_stream, read 2026-10-28).
 SET_IN = "set in its settings or launch option"
-#: move_app's refusals, by the key, the program, or the output's description, and for
-#: DEFAULT with no default output (NO_DEFAULT); and its note when the streams did not show on
-#: their new output within pipewire_client.SETTLE. NOT_THERE's two steps are for Outputs off
-#: and for Outputs on but waiting for an output to play to.
+#: move_app's refusals, by the key as the window shows a client's name (spatial.shown_name),
+#: the program, or the output's description, and for DEFAULT with no default output
+#: (NO_DEFAULT); and its note when the streams did not show on their new output within
+#: pipewire_client.SETTLE. NOT_THERE's two steps are for Outputs off and for Outputs on but
+#: waiting for an output to play to.
 NO_APP = "no program plays under {} now: `gearbench-ctl headset-outputs` lists them"
 FIXED = "{} plays where its own settings or launch option set it: change it there"
 NOT_THERE = ("{} is not in PipeWire: switch Outputs on (`gearbench-ctl headset-outputs on`), or "
@@ -89,7 +92,8 @@ NOT_CHECKED = "{}'s move to {} was not checked: {}"
 #: summary's words for a unit that runs with Game not yet in PipeWire.
 WAITING = "on, waiting for an output to play to"
 #: switch_on's notes. Each switch's note opens with a short clause before "; ", what failed
-#: where something did, so a toast too short for the note shows it (style.toast_clause).
+#: where something did, so a toast too short for the note shows it (style.toast_clause);
+#: a note of something that failed goes out as a pipewire_client.FailedStep.
 SELECTED = f"{GAME.description} is the default output"
 NOT_SELECTED = f"{GAME.description} is not the default output; {{}}"
 NO_GAME = (f"{GAME.description} was not there within {pipewire_client.SETTLE:g} s; the "
@@ -98,11 +102,14 @@ NO_GAME = (f"{GAME.description} was not there within {pipewire_client.SETTLE:g} 
 #: switch_off's notes, by the default output given back as GNOME lists it.
 GIVEN_BACK = "{} is the default output again"
 NOT_GIVEN_BACK = "{} is not the default output again; {}"
-#: switch_off's notes for a saved default output away: by the one given back meanwhile, then
-#: the saved one's name; by why it was not kept, the one given back, then the saved one.
+#: switch_off's notes for the user's default output away: by the one given back meanwhile,
+#: then the away one's name; by why it was not kept, the one given back, then the away one;
+#: LOST_PICK the same where the one given back did not show or was not read back, so it is
+#: not said to play.
 UNTIL_BACK = "{} is the default output; {} takes over once it is back"
-NOT_KEPT = ("the default output you had was not kept for its return; {}; {} plays until you "
-            "pick {} once it is back")
+NOT_KEPT_WHY = "the default output you had was not kept for its return; {}"
+NOT_KEPT = f"{NOT_KEPT_WHY}; {{}} plays until you pick {{}} once it is back"
+LOST_PICK = f"{NOT_KEPT_WHY}; pick {{}} once it is back"
 DEFAULT_UNREAD = "the default output was not given back; {}"
 SPATIAL_BACK = f"{spatial.DESCRIPTION} is the default output again"
 #: By the default output given back, then why Spatial is not it.
@@ -116,9 +123,10 @@ class App:
     """One program's streams as WirePlumber keeps their choice of output: the key, the program
     by name, the one line it may need (SHARED, MUSIC_NOTE or SET_IN), where it plays now as
     GNOME lists that output (node_words; None while it is linked into no sink), and the key of
-    the one of the three it plays on, by the sink the unit made (chain_sinks), None for any
-    other; its streams' ids, and whether a stream names its own output, which WirePlumber then
-    never restores, so no move sticks."""
+    the one of the three it plays on, by the sink the unit made (chain_sinks), never by the
+    sink's description, which another client can give, None for any other; its streams'
+    ids, and whether a stream names its own output, which WirePlumber then never restores,
+    so no move sticks."""
 
     key: str
     title: str
@@ -147,7 +155,8 @@ def program_name(props: dict, key: str) -> str:
     that in lower case, as Discord's "discord" is; its process where it has no name, else
     `key`. For a game under Proton, whose process is Wine's loader, it relies on Wine
     naming the streams by the game's product name, else its .exe's file name
-    (dlls/mmdevapi/client.c's get_application_name, Wine 10.0)."""
+    (dlls/mmdevapi/client.c's get_application_name, Wine 10.0). The names were measured on
+    Discord, Firefox, Chrome and Arc Raiders on 2026-10-28."""
     name, binary = text_of(props, "application.name"), text_of(props, BINARY)
     if binary and name in LIBRARY_WORDS:
         name = LIBRARY_TITLE.format(binary, LIBRARY_WORDS[name])
@@ -169,25 +178,33 @@ def program_names(key: str, streams: Sequence[tuple[int, dict]]) -> list[str]:
                                   for process, name in others)]
 
 
-def linked_into(objects: Sequence[object], node: int) -> int | None:
-    """The Audio/Sink the node `node` plays into by its first link in neither error nor
-    unlinked state (pipewire_unit.feeding's), None for none. A link into another node, as a
-    level meter's or an app-audio capture's from the stream itself, is not where it plays."""
+def sinks_played(objects: Sequence[object]) -> dict[int, int]:
+    """The Audio/Sink each node plays into by its first link in neither error nor unlinked
+    state (pipewire_unit.feeding's), by the node. A link into another node, as a level
+    meter's or an app-audio capture's from the stream itself, is not where it plays. One pass
+    over the links: a client sets how many streams there are."""
     sinks = {found for found, _info, props in pipewire_client.of_type(objects, "Node")
              if props.get("media.class") == "Audio/Sink"}
-    return next((info["input-node-id"] for _link, info, _props
-                 in pipewire_client.of_type(objects, "Link")
-                 if info.get("output-node-id") == node
-                 and info.get("state") not in ("error", "unlinked")
-                 and info.get("input-node-id") in sinks), None)
+    played: dict[int, int] = {}
+    for _link, info, _props in pipewire_client.of_type(objects, "Link"):
+        output, into = info.get("output-node-id"), info.get("input-node-id")
+        if (wording.whole(output) and wording.whole(into) and into in sinks
+                and info.get("state") not in ("error", "unlinked")):
+            played.setdefault(output, into)
+    return played
 
 
-def node_words(objects: Sequence[object], node: int | None) -> str | None:
-    """The node `node` as GNOME lists it, by its own props (pipewire_client.listed_name):
-    another client can make a node of its name. Cut as Spatial's rows cut a node's name
-    (spatial.shown_name); None for none, or for a node.name that is no text."""
-    props = next((props for found, _info, props in pipewire_client.of_type(objects, "Node")
-                  if found == node), {})
+def nodes_by_id(objects: Sequence[object]) -> dict[int, dict]:
+    """The props of each node in pw-dump's objects, by its id."""
+    return {node: props for node, _info, props in pipewire_client.of_type(objects, "Node")}
+
+
+def node_words(nodes: Mapping[int, dict], node: int | None) -> str | None:
+    """The node `node` of `nodes` (nodes_by_id) as GNOME lists it, by its own props
+    (pipewire_client.listed_name): another client can make a node of its name. Cut as
+    Spatial's rows cut a node's name (spatial.shown_name); None for none, or for a node.name
+    that is no text."""
+    props = {} if node is None else nodes.get(node, {})
     return (spatial.shown_name(pipewire_client.listed_name(props))
             if isinstance(props.get("node.name"), str) else None)
 
@@ -200,6 +217,7 @@ def apps(objects: Sequence[object]) -> list[App]:
         if (key := key_of(props)) is not None:
             keyed.setdefault(key, []).append((node, props))
     sinks = chain_sinks(objects)
+    played, nodes = sinks_played(objects), nodes_by_id(objects)
     found = []
     for key, streams in keyed.items():
         titles = program_names(key, streams)
@@ -207,13 +225,13 @@ def apps(objects: Sequence[object]) -> list[App]:
         if fixed:
             note: str | None = SET_IN
         elif len(titles) > 1:
-            note = SHARED.format(wording.word_list(titles[1:], "and"))
+            note = SHARED.format(wording.up_to(titles[1:], spatial.NAMES_MAX))
         elif streams[0][1].get("media.role") == MUSIC:
             note = MUSIC_NOTE
         else:
             note = None
-        into = linked_into(objects, streams[0][0])
-        found.append(App(key, titles[0], note, node_words(objects, into),
+        into = played.get(streams[0][0])
+        found.append(App(key, titles[0], note, node_words(nodes, into),
                          None if into is None else sinks.get(into),
                          tuple(node for node, _props in streams), fixed))
     return found
@@ -231,8 +249,9 @@ def graph(objects: Sequence[object], picked: str | None) -> dict:
     """State's PipeWire fields from pw-dump's objects, with `picked` the headset picked in
     spatial.json."""
     streams = chain_streams(objects)
+    played, nodes = sinks_played(objects), nodes_by_id(objects)
     headset = pipewire_headsets.pick(pipewire_headsets.present(objects), picked)
-    return {"plays_on": tuple((output.key, node_words(objects, linked_into(objects, stream)))
+    return {"plays_on": tuple((output.key, node_words(nodes, played.get(stream)))
                               for output in outputs.OUTPUTS
                               if (stream := streams.get(output.key)) is not None),
             "apps": tuple(apps(objects)),
@@ -321,15 +340,18 @@ def move_app(key: str, choice: str, run: pipewire_client.Run = subprocess.run) -
     output's key or DEFAULT, from one pw-dump: by the sink's object.serial, which WirePlumber
     saves as the program's choice, or for DEFAULT the delete of the target. Then wait up to
     pipewire_client.SETTLE for each still playing to play there: NOT_MOVED's note when one did
-    not, NOT_CHECKED's when a read back failed, else None. StepError, before any write, for a
-    key no program plays under now (NO_APP), a program that sets its own output (FIXED), and
-    an output not there (NOT_THERE, or NO_DEFAULT for DEFAULT); and for a write that failed,
-    in PARTLY_MOVED's words after the first."""
+    not, NOT_CHECKED's when a read back failed, each a pipewire_client.FailedStep, else None.
+    StepError, before any write, for a key no program plays under now (NO_APP), a program that
+    sets its own output (FIXED), and an output not there (NOT_THERE, or NO_DEFAULT for
+    DEFAULT); and for a write that failed, in PARTLY_MOVED's words after the first. DEFAULT
+    needs no chain, so a choice a program keeps for one of the three can be cleared while
+    Outputs is off: WirePlumber 0.5.13 saves a deleted target as no choice
+    (node/state-stream.lua)."""
     objects = pipewire_client.dump_objects(run)
     app = next((found for found in pipewire_client.shaped(apps, objects) if found.key == key),
                None)
     if app is None:
-        raise pipewire_client.StepError(NO_APP.format(key))
+        raise pipewire_client.StepError(NO_APP.format(spatial.shown_name(key)))
     if app.fixed:
         raise pipewire_client.StepError(FIXED.format(app.title))
     sink = pipewire_client.shaped(lambda found: sink_of(found, choice), objects)
@@ -351,22 +373,25 @@ def move_app(key: str, choice: str, run: pipewire_client.Run = subprocess.run) -
         # to wait for.
         target = sink_of(now, choice)
         playing = {node for node, _props in program_streams(now)}
-        return target is not None and all(pipewire_unit.linked(now, stream, target[0])
-                                          for stream in app.streams if stream in playing)
-    not_moved = NOT_MOVED.format(app.title, words, pipewire_client.SETTLE)
+        return (target is not None
+                and playing.intersection(app.streams) <= pipewire_unit.feeding(now, target[0]))
+    not_moved = pipewire_client.FailedStep(NOT_MOVED.format(app.title, words,
+                                                            pipewire_client.SETTLE))
 
     def look() -> str | None:
         try:
             return None if pipewire_client.dumped(run, moved) else not_moved
         except pipewire_client.StepError as err:
-            return NOT_CHECKED.format(app.title, words, err)
+            return pipewire_client.FailedStep(NOT_CHECKED.format(app.title, words, err))
     return pipewire_client.waited(look, lambda note: note is not not_moved)
 
 
 def saved_default(objects: Sequence[object]) -> str | None:
     """The default output to save at the switch-on, for pw-dump's objects: the first of the
     user's (pipewire_unit.users_defaults) that saved_as gives one for, so the output the user
-    picked, unplugged now or not, comes before the one WirePlumber plays on meanwhile, and a
+    picked, unplugged now or not, comes before the one WirePlumber plays on meanwhile (before
+    this order, the hardware check of 2026-10-28 found the G432's output saved in place of
+    an A50 X unplugged), and a
     pick of one of the three left from a unit that stopped without its switch-off, which
     gives none, is passed over. None for none."""
     return next((saved for default in pipewire_unit.users_defaults(objects, "sink")
@@ -417,19 +442,21 @@ def switch_on(run: pipewire_client.Run = subprocess.run) -> list[str]:
         came = game_came(run)
     except pipewire_client.StepError as err:
         # The unit runs by now: a pw-dump that fails is a note, as Game not there in time is.
-        return [NOT_SELECTED.format(err)]
+        return [pipewire_client.FailedStep(NOT_SELECTED.format(err))]
     if not came:
-        return [NO_GAME]
+        return [pipewire_client.FailedStep(NO_GAME)]
     failed = pipewire_unit.pick_default(run, GAME.sink)
-    return [SELECTED if failed is None else NOT_SELECTED.format(failed)]
+    return [SELECTED if failed is None
+            else pipewire_client.FailedStep(NOT_SELECTED.format(failed))]
 
 
 @dataclass(frozen=True)
 class GiveBack:
     """give_back's answer: the node to make the default output before the unit stops, None
-    for none; whether Gearbench Spatial is to follow it; and the default output saved at the
-    switch-on while it is away, which switch_off writes back as the user's pick once the unit
-    has stopped, where it gave `node` back, None for none."""
+    for none; whether Gearbench Spatial is to follow it; and the user's default output that
+    is away, a pick made since the switch-on or else the one saved at it, which switch_off
+    writes back as the user's pick once the unit has stopped, where its pick of `node` went,
+    shown within pipewire_client.SETTLE or not, None for none."""
 
     node: str | None
     follows: bool = False
@@ -442,17 +469,25 @@ def give_back(objects: Sequence[object], saved: str | None, picked: str | None) 
     another since; for a saved Gearbench Spatial that its unit made, the node it plays to once
     Gearbench Game goes (spatial_unit.headset_target, for the headset `picked`), since Spatial
     would pause its players at the restart that takes it off Game; else what stands for the
-    saved one (standing_default), with the saved one away while no sink of its name is there
-    (sink_there), as a headset unplugged since, unless it is named as Gearbench names its own
-    (GEARBENCH_PREFIX), a sink its own switch makes the default."""
+    saved one (standing_default). A pick made since whose sink is away goes in `away`, and
+    what plays meanwhile still stands for the saved one; with none, the saved one is away
+    while no sink of its name is there (sink_there), as a headset unplugged since, unless it
+    is named as Gearbench names its own (GEARBENCH_PREFIX), a sink its own switch makes the
+    default."""
     default = pipewire_unit.default_sink(objects)
     if (default is None or default not in SINK_OUTPUTS
             or not pipewire_unit.made_in(objects, default, outputs.UNIT)):
         return GiveBack(None)
+    # WirePlumber keeps a pick while its sink is away and can play on Game meanwhile
+    # (users_defaults): what saved_default finds then was picked since the switch-on.
+    since = saved_default(objects)
     if saved == spatial.SINK and pipewire_unit.made_in(objects, spatial.SINK, spatial.UNIT):
         aimed = spatial_unit.headset_target(objects, picked)
-        return GiveBack(None) if aimed is None else GiveBack(aimed.node, follows=True)
+        return (GiveBack(None) if aimed is None
+                else GiveBack(aimed.node, follows=since is None, away=since))
     standing = standing_default(objects, saved)
+    if since is not None:
+        return GiveBack(standing, away=since)
     if saved is None or saved.startswith(GEARBENCH_PREFIX) or sink_there(objects, saved):
         return GiveBack(standing)
     return GiveBack(standing, away=saved)
@@ -466,56 +501,73 @@ def spatial_back(run: pipewire_client.Run, given: str) -> str:
     def aimed(state: spatial.State) -> bool:
         return state.sink_id is not None and state.target not in (None, GAME.sink)
     if not aimed(pipewire_client.waited(lambda: spatial.read_state(run), aimed)):
-        return SPATIAL_NOT_BACK.format(given, SPATIAL_LATE)
+        return pipewire_client.FailedStep(SPATIAL_NOT_BACK.format(given, SPATIAL_LATE))
     failed = pipewire_unit.pick_default(run, spatial.SINK)
-    return SPATIAL_BACK if failed is None else SPATIAL_NOT_BACK.format(given, failed)
+    return (SPATIAL_BACK if failed is None
+            else pipewire_client.FailedStep(SPATIAL_NOT_BACK.format(given, failed)))
 
 
 def switch_off(run: pipewire_client.Run = subprocess.run) -> list[str]:
     """Give the default output back (give_back) before the unit stops, so the streams that
     follow it move first: WirePlumber pauses the players of a sink that goes. Then disable
     and stop the unit, which keeps each app's choice of output (the owner's decision of
-    2026-10-28), then finish the give-back (handed_back). A pw-dump or pick that fails is a
-    note, and the unit stops all the same; StepError when the stop fails. The notes to
-    say."""
+    2026-10-28), then finish the give-back (handed_back); a pick written and not shown, or
+    not read back, still has its `away` written back after the stop. A pw-dump or pick that
+    fails is a note, and the unit stops all the same; StepError when the stop fails, its
+    words followed by the notes said by then. The notes to say."""
     notes: list[str] = []
     #: The default output given back, as GNOME lists it, once WirePlumber showed the pick.
     given: str | None = None
+    #: Whether a pick not shown went to the key the user's own was in.
+    written_over = False
     try:
         objects = pipewire_client.dump_objects(run)
         back = pipewire_client.shaped(
             lambda found: give_back(found, load_settings().default,
                                     spatial.load_choices().headset), objects)
         if back.node is not None:
-            words = pipewire_client.described(objects, back.node)
+            words = spatial.shown_name(pipewire_client.described(objects, back.node))
             failed = pipewire_unit.pick_default(run, back.node)
             if failed is None:
                 given = words
             else:
-                notes.append(NOT_GIVEN_BACK.format(words, failed))
+                notes.append(pipewire_client.FailedStep(NOT_GIVEN_BACK.format(words, failed)))
+                written_over = (failed == pipewire_unit.NOT_SHOWN
+                                or isinstance(failed, pipewire_unit.WentUnread))
     except pipewire_client.StepError as err:
-        notes.append(DEFAULT_UNREAD.format(err))
-    pipewire_client.run_program(run, pipewire_client.systemctl("--now", "disable", outputs.UNIT))
+        notes.append(pipewire_client.FailedStep(DEFAULT_UNREAD.format(err)))
+    try:
+        pipewire_client.run_program(run, pipewire_client.systemctl("--now", "disable",
+                                                                   outputs.UNIT))
+    except pipewire_client.StepError as err:
+        # What was given back stays given back while the unit runs on: the error says so.
+        said = [] if given is None else [GIVEN_BACK.format(given)]
+        raise pipewire_client.StepError("; ".join([str(err), *notes, *said])) from None
     if given is not None:
         notes.append(handed_back(run, given, back))
+    elif written_over and back.away is not None:
+        failed = pipewire_unit.written(run, pipewire_unit.default_argv(back.away))
+        if failed is not None:
+            notes.append(pipewire_client.FailedStep(LOST_PICK.format(
+                failed, spatial.shown_name(back.away))))
     return notes
 
 
 def handed_back(run: pipewire_client.Run, given: str, back: GiveBack) -> str:
     """switch_off's note once the unit has stopped, for `given`, the default output given
     back as GNOME lists it, and give_back's `back`: for a saved Gearbench Spatial, its pick
-    once it is back on the headset (spatial_back); for a saved default away, its write as the
+    once it is back on the headset (spatial_back); for a default away, its write as the
     user's pick (pipewire_unit.default_argv), its name said as text a line holds
-    (wording.printable), with no wait, since WirePlumber makes it the default only on its
+    (spatial.shown_name), with no wait, since WirePlumber makes it the default only on its
     return and plays on `given` meanwhile; else GIVEN_BACK. The write comes after the stop:
     before it, WirePlumber 0.5.13 could take Gearbench Game, the pick before, from its list of
-    past picks while the saved one is away (state-default-nodes.lua), and its players would
-    pause as it went."""
+    past picks while that one is away (state-default-nodes.lua), and its players would pause
+    as it went."""
     if back.follows:
         return spatial_back(run, given)
     if back.away is None:
         return GIVEN_BACK.format(given)
     failed = pipewire_unit.written(run, pipewire_unit.default_argv(back.away))
-    away = wording.printable(back.away)
+    away = spatial.shown_name(back.away)
     return (UNTIL_BACK.format(given, away) if failed is None
-            else NOT_KEPT.format(failed, given, away))
+            else pipewire_client.FailedStep(NOT_KEPT.format(failed, given, away)))

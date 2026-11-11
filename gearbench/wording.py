@@ -8,7 +8,7 @@ import json
 import math
 import time
 import unicodedata
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Sequence
 from pathlib import Path
 from typing import TypeGuard
 
@@ -22,12 +22,13 @@ MAX_REFUSAL = 1000
 #: the device answers: "Not read" on a row, "not read" in the CLI and "battery not read" in
 #: the tray.
 NOT_READ = "not read"
-#: What the window's Status dot, the CLI's note and the tray's battery line say of a device
-#: that does not answer.
+#: The cause named for a device that is attached and does not answer, but a wired headset and
+#: a keyboard on its cable; a mouse's views do not tell its route apart. The window's Status
+#: dot names none (NOT_ANSWERING_WORDS).
 ASLEEP_OR_SWITCHED_OFF = "asleep or switched off"
-#: The start of the CLI's note on a device that does not answer, and all that note and the
-#: tray's battery line say of a keyboard on its cable: switched off, a keyboard leaves its
-#: cable's node, so asleep or switched off is not why.
+#: The window's Status dot's label, the start of the CLI's note on a device that does not
+#: answer, and all that note and the tray's battery line say of a keyboard on its cable:
+#: switched off, a keyboard leaves its cable's node, so asleep or switched off is not why.
 NOT_ANSWERING_WORDS = "not answering"
 #: The choice of no game profile, the M profile alone: the Keyboard tab's Loaded row and the
 #: tray's Game profile submenu.
@@ -104,7 +105,7 @@ def reason(exc: BaseException) -> str:
 #: problem names first. A program the package starts joins this set.
 KEEPS_CASE = frozenset({"systemctl", "systemd-run", "journalctl", "pipewire", "pw-dump",
                         "pw-cli", "pw-metadata", "pw-record", "pw-play", "gearbench-ctl",
-                        "ratbagd", "logind"})
+                        "ratbagd", "logind", "busctl"})
 
 
 def capitalized(text: str) -> str:
@@ -265,6 +266,18 @@ def first_of(names: list[str], shown: int) -> str:
     return ", ".join(names[:shown]) + (f" and {more} more" if more > 0 else "")
 
 
+def with_more(names: Sequence[str], shown: int) -> list[str]:
+    """The first `shown` of `names`, then how many more as one item, "380 more", for
+    word_list or a join; all of them while they fit."""
+    more = len(names) - shown
+    return [*names[:shown], f"{more} more"] if more > 0 else list(names)
+
+
+def up_to(names: Sequence[str], shown: int) -> str:
+    """"a, b and c" (word_list), past `shown` of `names` the first of them and "and 380 more"."""
+    return word_list(with_more(names, shown), "and")
+
+
 def counted(n: int, noun: str) -> str:
     """"1 macro", "2 macros", "13,210 lines"."""
     return f"{n:,} {noun}{'' if n == 1 else 's'}"
@@ -288,7 +301,7 @@ def route(plugged_by: str) -> str:
 
 def route_of(product: object, cabled: Collection[int]) -> str | None:
     """The route of a keyboard or mouse, from its reply's product id, the hex the daemon
-    writes, and its model's cable ids; None with no id."""
+    writes, and its model's cable ids; None with no id, or one that is not hex."""
     try:
         pid = int(str(product), 16)
     except ValueError:

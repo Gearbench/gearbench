@@ -669,8 +669,10 @@ hwdb_install() {
         mkdir -p "$UNIT_DIR"
         : > "$HWDB_OWED"
     fi
-    # /etc/udev/hwdb.d may not exist. mkdir, not install -d, which would chmod it.
-    sudo mkdir -p "$HWDB_DIR"
+    # /etc/udev/hwdb.d may not exist. mkdir, not install -d, which would chmod it. At 022: sudo
+    # keeps a stricter login umask (sudoers(5), umask), and same_bytes above, run as this
+    # account, could not read a folder that left root's alone.
+    (umask 022; sudo mkdir -p "$HWDB_DIR")
     sudo install -m 0644 -o root -g root "$CHECKOUT/udev/$HWDB" "$HWDB_DIR/$HWDB"
     hwdb_update
 }
@@ -994,15 +996,13 @@ preflight() {
 # already on such a node, and at a seat switch logind moves only the ACLs of nodes still
 # tagged: where the installed lines are those, with no DEVPATH!= on a rule line, the node
 # stays open to the account that had the seat until the receiver is plugged in again or the
-# machine restarts.
+# machine restarts. Read through sudo: where PAM sets no umask, sudo keeps a login umask of 077
+# (sudoers(5), umask), so an earlier install's mkdir left these folders root's alone and this
+# account would find no file. grep -L names a file with no such line; -s passes over a missing
+# one.
 receiver_grants_stale() {
-    local rule
-    for rule in 70-g915.rules 70-g915-tkl.rules; do
-        if [[ -e "$RULE_DIR/$rule" ]] && ! grep -q '^[^#]*DEVPATH!=' "$RULE_DIR/$rule"; then
-            return 0
-        fi
-    done
-    return 1
+    [[ -n $(sudo grep -sL '^[^#]*DEVPATH!=' \
+        "$RULE_DIR/70-g915.rules" "$RULE_DIR/70-g915-tkl.rules") ]]
 }
 
 # The G915 TKL's own node keeps its grant, so the check leaves it out. A device whose own
@@ -1026,8 +1026,9 @@ rules_install() {
     # Owed before the copies below replace the lines it reads.
     if receiver_grants_stale; then mkdir -p "$UNIT_DIR"; : > "$RECEIVER_OWED"; fi
     # /usr/local/lib/udev may not exist. mkdir, not install -d, which would chmod a shared
-    # directory already there.
-    sudo mkdir -p "$RULE_DIR"
+    # directory already there. At 022, as in hwdb_install: a login umask of 077 would leave both
+    # folders root's alone, where the system's own are open to read.
+    (umask 022; sudo mkdir -p "$RULE_DIR")
     for rule in "${RULES[@]}"; do
         sudo install -m 0644 -o root -g root "$CHECKOUT/udev/$rule" "$RULE_DIR/$rule"
     done

@@ -74,6 +74,12 @@ class WriteOutcome:
     rate_refused: bool = False
 
 
+def dpi_kept(target: AttachedMouse) -> bool:
+    """Whether `target` keeps a DPI from before a load to put back (dpi_before_load,
+    dpi_before_tuning)."""
+    return target.dpi_before_load is not None or target.dpi_before_tuning is not None
+
+
 class ProfileWrites:
     """The commands that write a mouse's onboard profile 1, and what follows a write."""
 
@@ -227,7 +233,7 @@ class ProfileWrites:
                 raise MouseError(SECTOR_UNKNOWN) from exc
             raise
         finally:
-            kept = target.dpi_before_load is not None or target.dpi_before_tuning is not None
+            kept = dpi_kept(target)
             if target.mouse.sector_writes != started:
                 # Before the put-back, whose requests can tear the mouse down: its next attach
                 # takes them as they are then (KeptMouse).
@@ -298,9 +304,10 @@ class ProfileWrites:
         With none remembered nothing is stored: a stored value would go stale at a stage change
         the daemon does not hear of. A DPI that cannot be read or moved is forgotten on both
         routes, since it may be the edited stage's old value, and so is the DPI of a mouse
-        marked not answering, which is not read (the owner's decision of 2026-10-11). So is the
-        one kept when the mouse answers a DPI outside DPI_LOWEST to DPI_HIGHEST, as 0
-        (remember_dpi). The DPI the mouse is on, or None.
+        marked not answering, which is not read (the owner's decision of 2026-10-11), unless it
+        followed the edit with nothing read, which no read bears on. So is the one kept when
+        the mouse answers a DPI outside DPI_LOWEST to DPI_HIGHEST, as 0 (remember_dpi). The DPI
+        the mouse is on, or None.
         """
         if after == before:
             return None
@@ -333,19 +340,28 @@ class ProfileWrites:
         except MouseError as exc:
             log.info("%s: could not read or move the DPI after the stage list changed: %s",
                      target.name, exc)
-            self.mice.dpi.forget_dpi(target)
+            if not aside:
+                self.mice.dpi.forget_dpi(target)
             return None
         if not aside and self.mice.dpi.remembered_dpi(target) is not None:
             self.mice.dpi.remember_dpi(dpi if held is None else held, target)
         target.on_dpi(dpi)
         return dpi
 
-    def gone_after_write(self, target: AttachedMouse, before: list[int]) -> None:
+    def gone_after_write(self, target: AttachedMouse, before: list[int], kept: bool) -> None:
         """A mouse gone part way through a write that changed profile 1's stage list, or left
         it unknown: follow_dpi cannot read it now, so a remembered DPI is forgotten, as at a
-        read that fails. `before` is the list from before the write."""
-        if (target not in self.mice.attached and self.mice.dpi.own_stages_in_force(target) is None
-                and (target.mouse.flash_unknown or target.mouse.dpi_stages != before)):
+        read that fails. Under a game profile's own stages, or at an edit made with a DPI kept
+        from before a load (`kept`, taken before the write since follow_kept can drop that
+        DPI), where follow_dpi takes nothing from the mouse, it follows the edit instead
+        (Dpi.follow_remembered). Under own stages a list left unknown shows no edit, so it
+        stays. `before` is the list from before the write."""
+        after = target.mouse.dpi_stages
+        if target in self.mice.attached or (after == before and not target.mouse.flash_unknown):
+            return
+        if self.mice.dpi.own_stages_in_force(target) is not None or (kept and after != before):
+            self.mice.dpi.follow_remembered(target, before, after)
+        else:
             self.mice.dpi.forget_dpi(target)
 
     def _cmd_mouse_dpi_stages(self, request: dict) -> dict:
@@ -380,12 +396,12 @@ class ProfileWrites:
         if request.get("reset") is True:
             return {"ok": False, "error": self.mice.dpi.no_tuning(target)}
         stages, default, shift = stage_request(request)
-        before = target.mouse.dpi_stages
+        before, kept = target.mouse.dpi_stages, dpi_kept(target)
         try:
             image, outcome = self.flash_write(target, target.mouse.set_dpi_stages, stages,
                                               default, shift)
         except MouseError:
-            self.gone_after_write(target, before)
+            self.gone_after_write(target, before, kept)
             raise
         reply = {"ok": True, "dpi_stages": image.dpi_stages,
                  "default": image.dpi_stages[image.default_dpi_index],
@@ -446,12 +462,12 @@ class ProfileWrites:
 
     def _cmd_mouse_restore(self, request: dict) -> dict:
         target = self.mice.mouse_for(request)
-        before = target.mouse.dpi_stages
+        before, kept = target.mouse.dpi_stages, dpi_kept(target)
         try:
             (image, path), outcome = self.flash_write(target, target.mouse.restore_backup,
                                                       rate=False)
         except MouseError:
-            self.gone_after_write(target, before)
+            self.gone_after_write(target, before, kept)
             raise
         note = self.flash_note(target)
         if image.report_rate is not None and self.in_effect(target):
@@ -464,7 +480,7 @@ class ProfileWrites:
             note += self.rate_after_write(target)
             if target not in self.mice.attached:
                 # Torn down at the send: follow_dpi would ask the closed node.
-                self.gone_after_write(target, before)
+                self.gone_after_write(target, before, kept)
                 raise MouseError(GONE_AFTER_WRITE.format(target.name))
         table = target.mouse.button_table
         reply = {"ok": True, "restored_from": path,

@@ -21,6 +21,7 @@ from .style import (
     EntryTexts,
     Styler,
     confirm,
+    displayable,
     explain,
     header_spinner,
     holds_focus,
@@ -160,9 +161,11 @@ class StagesCard:
         #: model (the game profile's `kept_rate`).
         self._mouse_name: str | None = None
         #: Why the daemon refuses every write to profile 1 on the mouse shown, from the last
-        #: reply (`flash_refused`), or None: held by hold_refused.
+        #: reply (`flash_refused`), or None: held by hold_refused. None on a reply with no
+        #: `onboard`: such a mouse has no profile write to refuse.
         self._refused: str | None = None
-        #: The daemon sets the shown mouse's rate live alone (the reply's `rate_live`).
+        #: The daemon sets the shown mouse's rate live alone (the reply's `rate_live`, or a reply
+        #: with no `onboard`).
         self.rate_live = False
 
     @property
@@ -281,7 +284,9 @@ class StagesCard:
         onboard = info.get("onboard") or {}
         self._game = game = got if isinstance(got := info.get("game_profile"), dict) else {}
         self._mouse_name = info.get("name")
-        self.rate_live = bool(info.get("rate_live"))
+        # A mouse without onboard profiles has its rate set live (Mouse.set_report_rate), with
+        # no profile write to refuse.
+        self.rate_live = bool(info.get("rate_live")) or not onboard
         # The rows edit the game profile's own only where the daemon says they do: `edited` is
         # that profile, or empty where they do not.
         edited = game if game.get("edits") else {}
@@ -293,7 +298,7 @@ class StagesCard:
         if self._entry_for == self._product():
             self.show_stage_colors(info.get("stage_colors"), info.get("stage_color_names"))
         refused = info.get("flash_refused")
-        self._refused = refused if isinstance(refused, str) else None
+        self._refused = refused if isinstance(refused, str) and onboard else None
 
     def hold_refused(self) -> None:
         """Keep the rows off for a mouse whose every write to profile 1 the daemon refuses
@@ -337,12 +342,13 @@ class StagesCard:
             self._loading.put_selected(self.rate_row,
                                        0 if chosen is None else rates.index(chosen))
         if own_rate:
-            self.rate_row.set_subtitle(f"{edited['name']}'s own"
-                                       + (f"; profile 1 stores {stored} Hz" if stored else ""))
+            self.rate_row.set_subtitle(displayable(
+                f"{edited['name']}'s own" + (f"; profile 1 stores {stored} Hz" if stored else "")))
         elif edited:
             whose = (f"Kept for the {self._mouse_name}" if kept_in_force(edited)
                      else "Onboard profile 1's")
-            self.rate_row.set_subtitle(f"{whose}; a change is saved as {edited['name']}'s own")
+            self.rate_row.set_subtitle(
+                displayable(f"{whose}; a change is saved as {edited['name']}'s own"))
         elif self._dash and stored is None and live is None:
             # The DPI row's words for a value not read. A rate read but not listed keeps the dash
             # and, like a reply that left the row on a rate, takes a subtitle below.
@@ -466,7 +472,7 @@ class StagesCard:
             said = f"{name} uses profile 1's DPI stages and {rate}"
         else:
             said = f"{name} has its own {' and '.join(own)}"
-        self.game_row.set_subtitle(said)
+        self.game_row.set_subtitle(displayable(said))
 
     def on_game_reset(self, _b: Gtk.Button | None) -> None:
         """Remove its own…, once confirmed: a `reset` of the loaded game profile's own stages,

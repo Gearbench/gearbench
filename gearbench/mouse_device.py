@@ -89,6 +89,10 @@ def _set_aside(path: Path, write: str) -> None:
 
 
 class Mouse:
+    """One attached mouse, built from its node and its product id's MouseModel, `model`, which
+    gives its name, buttons, backup prefix, writes_tested and cell, never the tables mouse.py
+    builds from MODEL_OF at import."""
+
     def __init__(self, dev: Hidpp, product: int) -> None:
         self.dev = dev
         #: The product id that answered, its model's key in MODEL_OF.

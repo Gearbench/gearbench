@@ -12,6 +12,10 @@ The claim is the mice's 0x8070 claim, fn 8 `01`, sent again right before each ef
 RAM_ONLY, and the release fn 8 `00`: the PRO WIRELESS's firmware stores a zone effect written
 without that claim first, and no source says whether the G213's does. That this keeps the
 G213's writes out of its memory is not checked on the hardware.
+
+The functions that tell the two kinds apart are type guards, so a caller past one reaches
+0x8071's own functions without a cast; one that reaches them past another check, such as its
+brightness levels, casts.
 """
 
 from __future__ import annotations

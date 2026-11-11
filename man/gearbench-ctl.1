@@ -4,7 +4,7 @@
 .\"
 .\" Keep this in step with build_parser() in gearbench/cli/. A man page that
 .\" disagrees with --help is worse than none.
-.TH GEARBENCH\-CTL 1 "2026-11-04" "gearbench\-ctl 1.3.0" "User Commands"
+.TH GEARBENCH\-CTL 1 "2026-11-11" "gearbench\-ctl 1.3.1" "User Commands"
 .\" Command, option, key and file names must not break at a hyphen, and a
 .\" justified line spreads them apart. groff's man macros set the adjustment
 .\" again from the AD string at each tagged paragraph, so .ad l alone lasts
@@ -509,6 +509,10 @@ fails the same way until the file can be read again. Fix it, then
 it, or
 .B save
 over it.
+With a folder at either file's name, a link to one, a link that leads into
+a folder not there, or a folder this account may not write, such as a
+read-only mount, the save has nowhere to write: fix that, then
+.BR reload .
 No macro is written: a macro file edited by hand is saved over only after a
 .BR reload .
 .TP
@@ -551,7 +555,8 @@ names comes back. A loaded game profile whose file cannot be read
 keeps what it held, and the reply and
 .B status
 give the file's error until a reload reads it or, unless the profiles folder
-could not be listed or the file could not be opened,
+could not be listed, the file could not be opened, its folder cannot be
+written or a folder (or a link to one) is at its name,
 .B save
 writes over it; one whose file is gone is unloaded and not loaded again at the
 next start. A
@@ -628,11 +633,12 @@ is set to an absolute path other than root's. Run as root with neither
 .B SUDO_UID
 nor
 .B PKEXEC_UID
-set, as after
+set to a user other than root, as after
 .B su \-
 or
 .BR doas ,
-it cannot ask the user's daemon and refuses, exit status 1.
+or under sudo from a root shell, it cannot ask the user's daemon and refuses,
+exit status 1.
 .B \-\-force
 probes anyway, accepting a possible misread. A lighting reply too short to
 read is an error, exit status 1.
@@ -773,9 +779,11 @@ programs on one node take each other's replies. Run as root with neither
 .B SUDO_UID
 nor
 .B PKEXEC_UID
-set, it cannot ask the user's daemon and counts it as one that may run, and
-in place of the stop it says to run the report as yourself, or with sudo,
-run0 or pkexec.
+set to a user other than root, it cannot ask the user's daemon and counts it
+as one that may run, and in place of the stop it says to run the report as
+yourself, or with sudo, run0 or pkexec from your own account.
+Where the daemon's socket could not be used, which no stop changes, it gives
+the cause and says to fix it and run the report again.
 A receiver whose paired
 devices have nodes of their own is sent nothing, also beside a device the
 daemon holds, and each device is reported on its own node. A receiver the
@@ -804,7 +812,7 @@ as the user who ran them, on that user's PipeWire, with only
 .B PATH
 and
 .B XDG_RUNTIME_DIR
-of root's environment. No Logitech node on USB and
+of root's environment and none of its terminal. No Logitech node on USB and
 no PipeWire card of vendor 046d or 9886 is an error, exit status 1.
 .IP
 For each model Gearbench drives but has not yet tested, a note says
@@ -858,9 +866,11 @@ has an entry in
 .I /etc/xdg/autostart
 or
 .IR ~/.config/autostart ,
-enabled or not, even when opened by hand; a launcher stays, since its games
-run inside it. A game started from Steam, Lutris, Heroic, Bottles or itch is
-listed by its own name beside the launcher's, a Proton or Wine game by its
+enabled or not, even when opened by hand, and so is one that runs in a unit
+the session started for an autostart entry, named
+.IR app\-id@autostart.service ;
+a launcher stays either way, since its games run inside it. A game started
+from Steam, Lutris, Heroic, Bottles or itch is listed by its own name beside the launcher's, a Proton or Wine game by its
 Windows
 .BR .exe .
 With none to list, it prints
@@ -1437,7 +1447,7 @@ see
 each steps the keyboard's brightness in their place),
 .B eq\-next
 (the next preset of the headset's equalizer library, round from the last,
-past any preset whose bands the headset does not play;
+past any preset whose bands or gains the headset does not take;
 on a G635, whose equalizer runs on the computer, a press does nothing and the
 daemon's journal says why),
 .B sidetone\-toggle
@@ -1953,6 +1963,9 @@ With
 .BR \-\-with\-programs ,
 a program another game profile already loads stays with it:
 the import comes without that program and says which profile keeps it.
+Where two replaces each wait for the other's to free a program, the line on
+the program that the one sent first cannot write says only that another game
+profile loads it.
 Two names are one program when one running process would match both: the
 kernel keeps the first 15 bytes of a process's name, so two names over 15
 bytes that share those are one. A
@@ -2390,7 +2403,9 @@ With the DPI shift held, the kept value becomes the new list's DPI at
 the stage the mouse was on before the shift, which the release puts back.
 The kept value is forgotten if the daemon cannot read or move the DPI after
 the write, if the mouse has stopped answering by then, or if the value to keep
-is outside 1 to 65534. With no value
+is outside 1 to 65534. While a loaded game profile has set the mouse's DPI, the
+kept value instead follows the edit with nothing read, and is forgotten where
+the new list ends before its place. With no value
 kept, such a write stores nothing, and the mouse stays on its own stage. Under
 a loaded game profile's own stages in host mode, the value is that profile's,
 kept in memory only, and
@@ -3197,7 +3212,8 @@ The state names the output it plays to while it is linked and nothing plays
 into it, and says
 .B "in use"
 while a game does. A name past 100 characters, a game's or that output's, is
-cut to its first 99 and an ellipsis.
+cut to its first 99 and an ellipsis, and the line names the first eight games,
+then how many more.
 .B on
 enables
 .I gearbench\-spatial.service
@@ -3349,7 +3365,8 @@ play while the headset is away; and one line for each program playing, or one
 for the programs that share a key, with where it plays and the key
 .B app
 takes. A name past 100 characters, a program's or an output's, is cut to its
-first 99 and an ellipsis.
+first 99 and an ellipsis, and a line of programs that share a key names the
+first eight it shares with, then how many more.
 .B on
 saves the default output you picked, one unplugged then included, enables
 .I gearbench\-outputs.service
@@ -3362,6 +3379,8 @@ disables it.
 One you had that is unplugged then is your pick again after the stop, and
 is the default output once it returns; the sound card that ranks highest
 plays meanwhile.
+One you picked since that is unplugged then stays your pick the same way,
+and what was given back plays until then.
 Each program keeps the output it was moved to, for its next start. Its report
 has no line for the programs, which WirePlumber moves to the default output
 seconds after the stop.
@@ -3371,7 +3390,11 @@ or
 .B off
 that fails prints systemctl's or PipeWire's own error when it prints one, and
 Gearbench's words otherwise, and exits 1, with a line on installing Gearbench
-when the unit file is missing. Where
+when the unit file is missing. After a stop that fails, that error is followed
+by any note
+.B off
+had made of the default output by then, such as that the one you had is the
+default output again. Where
 .B on
 or
 .B off
@@ -3531,6 +3554,9 @@ the input is still the default, it gives back the default input saved at
 one that is unplugged is written as your pick after the stop instead, and
 is the default again once it is back. With no input saved, it gives back
 the headset's own microphone, and with another input picked since, nothing.
+One picked since that is unplugged then is written as your pick after the
+stop the same way, and takes the place of the saved input when that is
+unplugged too.
 A pw\-dump or a pick that fails is a note, and it stops all the same.
 A step that fails prints systemctl's,
 systemd\-run's or PipeWire's own error when it prints one, and Gearbench's
@@ -5482,7 +5508,8 @@ Through the same node a program can also write the keyboard's custom
 assignments (HID++ feature 0x8101) so that keys report there (feature 0x1B05)
 in place of typing, read them and type them back through
 .IR /dev/uinput .
-F1 to F4 did so on a wired G515 TKL on 2026-10-22; other keys are taken to.
+F1 to F4 did so on a wired G515 TKL on 2026-10-22, and G1 to G9 on a
+G915 X LIGHTSPEED on its cable on 2026-10-23; other keys are taken to.
 The daemon writes custom assignments to the G915 X LIGHTSPEED alone, for its
 G keys.
 With its custom assignments off the G915 X LIGHTSPEED sent no report of FN
@@ -5625,6 +5652,12 @@ Set it for the manager itself, with
 in
 .IR \%~/.config/systemd/user.conf ,
 or not at all.
+A command run as root saves nothing below a directory or link another account
+could change, such as the user's own that
+.B su
+without its dash and
+.B sudo \-E
+leave set: run it as the account whose settings they are.
 .TP
 .B XDG_STATE_HOME
 Where the Outputs unit's process looks for WirePlumber's stream\-properties,
@@ -5667,9 +5700,16 @@ Inside its systemd unit's user namespace
 the daemon cannot tell root's files from another account's, so the unit makes
 the same check before each start, outside the namespace, and a refusal there
 fails the start with the daemon's words.
+The Gearbench Spatial and Outputs units keep the same rule for the directory of
+their PipeWire configuration, and a refusal fails the unit at its start.
 A command sends no request for the daemon to a socket another account's
-process listens on. One run as root under sudo, run0 or pkexec sends its
-requests only to a socket the user who ran it listens on, and to none of root's.
+process listens on. One run as root under sudo, run0 or pkexec from another
+account sends its requests only to a socket that account listens on, and to none
+of root's.
+One run as root with no such account sends none to a socket of root's in a
+directory another account could change, such as the user's own that
+.B su
+without its dash leaves set.
 The daemon makes the directory, when
 it is not there yet, with mode 0700, and each missing parent of it with mode
 0700 too; run by its unit, the check before each start makes them, so that
@@ -5687,7 +5727,7 @@ by pkexec, to the id of the user who ran them.
 .B probe
 or
 .B report
-run as root with one of them set to a user id and
+run as root with one of them set to the id of a user other than root and
 .B XDG_RUNTIME_DIR
 unset, empty, relative or
 .I /run/user/0
@@ -5699,7 +5739,8 @@ root's.
 also runs
 .B pw\-dump
 as that user.
-Run as root with neither set, they cannot ask the user's daemon (see
+Run as root with neither set to such an id, they cannot ask the user's daemon
+(see
 .B probe
 and
 .BR report ).

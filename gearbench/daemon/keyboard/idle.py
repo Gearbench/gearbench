@@ -477,8 +477,9 @@ class Idle:
         """An apply and idle times owed to a keyboard that answers again, asked on the probe's
         budget at most once per MOUSE_SILENT_RECHECK."""
         keyboard = self.keyboard
-        if keyboard.apply_owed and keyboard.lighting is not None and keyboard.keyboard_answers():
-            log.info("showing the %s the lighting it missed", keyboard.model_name())
+        if keyboard.apply_owed and keyboard.keyboard_answers():
+            log.info("showing the %s the %s it missed", keyboard.model_name(),
+                     "M and MR LEDs" if keyboard.lighting is None else "lighting")
             keyboard.apply_profile()
         if self.times_owed and keyboard.keyboard_answers():
             log.info("giving the %s the idle times it missed", keyboard.model_name())
@@ -601,8 +602,12 @@ class Idle:
         # A write it took that recent restarted the count and woke it already, as in
         # wake_with_another.
         recent = written is not None and now - written < IDLE_RESTART_INTERVAL
-        if not recent and self.write_idle_times() is not None:
-            return False
+        if not recent:
+            if self.write_idle_times() is not None:
+                return False
+            # From the write's end, as `_times_written_at` is: stamped at `now`, the next
+            # interval's first frame finds this write recent and skips its own.
+            self._change_times_at = time.monotonic()
         if keyboard.idle_lights == LIT:
             if not recent:
                 log.debug("a lighting change: the idle times written again, which restarts "

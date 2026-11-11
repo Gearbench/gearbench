@@ -7,10 +7,10 @@ With Follow the keyboard on (`headset_sync`, config.headset_sync_color) the ligh
 color a synced mouse takes from the leader, at the level it shows it (sync), as a synced mouse
 does (the owner's decisions of 2026-10-25): every path that gives a synced mouse its color
 gives it here too (Daemon.sync_to_leader), the headset's own effect, its release and a store
-are refused meanwhile (SYNC_ON), a G key's step goes to the keyboard's brightness in their
-place (step), sync turned off gives the lights back what Gearbench
-showed on them before, or the headset's own lighting (sync_changed), and a power-off leaves
-them black with their claim held in place of the release (go_dark)."""
+are refused meanwhile (_cmd_g432_lights), a G key's step goes to the keyboard's brightness in
+their place (step), sync turned off gives the lights back what Gearbench showed on them
+before, or the headset's own lighting (sync_changed), and a power-off leaves them black with
+their claim held in place of the release (go_dark)."""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ from ...keyboard import followed
 from ...lighting import OFF, EffectParams, effect_order
 from ..shared import (
     NOT_SYNCED,
+    SYNC_OFF_FIRST,
     SYNC_ON,
     failure_reason,
     name_text,
@@ -267,9 +268,10 @@ class HeadsetLighting:
         or with `release` the lights back to the headset's own;
         or `startup`, true or false, their startup effect (_set_startup); or with `store` the
         lighting shown kept in the headset (_store). More than one of the four, a color
-        alone counted as an effect, is refused with nothing sent, and while the lights
-        follow the keyboard all but `startup` (SYNC_ON). The first claim a headset with no
-        host control refuses ends every write (NO_CONTROL), the effect never sent."""
+        alone counted as an effect, is refused with nothing sent, and with Follow the
+        keyboard on all but `startup`: SYNC_ON, or where the lights do not follow, not_driven's
+        words and SYNC_OFF_FIRST. The first claim a headset with no host control refuses ends
+        every write (NO_CONTROL), the effect never sent."""
         if (refused := self.refusal()) is not None:
             return refused
         zones = cast("HeadsetZones", self.zones)
@@ -282,6 +284,9 @@ class HeadsetLighting:
             return self._set_startup(zones, read_switch(startup, "g432_lights.startup"))
         if self.d.config.headset_sync_color:
             leader = followed(self.d.per_keyboard.leader())
+            if (said := self.not_driven()) is not None:
+                off_first = SYNC_OFF_FIRST.format(leader=leader, command="headset-sync")
+                return {"ok": False, "error": f"{said}; {off_first}"}
             return {"ok": False, "error": SYNC_ON.format(device="headset", leader=leader,
                                                          command="headset-sync")}
         if store:
@@ -398,8 +403,8 @@ class HeadsetLighting:
         or, with `cycle` False, off, or at full where it is off. Where Gearbench shows none,
         it takes the lighting: the last effect it showed, by product id, or the default,
         static in DEFAULT_COLOR, at the step after full, or off (the owner's answer of
-        2026-10-25). While the lights follow the keyboard, the keyboard takes the step in
-        their place."""
+        2026-10-25). With Follow the keyboard on, the keyboard takes the step in their
+        place."""
         if (refused := self.refusal()) is not None:
             return refused
         if self.d.config.headset_sync_color:

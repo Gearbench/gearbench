@@ -3,13 +3,14 @@ on change to a keyboard that keeps it, then the layer in force), Disabled on one
 zone effect, a flat color with its per-key fill and overrides, cut to the keyboard's own keys
 where its model says so, or with each area's
 color on a board lit by areas, a drag's `preview` frame, the frame at FN's press and release,
-and the dark that keeps the claim. Each write is given the lighting it writes
+and the dark that keeps the claim. Each lighting write is given the lighting it writes
 to, 0x8071's clusters or 0x8070's zones (keyboard_zones.KeyboardLights), by a caller that has
-checked there is one."""
+checked there is one; on a keyboard with none, an apply's M and MR LEDs are leds_unlit's."""
 
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, cast
 
@@ -17,6 +18,7 @@ from ...hidpp import HidppError
 from ...keyboard_zones import KeyboardLights, KeyboardZones, paints_areas, paints_keys
 from ...keycodes import LOGO, ZONE_NAMES, by_zone
 from ...lighting import (
+    DARK,
     EFFECT_IDS,
     OFF,
     STATIC_EFFECTS,
@@ -157,6 +159,21 @@ class Paint:
         that level already, as after a write of the daemon's own that changed it."""
         held, self.held_brightness = self.held_brightness, level
         return level == held
+
+    def leds_unlit(self) -> None:
+        """An apply's M and MR LEDs on a keyboard attached without lighting, which no lighting
+        write clears: due at once, or off now on a dark board; owed to one marked not answering
+        (Idle.tend_idle), as Keyboard.write_due_leds owes them."""
+        keyboard = self.keyboard
+        keyboard.apply_owed = False
+        if keyboard.keys is None:
+            return
+        if keyboard.lights != DARK:
+            keyboard.leds_due = time.monotonic()
+            return
+        if keyboard.keyboard_answering():
+            keyboard.write_led(lambda keys: keys.all_leds_off(), "M and MR", owed=True)
+        keyboard.apply_owed = keyboard.dev is not None and not keyboard.keyboard_answering()
 
     def read_brightness(self) -> None:
         """At each setup, on a model that keeps its brightness (KeyboardModel.keeps_brightness)

@@ -80,7 +80,8 @@ from the number row to the shift row, its right Shift narrower, and its bottom r
 and the 98% boards the G915's keypad, moved left with a 1-unit 0; their top row, the rest of
 their bottom row, arrows and right column are their own, rounded to 0.05. Their light bars,
 LED ids 160 to 221 that overlap G1 to G9's zones on the G512 X, are not drawn, nor are their
-dials or the G316 X's display.
+dials or the G316 X's display, so no paint names a light bar's LED; a fill reaches them, as
+far as the highest zone the keyboard's zone bitmap sets (lighting.Lighting.fill_and_paint).
 """
 
 from __future__ import annotations

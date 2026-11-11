@@ -10,13 +10,14 @@ through, keeps it: on the card's route for the node's device where the card has 
 pipewire-pulse 1.6.2 reads and sets a sink's and a source's alike (collect.c's
 collect_device_info and pulse-server.c's do_set_volume, read 2026-10-25). Gearbench's
 profile sets give no mapping a mixer path and so no route (the A50 X's device report listed
-no output route, 2026-10-23); PipeWire's own usb-gaming-headset.conf
-gives each output of the A50 Gen 4 one, and analog-only.conf the G432's output one (the
-hardware, 2026-10-18) and, assumed, its microphone. GNOME shows the volume as the cube root of
-the loudest channel's, in percent (headset_audio.gnome_percent), and its slider sets the
-loudest channel to the level (headset_audio.gnome_volume) and the others in proportion
-(libgvc's gvc_mixer_stream_set_volume, through PulseAudio's pa_cvolume_scale); a route is set
-saved, so WirePlumber keeps it, as pipewire-pulse sets one. The mute is left as it is.
+no output route, 2026-10-23); PipeWire's own usb-gaming-headset.conf, before WirePlumber
+has read Gearbench's rule, gives each output of the A50 Gen 4 one, and analog-only.conf the
+G432's output one (the hardware, 2026-10-18) and, assumed, its microphone. GNOME shows the
+volume as the cube root of the loudest channel's, in percent (headset_audio.gnome_percent),
+and its slider sets the loudest channel to the level (headset_audio.gnome_volume) and the
+others in proportion (libgvc's gvc_mixer_stream_set_volume, through PulseAudio's
+pa_cvolume_scale); a route is set saved, so WirePlumber keeps it, as pipewire-pulse sets
+one. The mute is left as it is.
 pw-dump prints each channel's volume to six places (spa_dtoa's "%f", read in PipeWire's
 source, not run), and a set writes six, so a channel under 0.0000005 is read or set as 0 and
 stays there at each later set: a set at 1 %, or at 2 % or 3 % for a strong balance, silences
@@ -37,14 +38,15 @@ from . import headset_audio, headset_mic, pipewire_client, pipewire_headsets
 
 #: Each headset whose card Gearbench's profile set gives a Game and a Chat output
 #: (pipewire_headsets.Headset.game and chat), by its key in pipewire_headsets.HEADSET_KEYED,
-#: with each output's node name by its word.
+#: with each output's node name by its word (the owner's decision of 2026-10-25).
 OUTPUTS = {headset.key: {"game": headset.game, "chat": headset.chat}
            for headset in pipewire_headsets.HEADSETS
            if headset.game is not None and headset.chat is not None}
 #: The microphone's word.
 MIC = "mic"
 #: Each headset's volumes by its key, their words in the order they are shown: its outputs'
-#: where it has them (OUTPUTS), then its microphone's.
+#: where it has them (OUTPUTS), then its microphone's, which every headset has (the owner's
+#: decision of 2026-10-25).
 VOLUMES = {headset.key: (*OUTPUTS.get(headset.key, ()), MIC)
            for headset in pipewire_headsets.HEADSETS}
 #: Each output's word as a sentence names it.

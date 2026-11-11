@@ -29,10 +29,12 @@
 # Through the same node a program can also write the keyboard's custom
 # assignments (0x8101) so that keys report to the host (0x1B05 event 0) and
 # type nothing themselves, read them here and type them back through
-# /dev/uinput. A file that set F1 to F4 so made them come here on the wired
-# G515 TKL on 2026-10-22; other keys are taken to work the same way, not
-# checked on the hardware. So the node can carry what is typed, and a program
-# that holds it open can read another account's after a user switch.
+# /dev/uinput. A file that set F1 to F4 so made them come on interface 02 of
+# the wired G515 TKL on 2026-10-22, and one that set G1 to G9 so made them
+# come on interface 02 of the G915 X LIGHTSPEED's cable on 2026-10-23; other
+# keys are taken to work the same way, not checked on the hardware. So the
+# node can carry what is typed, and a program that holds it open can read
+# another account's after a user switch.
 # Gearbench writes no such file to these while that write is untested on them.
 #
 # Matched on properties, as 70-g915.rules is, for the reason it gives.

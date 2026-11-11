@@ -41,7 +41,7 @@ from ..report import REPORT_FORM
 from ..settings_files import shown_path
 from ..tray import ASLEEP_ICON, NOT_AVAILABLE_ICON
 from ..wording import (
-    ASLEEP_OR_SWITCHED_OFF,
+    NOT_ANSWERING_WORDS,
     NOT_READ as UNREAD,
     READ_AT,
     SERVICE_JOURNAL,
@@ -52,6 +52,7 @@ from ..wording import (
     reason,
     route,
     route_of,
+    turns_replaced,
     word_list,
 )
 from .worker import Call, LoadingGuard, take_typed
@@ -60,7 +61,12 @@ from .worker import Call, LoadingGuard, take_typed
 #: from Adwaita with its license (COPYING, beside them), as a hicolor tree of the window's
 #: own: a theme other than Adwaita may lack them, as KDE's Breeze lacks the battery's and
 #: the Macros tab's, which drew as missing images there. Its tray/ holds the tray's own
-#: signs (tray.TRAY_ICONS), which the window does not name.
+#: signs (tray.TRAY_ICONS), which the window does not name. A name the specification lists
+#: is not copied: a theme that follows it has the name, or its colored drawing, which
+#: GThemedIcon looks for after the symbolic one (edit-undo after edit-undo-symbolic, GLib
+#: 2.88, measured 2026-10-28). The folder ships inside the package, so none of its generic
+#: names lands in the system's hicolor, where another package's icon of that name would
+#: clash with it.
 ICONS = Path(__file__).resolve().parent / "icons"
 
 
@@ -111,7 +117,7 @@ KEY_TEMPLATE = """
 """
 
 #: A device indicator's third state: the device or its receiver is attached
-#: and the device does not answer, switched off or asleep.
+#: and the device does not answer.
 ASLEEP = "asleep"
 #: What each tab's status row says in that state.
 MOUSE_ASLEEP = "Asleep or switched off; move it or switch it on"
@@ -158,9 +164,11 @@ COULD_NOT_READ = "Could not be read ({})"
 #: emblem-ok-symbolic: Adwaita's icon theme (50) lacks it. False's label is the
 #: status pages' "not available" and blames no device: a tab also sets False
 #: while the daemon does not answer, when the device may be plugged in and fine.
+#: ASLEEP's gives no cause: the row's line does, and a keyboard on its cable is
+#: neither asleep nor off (KEYBOARD_SILENT_ON_CABLE).
 DOT_STATES = {True: ("object-select-symbolic", "success", CONNECTED),
               False: (NOT_AVAILABLE_ICON, "error", "Not available"),
-              ASLEEP: (ASLEEP_ICON, "warning", capitalized(ASLEEP_OR_SWITCHED_OFF))}
+              ASLEEP: (ASLEEP_ICON, "warning", capitalized(NOT_ANSWERING_WORDS))}
 
 
 def status_dot() -> Gtk.Image:
@@ -212,18 +220,21 @@ def put_dot(row: Adw.ActionRow, dot: Gtk.Image, state: bool | str | None, label:
     else:
         set_dot(dot, state)
     # set_dot's words are a device's: "Not available" for a unit that failed.
-    dot.update_property([Gtk.AccessibleProperty.LABEL], [label])
+    dot.update_property([Gtk.AccessibleProperty.LABEL], [displayable(label)])
     if not attached:
         row.add_prefix(dot)
 
 
 def displayable(text: str) -> str:
     """`text` with U+FFFD for each lone surrogate, on which PyGObject raises
-    UnicodeEncodeError, and for each NUL, where PyGObject's C copy of the text ends.
-    surrogateescape file names and json.loads of an escape such as "\\udce9" make the
+    UnicodeEncodeError, for each NUL, where PyGObject's C copy of the text ends, and for each
+    direction turn and line or paragraph separator (wording.turns_replaced), which a saved
+    name can hold (config.refuse_controls) and which would reorder or break the sentence it
+    is in. surrogateescape file names and json.loads of an escape such as "\\udce9" make the
     first; a device's firmware name (hidpp.firmware_entity) and json.loads of "\\u0000"
     the second."""
-    return "".join("\ufffd" if c == "\0" or "\ud800" <= c <= "\udfff" else c for c in text)
+    return turns_replaced("".join("\ufffd" if c == "\0" or "\ud800" <= c <= "\udfff" else c
+                                  for c in text))
 
 
 def say_in_place(listbox: Gtk.ListBox, title: str, detail: str = "",
@@ -419,11 +430,13 @@ def answer_on_enter(entry: Gtk.Entry, key: str) -> None:
     """Enter in a dialog's name entry answers `key` once, while that response is enabled. The
     dialog is found as the entry's ancestor, not held: a handler that held it would make a
     cycle through GTK that Python's collector cannot see. The response is turned off as it is
-    given: over an Adw window the entry keeps the cursor while the dialog slides away, and a
-    second Enter then answered again (libadwaita 1.9.1, measured 2026-10-31)."""
+    given and the entry takes no more typing, which would turn it back on: over an Adw window
+    the entry keeps the cursor while the dialog slides away, and a second Enter then answered
+    again (libadwaita 1.9.1, measured 2026-10-31)."""
     found = cast("Adw.AlertDialog", entry.get_ancestor(Adw.AlertDialog))
     if found.get_response_enabled(key):
         found.set_response_enabled(key, False)
+        entry.set_editable(False)
         found.emit("response", key)
         found.force_close()
 
@@ -436,7 +449,8 @@ def ask_name(parent: Gtk.Widget, name: str, then: Callable[[str], None],
     `response`, which waits for one `refusal` takes. While it refuses one, its sentence is
     the body in place of `body`, as the Name rows toast it: a refusal said in words, and
     the entry is red (watch_refused), as the Name rows are."""
-    dialog = Adw.AlertDialog(heading=heading, body=refusal(name.strip()) or body)
+    dialog = Adw.AlertDialog(heading=displayable(heading),
+                             body=displayable(refusal(name.strip()) or body))
     key = response.lower()
     entry = Gtk.Entry(text=name)
     entry.update_property([Gtk.AccessibleProperty.LABEL], [label])
@@ -451,7 +465,7 @@ def ask_name(parent: Gtk.Widget, name: str, then: Callable[[str], None],
         found = cast("Adw.AlertDialog", entry.get_ancestor(Adw.AlertDialog))
         refused = refusal(entry.get_text().strip())
         found.set_response_enabled(key, refused is None)
-        found.set_body(refused or body)
+        found.set_body(displayable(refused or body))
 
     entry.connect("changed", allowed)
     # Not through `activates-default`: the entry's default action is the window's, not the
@@ -842,8 +856,9 @@ def offer(dialog: Adw.AlertDialog, key: str, label: str,
 def confirm(parent: Gtk.Widget, heading: str, body: str, response: str,
             then: Callable[[], None], destructive: bool = True) -> None:
     """A confirmation over `parent`; `then` runs on `response` (offer). A lone surrogate in
-    `body`, as in a folder's name that is not UTF-8, shows as U+FFFD (displayable)."""
-    dialog = Adw.AlertDialog(heading=heading, body=displayable(body))
+    `body`, as in a folder's name that is not UTF-8, shows as U+FFFD, and a saved name's
+    direction turn in `heading` or `body` as well (displayable)."""
+    dialog = Adw.AlertDialog(heading=displayable(heading), body=displayable(body))
     offer(dialog, response.lower(), response,
           Adw.ResponseAppearance.DESTRUCTIVE if destructive else Adw.ResponseAppearance.DEFAULT,
           then)
@@ -924,10 +939,11 @@ class DeviceView:
 
     def missing(self, title: str, reason: str) -> None:
         """Stop the spinner and say why the device is not there. The description
-        is markup, so the reason, which can hold a node or socket path, is escaped."""
+        is markup, so the reason, which can hold a node or socket path, is escaped, a lone
+        surrogate or a NUL in it shown as U+FFFD (displayable)."""
         self.status.set_icon_name(self.icon)
         self.status.set_title(title)
-        self.status.set_description(GLib.markup_escape_text(capitalized(reason)))
+        self.status.set_description(GLib.markup_escape_text(displayable(capitalized(reason))))
 
 
 def top_switcher(stack: Gtk.Stack) -> Gtk.StackSwitcher:
@@ -1255,8 +1271,8 @@ class NoticesRow:
 #: when the browser does not open, with the form's address behind Details.
 UNTESTED_TITLE = "Not yet tested on this model"
 #: A write held on a model not yet tested, said once before a click at the narrowest scope that
-#: holds every grayed row: a group's line, or a row's own (the owner's decision of
-#: 2026-10-27). The cause stays the CLI's, the refusal toast's and Details'.
+#: holds every grayed row: a group's line, or a row's own, never a tooltip alone (the owner's
+#: decision of 2026-10-27). The cause stays the CLI's, the refusal toast's and Details'.
 TEST_WAIT = "for a test on this model"
 CHANGES_WAIT = f"Changes wait {TEST_WAIT}"
 PROFILE_WRITES_WAIT = f"Writes to onboard profile 1 wait {TEST_WAIT}"

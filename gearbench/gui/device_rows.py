@@ -12,7 +12,8 @@ from .style import NoticesRow, displayable, set_dot, show_battery, status_dot, w
 class StatusRow(Adw.ActionRow):
     """A device tab's Status row, whose node (show_node) is its tooltip for the pointer and,
     since a tooltip alone reaches neither the keyboard nor a screen reader, a hidden label
-    that the row's description reads after its subtitle."""
+    that the row's description reads after its subtitle (the owner's decision of
+    2026-10-31)."""
 
     def __init__(self) -> None:
         super().__init__(title="Status", use_markup=False)

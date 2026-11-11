@@ -60,6 +60,7 @@ from .style import (
     DeviceView,
     NoticesRow,
     Switcher,
+    displayable,
     effect_label,
     effect_tips,
     explain,
@@ -459,7 +460,7 @@ class MousePage:
                  if self.ok or p["code"] not in NOT_ATTACHED_CODES
                  or self._refusal not in (None, p["message"])]
         if lines:
-            self.profile_banner.set_title("\n".join(lines))
+            self.profile_banner.set_title(displayable("\n".join(lines)))
         self.profile_banner.set_revealed(bool(lines))
 
     def set_editing(self, text: str, line: str) -> None:
@@ -650,7 +651,7 @@ class MousePage:
         # keeps, Host mode and the buttons, stay live and their changes are saved.
         self.answering = bool(info.get("answering"))
         set_dot(self.state_dot, True if self.answering else ASLEEP)
-        self.away_banner.set_title(AWAY_BANNER.format(info.get("name") or "mouse"))
+        self.away_banner.set_title(displayable(AWAY_BANNER.format(info.get("name") or "mouse")))
         self.away_banner.set_revealed(not self.answering)
 
     def _show_status(self, info: dict) -> None:
@@ -798,7 +799,7 @@ class MousePage:
         able = set(info.get("capabilities") or ())
         name = self._name = str(info.get("name") or MOUSE_TAB)
         # A group's title is markup, and the name is the daemon's.
-        self.status_group.set_title(GLib.markup_escape_text(name))
+        self.status_group.set_title(GLib.markup_escape_text(displayable(name)))
         show_untested(self.untested_row, info.get("untested"))
         show_firmware(self.firmware_row, info.get("firmware"))
         self.light_group.set_visible("lighting" in able)
@@ -846,7 +847,7 @@ class MousePage:
                         else HOST_NOT_TAKEN_WHY.format(error))
         else:
             subtitle = HOST_NOT_YET
-        self.host_row.set_subtitle(subtitle)
+        self.host_row.set_subtitle(displayable(subtitle))
 
     def on_host_mode(self, row: Adw.SwitchRow, _p: GObject.ParamSpec) -> None:
         """Send the switch, and read the mouse back either way: a refusal puts the row back,
@@ -893,7 +894,7 @@ class MousePage:
         # A group's description is markup, and the idle reason is the daemon's, naming the
         # mouse.
         self.buttons_group.set_description(
-            GLib.markup_escape_text(capitalized(self._idle))
+            GLib.markup_escape_text(displayable(capitalized(self._idle)))
             if self._idle
             else BUTTONS_HELP if table.get("event_node") else BUTTONS_HOST_HELP)
 
@@ -1213,7 +1214,8 @@ class MousePage:
             self._sync_unanswered -= 1
             if reply is not None:
                 self.sync = bool(reply.get("mouse_sync_color"))
-            # A later click still out is the user's last: its answer puts the switch right.
+            # A later click still out is the user's last: its answer puts the switch right
+            # and alone says the choice is saved.
             if not self._sync_unanswered:
                 self.set_sync(self.sync)        # a refusal puts the switch back
             if reply is None:
@@ -1222,6 +1224,6 @@ class MousePage:
                 # Synced, the picker showed the keyboard's color; the mouse's
                 # own is only in a `mouse` reply.
                 self.refresh()
-            if wanted and not reply.get("mouse_lights"):
+            if wanted and not reply.get("mouse_lights") and not self._sync_unanswered:
                 self._toast(SYNC_SAVED)
         self._call({"command": "mouse_sync", "value": wanted}, done)

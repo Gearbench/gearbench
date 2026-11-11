@@ -35,6 +35,7 @@ from .style import (
     ask_name,
     blank,
     confirm,
+    displayable,
     holds_focus,
     in_place,
     name_button,
@@ -105,7 +106,7 @@ def keyboard_color(profile: GameProfile, shown_on: ShownOn) -> int:
 
 def programs_text(processes: list[str]) -> str:
     """What loads a profile, in one line: `Loads for a, b or c`."""
-    return f"Loads for {word_list(processes)}" if processes else MANUAL_ONLY
+    return displayable(f"Loads for {word_list(processes)}") if processes else MANUAL_ONLY
 
 
 def still_matching(processes: list[str], program: str) -> list[str]:
@@ -142,6 +143,16 @@ def program_refusal(profile: GameProfile, program: str) -> str | None:
 def matches_too(others: list[str]) -> str:
     """`a matches it too`, `a and b match it too`."""
     return f"{word_list(others, 'and')} {'matches' if len(others) == 1 else 'match'} it too"
+
+
+def give_back_focus(focus: Gtk.Widget) -> None:
+    """Put the cursor back on `focus`, in a row taken out and put back: GTK moves it to the
+    list at a later frame. The text of an entry row keeps what is typed unselected: grab_focus
+    would select the whole text, and the next keystroke would replace it."""
+    if isinstance(focus, Gtk.Text):
+        focus.grab_focus_without_selecting()
+    else:
+        focus.grab_focus()
 
 
 def picker_row(process: str, label: str) -> tuple[str, str]:
@@ -229,6 +240,8 @@ class ProfileManager:
         library = self.win.library
         names = [p.name for p in library]
         if names != list(self.rows):
+            root = self.profile_list.get_root()
+            focus = root.get_focus() if root is not None else None
             for name, row in self.rows.items():
                 self.profile_list.remove(row.expander)
                 if name not in names:
@@ -237,6 +250,8 @@ class ProfileManager:
                          for profile in library}
             for row in self.rows.values():
                 self.profile_list.append(row.expander)
+            if focus is not None and focus.is_ancestor(self.profile_list):
+                give_back_focus(focus)
         loaded = self.win.game_profile(self.win.overlay)
         for profile in library:
             self.rows[profile.name].show(profile.processes, profile is loaded)
@@ -265,15 +280,23 @@ class ProfileManager:
         if row is not None:
             row.expander.set_expanded(True)
 
+    def _named(self, name: str) -> Callable[[], str]:
+        """What gives the profile `name`'s name when something asked now is answered: its
+        row's, which a rename's reply moves whether or not a file read landed first and left
+        the GameProfile under the old name; `name` where the manager has no row. Weakly: the
+        picker's rows hold this, and a row holds the manager."""
+        row = self.rows.get(name)
+        if row is None:
+            return lambda: name
+        named = weakly(row.named)
+        return lambda: named() or name
+
     def pick(self, name: str) -> None:
         """Show the running programs, to add one to the profile `name`. Its
         rows hold on_pick, which holds this object weakly: gone with it."""
-        picked, is_open = weakly(self._picked), weakly(self._is_open)
-        # The pick goes to the profile's name then: a rename answered meanwhile changes it.
-        profile = self.win.game_profile(name)
+        picked, is_open, named = weakly(self._picked), weakly(self._is_open), self._named(name)
         picker = ProgramPicker(self.win.worker, name,
-                               lambda process: picked(profile.name if profile is not None
-                                                      else name, process),
+                               lambda process: picked(named(), process),
                                lambda: not is_open())
         self.nav.push(picker.page)
 
@@ -299,8 +322,8 @@ class ProfileManager:
         profile = self._profile(name)
         if profile is None:
             return
-        # The profile's name at the answer, as a pick's: a rename answered meanwhile changes it.
-        ask_name(self.win, "", lambda program: self.add_program(profile.name, program),
+        named = self._named(profile.name)
+        ask_name(self.win, "", lambda program: self.add_program(named(), program),
                  ADD_BY_NAME_HEADING.format(profile.name), response="Add",
                  refusal=lambda text: program_refusal(profile, text), label=PROGRAM_NAME)
 
@@ -315,9 +338,10 @@ class ProfileManager:
         if refusal is not None:
             self.win.toast(refusal)
             return
+        named = self._named(profile.name)
 
         def add() -> None:
-            current = self._profile(profile.name)
+            current = self._profile(named())
             if current is None:
                 return
             # Asked again at the answer: a file read while the launcher's question was up can
@@ -351,12 +375,9 @@ class ProfileManager:
         others = still_matching(profile.processes, program) if profile is not None else []
         body = (f"{name} still auto-loads for {program}: {matches_too(others)}." if others
                 else f"{name} stops auto-loading for {program}.")
-        # The row's name at the answer, as delete's: a rename answered meanwhile renames the
-        # row, where a file read landing before that reply left `profile` under the old name.
-        row = self.rows.get(name)
+        named = self._named(name)
         self._ask(f"Remove {program}?", body, "Remove",
-                  lambda: self._do_remove_program(name if row is None else row.name, program),
-                  destructive=True)
+                  lambda: self._do_remove_program(named(), program), destructive=True)
 
     def _do_remove_program(self, name: str, program: str) -> None:
         profile = self._profile(name)
@@ -399,8 +420,7 @@ class ProfileManager:
                 if (stale := self.rows.get(now)) is not None:
                     self.profile_list.remove(stale.expander)
                     stale.drop_mouse_color()
-                # In its place: refresh takes every row out and back, the cursor with them,
-                # when the order of `rows` is not the library's, which a rename leaves as is.
+                # In its place, as the copy keeps it until the read below gives the sorted one.
                 self.rows = {now if key == was else key: kept
                              for key, kept in self.rows.items() if key != now}
             self.win.refresh()
@@ -418,10 +438,9 @@ class ProfileManager:
         if self.win.game_profile(self.win.overlay) is profile:
             body += " It is loaded now, and deleting it unloads it."
         body += " This cannot be undone."
-        row = self.rows.get(profile.name)
+        named = self._named(profile.name)
         self._ask(DELETE_HEADING.format(profile.name), body, DELETE_RESPONSE,
-                  lambda: self._do_delete(profile.name if row is None else row.name),
-                  destructive=True)
+                  lambda: self._do_delete(named()), destructive=True)
 
     def _do_delete(self, name: str) -> None:
         """Say it once the daemon has, with the name it deleted, so a
@@ -450,7 +469,7 @@ class ProfileRow:
         #: The profile as the last refresh showed it, which its Mouse color row starts from.
         self.profile = profile
         # Not markup: a profile's name and a program's are anyone's text.
-        self.expander = Adw.ExpanderRow(title=name, use_markup=False)
+        self.expander = Adw.ExpanderRow(title=displayable(name), use_markup=False)
         self.loaded = Gtk.Label(label="Loaded", valign=Gtk.Align.CENTER,
                                 css_classes=["dimmed"], visible=False)
         self.expander.add_suffix(self.loaded)
@@ -520,15 +539,8 @@ class ProfileRow:
         self.program_rows = programs
         for row in self._rows():
             self.expander.add_row(row)
-        if not held or focus is None:
-            return
-        if isinstance(focus, Gtk.Text):
-            # The text of an entry row, the Mouse color's Hex row among them: grab_focus
-            # would select the whole text, and the next keystroke would replace what is
-            # being typed.
-            focus.grab_focus_without_selecting()
-        else:
-            focus.grab_focus()
+        if held and focus is not None:
+            give_back_focus(focus)
 
     def _on_expanded(self, expander: Adw.ExpanderRow, _p: object) -> None:
         if not expander.get_expanded() or self.mouse_color is not None:
@@ -567,20 +579,24 @@ class ProfileRow:
     def _on_remove(self, _button: Gtk.Button, process: str) -> None:
         self._manager.remove_program(self.name, process)
 
+    def named(self) -> str:
+        """The name it goes by now (ProfileManager._named)."""
+        return self.name
+
     def rename(self, name: str) -> None:
         """Take the name the daemon renamed the profile to."""
         self.name = name
-        self.expander.set_title(name)
+        self.expander.set_title(displayable(name))
         name_button(self._delete_button, f"Delete {name}")
         self._texts.show(self.name_row, name)
 
     def _program_row(self, process: str, processes: list[str]) -> Adw.ActionRow:
-        row = Adw.ActionRow(title=process, use_markup=False)
+        row = Adw.ActionRow(title=displayable(process), use_markup=False)
         others = still_matching(processes, process)
         tip = (f"Remove {process}. The profile still auto-loads for it: {matches_too(others)}"
                if others else f"Remove {process}")
         remove = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER,
-                            css_classes=["flat"], tooltip_text=tip)
+                            css_classes=["flat"], tooltip_text=displayable(tip))
         remove.update_property([Gtk.AccessibleProperty.LABEL], [f"Remove {process}"])
         remove.connect("clicked", weakly(self._on_remove), process)
         row.add_suffix(remove)

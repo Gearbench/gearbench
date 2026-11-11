@@ -364,17 +364,18 @@ NO_LIGHTING = "the {} has no lighting Gearbench drives"
 #: journal's line, said once an attach, and the note of `mouse_sync` or `headset_sync` turned
 #: on.
 NOT_SYNCED = NO_LIGHTING + ", so it does not follow the keyboard"
+#: The way out of a refusal that a Follow switch causes: the leader by its name
+#: (keyboard.followed) and the command that turns the switch off.
+SYNC_OFF_FIRST = "turn off Follow the {leader} (or `gearbench-ctl {command} off`) first"
 #: The refusal of a mouse's or a headset's own lighting while it follows the keyboard that
-#: leads: the device, the leader by its name (keyboard.followed) and the command that turns
-#: its switch off.
-SYNC_ON = ("the {device} follows the {leader}'s color; turn off Follow the {leader} (or "
-           "`gearbench-ctl {command} off`) first")
+#: leads, by the device's name.
+SYNC_ON = "the {device} follows the {leader}'s color; " + SYNC_OFF_FIRST
 
 #: hidpp_refusal's sentences, each with the device's name put in.
 DEVICE_GONE = "the {} went away"
 DEVICE_NO_REPLY = f"the {{}} did not answer; it may be {ASLEEP_OR_SWITCHED_OFF}"
-#: The same for a wired device, which neither sleeps nor switches off: its name and what
-#: it is plugged in by, as "its USB adapter".
+#: The same for a wired device or a keyboard on its cable, which asleep or switched off does
+#: not explain: its name and what it is plugged in by, as "its USB adapter".
 DEVICE_NO_REPLY_WIRED = "the {} did not answer; unplug {} and plug it back in"
 DEVICE_OFF = "the {} is switched off or out of range"
 DEVICE_REFUSED = "the {} refused that"
@@ -391,14 +392,17 @@ DEVICE_NOT_SET_UP = SET_UP_FAILED + "; unplug {} and plug it back in"
 NOT_UNDERSTOOD = "the {} gave an answer Gearbench does not understand"
 
 
-def hidpp_refusal(device: str, failure: HidppFailure) -> dict:
-    """A HID++ failure's reply, worded for `device`, the name put in its sentences."""
+def hidpp_refusal(device: str, failure: HidppFailure, *, cabled: bool = False) -> dict:
+    """A HID++ failure's reply, worded for `device`, the name put in its sentences. `cabled` is
+    for a device on its cable, which asleep or switched off cannot explain."""
     if isinstance(failure, UnreadableAnswer):
         return refusal(NOT_UNDERSTOOD.format(device), failure)
     if isinstance(failure, DeviceGone):
         return refusal(DEVICE_GONE.format(device), failure)
     if isinstance(failure, HidppTimeout):
-        return refusal(DEVICE_NO_REPLY.format(device), failure)
+        said = (DEVICE_NO_REPLY_WIRED.format(device, "its cable") if cabled
+                else DEVICE_NO_REPLY.format(device))
+        return refusal(said, failure)
     if unreachable(failure):
         # The receiver's answer, not the device's: it is not there.
         return refusal(DEVICE_OFF.format(device), failure)

@@ -21,7 +21,9 @@ dynamic = ["version"]
 # window needs python3-gi with gir1.2-gtk-4.0 and gir1.2-adw-1, system packages
 # carrying GObject introspection typelibs; the PyPI wheels of the same name are
 # a different build that would shadow the working system module. So these are
-# the packages' Recommends (optdepends on Arch), never pip requirements.
+# the packages' Recommends (optdepends on Arch, where python-gobject is a
+# depends: the package's install starts the daemon, which looks for it as it
+# starts), never pip requirements.
 dependencies = []
 
 classifiers = [

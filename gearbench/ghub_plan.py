@@ -37,7 +37,7 @@ from .library_files import Taken, slug
 from .macros import macro_summary
 from .mouse import MouseModel, bindings_of, model_named
 from .profiles import GameProfile, layers_of
-from .wording import counted, first_of, quoted, word_list
+from .wording import counted, first_of, quoted, up_to, word_list
 
 # -- the same as what is there ---------------------------------------------
 
@@ -365,12 +365,6 @@ def other_devices_text(found: Found) -> str:
 SHOWN_PROGRAMS = 8
 
 
-def _named(names: list[str]) -> str:
-    """"a, b and c", or the first SHOWN_PROGRAMS of `names` and how many more."""
-    return (first_of(names, SHOWN_PROGRAMS) if len(names) > SHOWN_PROGRAMS
-            else word_list(names, "and"))
-
-
 def _loads_for(programs: list[str], with_programs: bool) -> str:
     """The preview's note on what loads a profile: each .exe name, and the
     Linux program of that name without .exe, which matches too
@@ -378,8 +372,8 @@ def _loads_for(programs: list[str], with_programs: bool) -> str:
     most SHOWN_PROGRAMS of each are named."""
     stems = [p[:-len(".exe")] for p in programs]
     one = len(programs) == 1
-    linux = f"{'a Linux program' if one else 'Linux programs'} named {_named(stems)}"
-    windows = f"{_named(programs)}, G HUB's Windows name{'' if one else 's'}"
+    linux = f"{'a Linux program' if one else 'Linux programs'} named {up_to(stems, SHOWN_PROGRAMS)}"
+    windows = f"{up_to(programs, SHOWN_PROGRAMS)}, G HUB's Windows name{'' if one else 's'}"
     if with_programs:
         return (f"Loads for {windows}, and for {linux}. Under Proton the process name may "
                 "differ; if the profile does not load, add the game's program while it runs.")

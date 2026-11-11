@@ -5,7 +5,8 @@ It binds the socket (outputs.socket_path), follows PipeWire with `pw-dump --moni
 runs one `pipewire -c PATH` holding the three chains, rendered at the first print that gives
 them somewhere to play. It never stops them while it runs: when the node one of them should
 play to changes (wanted), it aims that chain's output at the new one with one pw-metadata
-write (pipewire_unit.aim_argv), so no sink goes and no player pauses. With the headset gone
+write (pipewire_unit.aim_argv), so no sink goes and no player pauses, and writes each aim
+again once a WirePlumber restart makes a new "default" Metadata. With the headset gone
 it waits AWAY_WAIT, then aims the three at the default output the user had before Outputs
 (standing_default), and back at the headset when it returns. The default output itself is
 left alone. Once a start, as the three's sinks come, it puts back on them the programs
@@ -75,6 +76,9 @@ MIXER, GAIN_CONTROL = "gain", "Gain 1"
 #: The longest datagram read: one byte past outputs.WORD_MAX, so a longer word reads as too
 #: long whatever the kernel cut it to.
 READ_MAX = outputs.WORD_MAX + 1
+#: The most words answer takes at one wake: a sender that keeps the queue full would hold it
+#: reading, the chains' prints unread, and each word read is kept until all are answered.
+WORDS_A_WAKE = 64
 #: The journal's lines; a node's name in them printable (wording.printable), as a client
 #: names its own nodes.
 PLAYS = f"{NAME}: {{}} plays to {{}}"
@@ -259,10 +263,12 @@ def key_of(props: dict) -> str | None:
 
 
 def names_own_output(props: dict) -> bool:
-    """Whether a stream names its output in its own props (target.object), as its program's
-    own pick or a launch option's PULSE_SINK does: such a stream is its program's to move,
-    and neither the Apps rows nor put_back move it."""
-    return "target.object" in props
+    """Whether a stream names its output in its own props, as its program's own pick or a
+    launch option's PULSE_SINK does: such a stream is its program's to move, and neither the
+    Apps rows nor put_back move it. target.object, or node.target, which pw_stream_connect
+    sets for a target id: WirePlumber 0.5.13 restores no choice over either
+    (node/state-stream.lua) and links by either (linking/find-defined-target.lua)."""
+    return "target.object" in props or "node.target" in props
 
 
 def program_streams(objects: Sequence[object]) -> list[tuple[int, dict]]:
@@ -344,11 +350,13 @@ def strays(objects: Sequence[object], sinks: Mapping[str, tuple[int, int]],
     keeps on one of `sinks` (made_sinks), by `targets` (saved_targets), and that does not
     play into it now, with its key and that sink's name. A stream that names its output in
     its own props is its program's to move, as the Apps rows leave it."""
+    feeding = {sink: pipewire_unit.feeding(objects, node)
+               for sink, (node, _serial) in sinks.items()}
     found = []
     for node, props in program_streams(objects):
         key = key_of(props) or ""
         if ((sink := targets.get(key, "")) in sinks and not names_own_output(props)
-                and not pipewire_unit.linked(objects, node, sinks[sink][0])):
+                and node not in feeding[sink]):
             found.append((node, key, sink))
     return found
 
@@ -435,11 +443,13 @@ CHAIN = """
 
 
 class Outputs:
-    """The process's state: the chains' process, the node each output is aimed at, the
-    headset last played to and since when it is away, the one played to at the last print,
-    the balance and the gains Game's and Chat's chains were given, and when each line said
-    at most once a minute was last said.
-    `picked` reads the headset picked in spatial.json."""
+    """The process's state: the chains' process, the node each output is aimed at and the
+    Metadata that holds those aims, the headset last played to and since when it is away, the
+    one played to at the last print, the balance and the gains Game's and Chat's chains were
+    given, and when each line said at most once a minute was last said.
+    `picked` reads the headset picked in spatial.json, at each print: spatial.set_headset
+    restarts Spatial's unit and not this one, whose restart would pause the players on its
+    sinks."""
 
     def __init__(self, conf: Path, settings: Settings, *,
                  spawn: Callable[..., subprocess.Popen], run: pipewire_client.Run,
@@ -453,6 +463,9 @@ class Outputs:
         #: The node each output's stream is aimed at, by the output's key; the conf's at the
         #: start, then each write's.
         self.aimed: dict[str, str] = {}
+        #: The "default" Metadata the aims were written in, by its object.serial: a new one
+        #: holds none of them.
+        self.metadata: int | None = None
         #: The nodes a conf could not be written for, so it is tried again only once they change.
         self.unwritten: dict[str, str] | None = None
         #: The gain Game's and Chat's chains were given, by the output's key: the conf's at
@@ -574,9 +587,18 @@ class Outputs:
 
     def reaim(self, process: subprocess.Popen, nodes: dict[str, str]) -> None:
         """Aim each output whose node changed at its node of `nodes`, once its stream, which
-        the chains' `process` made, is in PipeWire; a write that fails is said, and tried
-        again only once its node changes."""
+        the chains' `process` made, is in PipeWire, and each output again once a new "default"
+        Metadata comes; a write that fails is said, and tried again only once one of those
+        two happens."""
         streams = pipewire_unit.owned_nodes(self.known(), process.pid)
+        metadata = pipewire_unit.default_metadata(self.known())
+        if metadata is not None and metadata != self.metadata:
+            if self.metadata is not None:
+                # WirePlumber restarted: its new Metadata holds no aim, and a stream with none
+                # goes back to its conf's target.object, which may be gone, and then it waits
+                # unlinked (node.dont-fallback, node.linger).
+                self.aimed = {}
+            self.metadata = metadata
         for output in OUTPUTS:
             target = nodes[output.key]
             stream = streams.get(output.output)
@@ -592,12 +614,17 @@ class Outputs:
         """Once a start, at the first print with each of the three's sinks the chains'
         `process` made (made_sinks): move each program's stream that WirePlumber keeps on one
         of them and that plays elsewhere (strays) to that sink, by its object.serial, with the
-        Apps rows' write (move_argv). A start makes the sinks with new serials, and a stream's
-        target.object still names the old sink's, so the stream plays on the default output
-        until its program starts it again (the owner's decision of 2026-10-28: only the
-        user's own saved choices, only at the start). WirePlumber's file is read then alone
+        Apps rows' write (move_argv). The sinks are the chains' child's, in the unit's
+        cgroup, so a stop of the unit takes them away, and WirePlumber 0.5.13 pauses the
+        players on them (linking/mpris-pause.lua); a start makes them with new serials, and a
+        stream's target.object still names the old sink's, so the stream plays on the default
+        output until its program starts it again and WirePlumber restores its choice by name
+        (node/state-stream.lua), as the hardware check of 2026-10-28 measured. This move is
+        the owner's decision of 2026-10-28: only the user's own saved choices, only at the
+        start. WirePlumber's file is read then alone
         (saved_targets); one not read is said and moves nothing, as is a print whose links
-        are of a shape not read. Each write is said, or why it failed."""
+        are of a shape not read. Each write is said, or why it failed, once all are made and
+        read back by one pw-dump (pipewire_unit.reached)."""
         if self.put_back_done:
             return
         sinks = made_sinks(self.known(), process.pid)
@@ -608,10 +635,11 @@ class Outputs:
         try:
             targets = saved_targets(path)
         except OSError as err:
-            spatial_unit.say(TARGETS_UNREAD.format(f"{path}: {wording.reason(err)}"))
+            spatial_unit.say(TARGETS_UNREAD.format(
+                f"{wording.escaped(path)}: {wording.reason(err)}"))
             return
         except settings_files.ConfigError as err:
-            spatial_unit.say(TARGETS_UNREAD.format(err))
+            spatial_unit.say(TARGETS_UNREAD.format(wording.escaped(err)))
             return
         try:
             found = pipewire_client.shaped(lambda known: strays(known, sinks, targets),
@@ -619,9 +647,11 @@ class Outputs:
         except pipewire_client.StepError as err:
             spatial_unit.say(UNREAD.format(err))
             return
-        for stream, key, sink in found:
+        taken = [pipewire_unit.wrote_to(self.run, move_argv(stream, sinks[sink][1]))
+                 for stream, _key, sink in found]
+        for (stream, key, sink), failed in zip(found, pipewire_unit.reached(self.run, taken),
+                                               strict=True):
             words = (stream, wording.printable(key), SINK_OUTPUTS[sink].description)
-            failed = pipewire_unit.written(self.run, move_argv(stream, sinks[sink][1]))
             spatial_unit.say(PUT_BACK.format(*words) if failed is None
                              else NOT_PUT_BACK.format(*words, failed))
 
@@ -704,10 +734,8 @@ class Outputs:
             try:
                 save_settings(self.settings)
             except OSError as err:
-                # Escaped: a link's target is quoted as it is, and the journal splits a line
-                # at each newline.
-                where, why = err.filename or settings_path(), wording.reason(err)
-                spatial_unit.say(NOT_SAVED.format(wording.escaped(where), wording.escaped(why)))
+                spatial_unit.say(NOT_SAVED.format(err.filename or settings_path(),
+                                                  wording.reason(err)))
             except settings_files.ConfigError as err:
                 # A default written in by hand that load_settings takes can make the file
                 # over the cap once each character past ASCII is its six-byte escape.
@@ -740,11 +768,14 @@ def listen(path: Path) -> socket.socket:
 
 
 def answer(sock: socket.socket, unit: Outputs, now: float) -> None:
-    """Take every word queued on `sock`, then answer each sender that has an address of its
-    own, never waiting: a sender gone or full is said at most once a minute."""
+    """Take the words queued on `sock`, WORDS_A_WAKE at most, then answer each sender that
+    has an address of its own, never waiting: a sender gone or full is said at most once a
+    minute. No timer batches the words: those that queue while a set runs, and those past
+    WORDS_A_WAKE, are taken at the next wake, which the socket, still readable, brings at
+    once."""
     # A sender's address: a path, an abstract name as bytes, or None for an unbound one.
     datagrams: list[tuple[bytes, str | bytes | None]] = []
-    while True:
+    for _ in range(WORDS_A_WAKE):
         try:
             datagrams.append(sock.recvfrom(READ_MAX))
         except BlockingIOError:
@@ -796,7 +827,8 @@ def main(argv: Sequence[str] | None = None,
          run: pipewire_client.Run = subprocess.run) -> int:
     """`python3 -m gearbench.outputs_unit run PATH`, the unit's process: bind the socket,
     then serve until pw-dump --monitor ends, as at PipeWire's stop, or the chains end, either
-    of which ends the unit as failed, 1, as does a socket it cannot bind."""
+    of which ends the unit as failed, 1, as does a socket it cannot bind or a folder of PATH
+    it refuses (spatial_unit.refuses_folder)."""
     args = sys.argv[1:] if argv is None else list(argv)
     if len(args) != 2 or args[0] != "run":
         print("usage: python3 -m gearbench.outputs_unit run PATH", file=sys.stderr)
@@ -807,9 +839,12 @@ def main(argv: Sequence[str] | None = None,
     except (outputs.SocketRefused, OSError) as err:
         spatial_unit.say(NOT_LISTENING.format(wording.reason(err)))
         return 1
-    unit = Outputs(Path(args[1]), load_settings(), spawn=spawn, run=run,
+    conf = Path(args[1])
+    unit = Outputs(conf, load_settings(), spawn=spawn, run=run,
                    picked=lambda: spatial.load_choices().headset)
     try:
+        if spatial_unit.refuses_folder(NAME, outputs.DESCRIPTION, conf):
+            return 1
         return spatial_unit.monitored(spawn, NAME, lambda monitor: serve(monitor, sock, unit),
                                       lambda: unit.process, CHAINS_ENDED)
     finally:

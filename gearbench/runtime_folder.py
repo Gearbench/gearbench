@@ -1,11 +1,11 @@
 """The runtime folder, XDG_RUNTIME_DIR, and its rule: no file is read or written there, the
-sockets of the daemon and of Outputs and the equalizer's and the noise suppression's confs
-included, where another account could put a folder or a file of its own in their place, as far
-as stat can tell that account from root (open_to_others). The daemon's unit runs the rule before
-each start outside its user namespace, where stat can, and makes a missing runtime folder there
-(main, `python3 -m gearbench.runtime_folder`). And each folder Gearbench makes, the runtime
-folder, the settings folder and the folders in it, is its owner's alone (make_private). The
-standard library and wording alone.
+sockets of the daemon and of Outputs and the confs of the equalizer, the noise suppression,
+Spatial and Outputs included, where another account could put a folder or a file of its own in
+their place, as far as stat can tell that account from root (open_to_others). The daemon's unit
+runs the rule before each start outside its user namespace, where stat can, and makes a missing
+runtime folder there (main, `python3 -m gearbench.runtime_folder`). And each folder Gearbench
+makes, the runtime folder, the settings folder and the folders in it, is its owner's alone
+(make_private). The standard library and wording alone.
 """
 
 from __future__ import annotations
@@ -152,13 +152,20 @@ def private_runtime(error: type[Exception], unset: str, what: str) -> Path:
     folder = runtime_home()
     if folder is None:
         raise error(unset)
+    if (refused := refusal(folder, what)) is not None:
+        raise error(refused)
+    return folder
+
+
+def refusal(folder: Path, what: str) -> str | None:
+    """SHARED_RUNTIME's words where `what`'s files may not go in `folder`, shared_problem's
+    problem or, where a stat on the way fails, UNSEEN_FOLDER's; None where they may."""
     try:
         problem = shared_problem(folder)
     except OSError as exc:
         problem = unseen_problem(exc)
-    if problem is not None:
-        raise error(SHARED_RUNTIME.format(what=what, folder=escaped(folder), problem=problem))
-    return folder
+    return None if problem is None else SHARED_RUNTIME.format(
+        what=what, folder=escaped(folder), problem=problem)
 
 
 #: The daemon's refusal of a file, or a link to one, where its runtime folder `folder` should

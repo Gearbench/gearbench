@@ -10,11 +10,12 @@ import json
 import os
 import socket
 import struct
+import time
 from pathlib import Path
 
 from ..json_text import NUMBER_TOO_LONG, TOO_DEEP
-from ..runtime_folder import OWN_FOLDER, runtime_home
-from ..wording import SERVICE_JOURNAL, service_command
+from ..runtime_folder import OWN_FOLDER, open_to_others, runtime_home
+from ..wording import SERVICE_JOURNAL, service_command, size_words
 
 #: send_command's error for a connection closed with no reply.
 NO_ANSWER = ("the daemon closed the connection without answering, so it stopped or crashed; "
@@ -26,9 +27,13 @@ NO_DAEMON_STEP = {
     False: f"start it with `{service_command('start')}` or `gearbench-ctl daemon`",
     True: "run the command as yourself, not as root: the daemon runs as your own account"}
 
-#: send_command's next step where another account listens and root has no invoking user, which
-#: has no daemon of its own to point at, since the daemon never runs as root.
+#: send_command's next step where root has no invoking user and its socket cannot be used,
+#: which has no daemon of its own to point at, since the daemon never runs as root.
 FROM_THE_ACCOUNT = "run the command with sudo, run0 or pkexec from the account whose daemon it is"
+
+#: What listens where root with no invoking user finds a listener of root's own that another
+#: account could have linked there.
+ROOT_THROUGH_A_SHARED_FOLDER = "root listens on a socket in a folder another account could change"
 
 
 def logind_runtime(uid: int) -> Path:
@@ -65,18 +70,19 @@ UID_DIGITS = len(str(2**32 - 1))
 
 def invoking_uid() -> int | None:
     """As root gained through sudo, run0 or pkexec, the id of the user who ran it, as SUDO_UID
-    or PKEXEC_UID names it; None for any other run, and for an id that is not a number of
-    UID_DIGITS digits at most."""
+    or PKEXEC_UID names it; None for any other run, for an id that is not a number of
+    UID_DIGITS digits at most, and for root's own, as under sudo from a root shell, since no
+    daemon runs as root."""
     invoker = os.environ.get("SUDO_UID") or os.environ.get("PKEXEC_UID") or ""
     if os.geteuid() != 0 or not invoker.isdecimal() or len(invoker) > UID_DIGITS:
         return None
-    return int(invoker)
+    return int(invoker) or None
 
 
 def root_alone() -> bool:
-    """Whether this runs as root with no invoking user named (invoking_uid), as after su - or
-    doas: no daemon can be asked then, since the daemon runs as a user's own account, never
-    in root's runtime folder."""
+    """Whether this runs as root with no invoking user (invoking_uid), as after su - or doas or
+    under sudo from a root shell: no daemon can be asked then, since the daemon runs as a
+    user's own account, never in root's runtime folder."""
     return os.geteuid() == 0 and invoking_uid() is None
 
 
@@ -104,6 +110,12 @@ class UnreadableReply(json.JSONDecodeError):
         return self.msg
 
 
+#: The most a reply may hold, 64 times the longest request (request_reader.MAX_REQUEST):
+#: read_reply buffers a whole reply before send_command parses it, and a listener of this
+#: account, any program of the invoking user's under sudo, can send one with no end until
+#: the wait runs out, 7,327 MiB in 3 s (measured 2026-11-09).
+MAX_REPLY = 64 << 20
+
 #: struct ucred, which SO_PEERCRED fills: a pid_t, a uid_t and a gid_t (unix(7)).
 UCRED = struct.Struct("iII")
 
@@ -116,13 +128,42 @@ def peer_uid(conn: socket.socket) -> int:
     return uid
 
 
+def read_reply(conn: socket.socket, timeout: float) -> bytes:
+    """The reply `conn` sends, read to its end; what came before a reset, where any did.
+    TimeoutError when it is not read whole within `timeout`, UnreadableReply one byte past
+    MAX_REPLY, and ConnectionResetError for a reset with nothing read."""
+    chunks: list[bytes] = []
+    # `timeout` holds for the whole reply: for each read alone, a listener of this account,
+    # any program of the invoking user's under sudo, could hold the command to the end.
+    deadline = time.monotonic() + timeout
+    received = 0
+    try:
+        while chunk := conn.recv(65536):
+            chunks.append(chunk)
+            received += len(chunk)
+            if received > MAX_REPLY:
+                raise UnreadableReply(
+                    f"the reply is longer than the {size_words(MAX_REPLY)} a reply may be",
+                    "", 0)
+            if (left := deadline - time.monotonic()) <= 0:
+                raise TimeoutError(NOT_IN_TIME)
+            conn.settimeout(left)
+    except ConnectionResetError:
+        if not chunks:
+            raise
+    return b"".join(chunks)
+
+
 def send_command(request: dict, timeout: float = 3.0) -> dict:
     """Send one request to the running daemon and return its reply, for the CLI and the
     window. Raises ConnectionError when no daemon is listening, or when it closes the
     connection without answering, PermissionError when another account's process listens
     there (as root under sudo, run0 or pkexec, any account's but the invoking user's, root's
-    own included), and json.JSONDecodeError for a reply that is not a UTF-8 JSON object or
-    that json.loads cannot read for its depth or a number's digits."""
+    own included; as root with no invoking user, root's own too, in a folder another account
+    could change), TimeoutError when the request is not sent, or the whole reply not read,
+    within `timeout`, and json.JSONDecodeError for a reply longer than MAX_REPLY, which is
+    read no further, for one that is not a UTF-8 JSON object or that json.loads cannot read
+    for its depth or a number's digits."""
     path = socket_path()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
         conn.settimeout(timeout)
@@ -136,16 +177,20 @@ def send_command(request: dict, timeout: float = 3.0) -> dict:
         # it looks for that user's daemon. Root's own is refused there too: the daemon never
         # runs as root, and that user's programs can put a link to any socket root may open
         # where root looks. A third account's is refused, since a folder sudo kept may be one
-        # another account can listen in.
+        # another account can listen in. Root with no invoking user keeps its own listener in a
+        # folder no other account could change alone: su without its dash leaves a user's
+        # XDG_RUNTIME_DIR set (su(1)), and that user's programs can put the same link there.
         invoker = invoking_uid()
         own = os.geteuid() if invoker is None else invoker
-        if peer != own:
+        through_shared_folder = peer == own == 0 and open_to_others(path.parent) is not None
+        if peer != own or through_shared_folder:
             # A PermissionError, as connect()'s to another account's socket of mode 0600: a
             # ConnectionError would read as no daemon running.
             step = FROM_THE_ACCOUNT if invoker is None and own == 0 else OWN_FOLDER.format(uid=own)
+            listener = (ROOT_THROUGH_A_SHARED_FOLDER if through_shared_folder
+                        else f"another account (uid {peer}) listens on the socket")
             raise PermissionError(
-                f"another account (uid {peer}) listens on the socket, not your Gearbench daemon, "
-                f"so nothing was sent; {step}")
+                f"{listener}, not your Gearbench daemon, so nothing was sent; {step}")
         # A daemon that cuts a request off past request_reader.MAX_REQUEST answers, then
         # closes with the rest unread: Linux fails the send, or resets the connection once
         # the answer is read (measured 2026-10-31). Its answer is read either way; with none,
@@ -156,16 +201,9 @@ def send_command(request: dict, timeout: float = 3.0) -> dict:
             conn.shutdown(socket.SHUT_WR)
         except (BrokenPipeError, ConnectionResetError) as exc:
             cut_off = exc
-        chunks: list[bytes] = []
-        try:
-            while chunk := conn.recv(65536):
-                chunks.append(chunk)
-        except ConnectionResetError:
-            if not chunks:
-                raise
-        if not chunks and cut_off is not None:
+        data = read_reply(conn, timeout)
+        if not data and cut_off is not None:
             raise cut_off
-        data = b"".join(chunks)
     if not data:
         # serve_one answers every request it reads, so no reply is a daemon that died after
         # reading it: a ConnectionError, like the kernel's reset when it died before.
@@ -201,9 +239,10 @@ def failure(error: BaseException | None) -> str:
     DOWN, no daemon running: ConnectionError and its subclasses, which are no socket, a
     refused connection, or a daemon that left before reading the request or answering.
 
-    BUSY, a daemon running that has not got to the request: a timeout, or a listen backlog
-    too full to connect. Its loop is single-threaded, and a mouse profile write holds it
-    for about a second, far longer if the mouse stops answering part way.
+    BUSY, a daemon running that has not got to the request or not finished its reply: a
+    timeout, or a listen backlog too full to connect. Its loop is single-threaded, and a
+    mouse profile write holds it for about a second, far longer if the mouse stops
+    answering part way.
 
     UNREAD, a reply that does not parse: something answered, so a daemon is running, and
     there is no timeout to name. A daemon that left mid-reply leaves one.

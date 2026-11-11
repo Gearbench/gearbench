@@ -2,8 +2,8 @@
 first, then every Logitech USB node read, each of a model this build drives with the
 verdict on its record (report_verdict.py), then PipeWire's cards of Logitech's and Astro's
 audio devices, printed as a block to paste into an issue, or with --json whole. What to do
-next, a grant, a stop of the daemon or a run as yourself, goes to stderr, so the block holds
-the report alone.
+next, a grant, a stop of the daemon, a fix of its socket or a run as yourself, goes to stderr,
+so the block holds the report alone.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ DAEMON_UNSURE = {BUSY: "running and did not answer in time",
 #: The daemon's state where it answered `status` with an error, which says nothing of the
 #: nodes it holds.
 STATUS_FAILED = "running, and its status failed"
-#: The daemon's state as root with no invoking user (invoking_uid), as after su - or doas:
+#: The daemon's state as root with no invoking user (root_alone), as after su - or doas:
 #: the daemon runs as a user's own account, never in root's runtime folder, where this looks.
 ROOT_ALONE = "maybe running as your own account, which root with no invoking user cannot ask"
 
@@ -162,9 +162,8 @@ def pipewire_read() -> dict:
     changes a card. pw-dump runs with QUIET_PIPEWIRE and as the user who ran the report
     under sudo, run0 or pkexec: it reads that user's PipeWire (use_invoking_users_runtime_dir,
     which cmd_report calls first), whose socket any program of that user can serve, so it
-    gets that user's rights and no more, and of root's environment INVOKERS_ENVIRONMENT
-    alone, which that user's programs could read in /proc. Not checked under any of the
-    three: that pw-dump, run with that environment, finds that PipeWire."""
+    gets that user's rights and no more, of root's environment INVOKERS_ENVIRONMENT alone,
+    which that user's programs could read in /proc, and none of root's terminal."""
     invoker = invoking_uid()
     if invoker is None:
         run = functools.partial(subprocess.run, env={**os.environ, **QUIET_PIPEWIRE})
@@ -174,8 +173,12 @@ def pipewire_read() -> dict:
         except KeyError:
             return {"unread": f"pw-dump was not run: no user has id {invoker}", "cards": []}
         passed = {name: os.environ[name] for name in INVOKERS_ENVIRONMENT if name in os.environ}
+        # Not root's terminal, on stdin or as the controlling terminal: a file in that user's
+        # client.conf.d starts a program inside pw-dump (context.exec, measured on 1.6.2 on
+        # 2026-11-06) that outlives it and could take the terminal's foreground.
         run = functools.partial(subprocess.run, env={**passed, **QUIET_PIPEWIRE}, user=invoker,
-                                group=group, extra_groups=[])
+                                group=group, extra_groups=[], stdin=subprocess.DEVNULL,
+                                start_new_session=True)
     try:
         objects = pipewire_client.dump_objects(run)
     except pipewire_client.StepError as exc:
@@ -326,7 +329,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     sys.stdout.flush()
     warnings = ["warning: another program can take the report's replies: "
                 f"{other_tool_problem(comm, pids)}" for comm, pids in others.items()]
-    for line in [*warnings, *advice(nodes, block=not args.json)]:
+    for line in [*warnings, *advice(nodes, block=not args.json, daemon_state=state)]:
         print(escaped(line), file=sys.stderr)
     return 0
 
@@ -580,14 +583,19 @@ DAEMON_MAY_OPEN = ("The daemon opens the devices this build drives while it look
 FULL_READ = f"For the full read: `{STOP}`, run the report again, then `{START}`."
 #: The step to it as root with no invoking user (root_alone): root's `systemctl --user` never
 #: reaches the user's daemon, and a run again as root reads no more.
-ROOT_ALONE_READ = "For the full read: run the report as yourself, or with sudo, run0 or pkexec."
+ROOT_ALONE_READ = ("For the full read: run the report as yourself, or with sudo, run0 or pkexec "
+                   "from your own account.")
+#: The step to it where the daemon's socket could not be used (UNKNOWN), which no stop of the
+#: daemon changes.
+SOCKET_READ = ("For the full read: fix the cause the report gives for the daemon's socket, then "
+               "run the report again.")
 
 
-def advice(nodes: list[dict], *, block: bool) -> list[str]:
+def advice(nodes: list[dict], *, block: bool, daemon_state: str) -> list[str]:
     """Where to paste the block above, where the text form printed one (`block`), and what
     the person who ran the report can do about a node the daemon holds or may open, one on
     the USB device of a node it holds, one where nothing answered behind a receiver, and one
-    this account may not open."""
+    this account may not open. `daemon_state` is daemon_holds' words for the daemon."""
     paste = f"Paste the block above, both ``` lines included, into a device report: {REPORT_FORM}"
     lines = [paste] if block else []
     held = [node["node"] for node in nodes if node["state"] == HELD]
@@ -604,7 +612,10 @@ def advice(nodes: list[dict], *, block: bool) -> list[str]:
         not_read.append(DAEMON_MAY_OPEN)
     if not_read:
         # The step to the full read is said once, after the last line of the devices not read.
-        not_read[-1] += f" {ROOT_ALONE_READ if root_alone() else FULL_READ}"
+        step = (ROOT_ALONE_READ if root_alone()
+                else SOCKET_READ if daemon_state.startswith(DAEMON_UNSURE[UNKNOWN])
+                else FULL_READ)
+        not_read[-1] += f" {step}"
     lines += not_read
     asleep = [node["node"] for node in nodes if node["state"] == MAY_BE_ASLEEP]
     if asleep:

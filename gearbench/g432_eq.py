@@ -187,6 +187,9 @@ def render(gains: Gains, target: str, *, model: HeadsetModel) -> str:
                            client_modules=pipewire_client.CLIENT_MODULES)
 
 
+# The sink's state.restore-props = false was checked in a throwaway WirePlumber 0.5.13 on
+# 2026-10-17: it neither restored a volume it saved for the sink, which would undo the carry,
+# nor saved one.
 TEMPLATE = """\
 # Gearbench: {description}. Gearbench writes this file from the active
 # preset's gains in its {presets_name} at each switch-on, and a transient
@@ -244,7 +247,8 @@ def conf_path(*, model: HeadsetModel) -> Path:
     """The model's conf in the runtime folder, its record's too: runtime_folder.private_runtime's,
     refused as EqError while XDG_RUNTIME_DIR is unset or relative (runtime_folder.runtime_home)
     or names a folder another account could swap for its own (runtime_folder.open_to_others)
-    or one a stat on the way cannot look at."""
+    or one a stat on the way cannot look at: that account could swap the conf before
+    PipeWire reads it, or plant the record."""
     named = WORDS[model.key]
     return (runtime_folder.private_runtime(EqError, named.no_runtime, named.description)
             / named.conf_name)
@@ -466,9 +470,10 @@ def carry(run: pipewire_client.Run, route: headset_audio.Route, record: Record, 
     """Give the sink, once the unit's process has made it, the headset's own volume as
     carried_on has it: the record's, a hold's whose put-back never ran and which still
     holds the headset (switch_on drops one that does not first), else the route's, read
-    before the hold; and muted where the route is, which the hold then clears, or with the
-    record's volume where the record keeps the mute that hold cleared. Words.not_carried's
-    note when it could not, else None."""
+    before the hold; and muted where the route is, which the hold then clears (the owner's
+    decision of 2026-10-25), or with the record's volume where the record keeps the mute
+    that hold cleared (the owner's decision of 2026-10-27). Words.not_carried's note when it
+    could not, else None."""
     named = WORDS[model.key]
     own, muted = ((route.volumes, route.mute) if record.volumes is None
                   else (record.volumes, route.mute or record.muted))
@@ -508,7 +513,9 @@ def put_back(run: pipewire_client.Run, route: headset_audio.Route | None,
     """With a hold in the record, give the headset's own output, saved, the sink's `volumes`
     times the route's own volume (carried_off), or with none read the volume the record
     keeps while the headset is still held (is_held), muted when the sink is (`muted`) or,
-    with none read, when the record keeps a mute, and forget the hold. With no route there
+    with none read, when the record keeps a mute (the owner's decision of 2026-10-27), and
+    forget the hold. With no hold in the record it sets nothing: the headset keeps its own
+    volume, and the sink's is not carried to it. With no route there
     is none to set, as while the headset is unplugged,
     and WirePlumber gives it the level it saved, which the hold never was; with no volumes
     and a route off volumeBase, the headset has its own level again, and nothing is set
@@ -552,8 +559,11 @@ def give_back_default(run: pipewire_client.Run, target: str | None, *,
     first: WirePlumber 0.5.13 pauses the MPRIS players of the streams playing to a sink that
     goes (linking/mpris-pause.lua). With the headset's own output gone, keep that the
     equalizer was the default, for the next switch_on; with it there, the next switch_on
-    finds it the default, unless the user picked another, which it leaves. The note to
-    say."""
+    finds it the default, unless the user picked another, which it leaves. WirePlumber alone
+    sends the default, as the sink goes, to the output picked before it, and back to the sink
+    when it returns while default.configured.audio.sink still names it (a throwaway
+    WirePlumber 0.5.13, 2026-10-17): once this has picked the headset, the return is
+    switch_on's to make. The note to say."""
     named = WORDS[model.key]
     if target is None:
         save_record(replace(load_record(model=model), reselect=True), model=model)
@@ -578,10 +588,12 @@ def hand_off(run: pipewire_client.Run, streams: Sequence[int], target: str, pid:
     """Aim each of `streams`, the Outputs unit's streams into the equalizer's sink
     (outputs_streams), at `target`, the headset's own output, and wait up to
     pipewire_client.SETTLE until none plays into the sink, so the stop that removes it pauses
-    no player on them; that unit's process then finds the node it would write already
-    written. The note to say when a write failed, which leaves the rest unwritten
-    (Words.outputs_not_moved), or when one still played there (Words.outputs_stayed) or could
-    not be read by then (Words.outputs_unread); else None."""
+    no player on them. That unit's process writes a stream's aim only when the node it
+    computes changes or WirePlumber restarted, and finds the sink until the stop, so it never
+    aims them back in between but for such a restart; after the stop it finds the node it
+    would write already written. The note to say when a write failed, which leaves the rest
+    unwritten (Words.outputs_not_moved), or when one still played there
+    (Words.outputs_stayed) or could not be read by then (Words.outputs_unread); else None."""
     named = WORDS[model.key]
     for stream in streams:
         if (failed := pipewire_unit.written(run, pipewire_unit.aim_argv(stream, target))
@@ -627,8 +639,9 @@ def straight_gone(run: pipewire_client.Run, *, model: HeadsetModel) -> str | Non
     follows the default does once the equalizer is the default, and while the unit or
     PipeWire cannot be read: Words.played_straight's note when one still plays there, as a
     stream with an output of its own picked in its app or moved there by hand does, which a
-    hold would make louder; Words.straight_unread's with the cause when it was still not
-    read; else None."""
+    hold would make louder (the owner's decision of 2026-10-25); Words.straight_unread's with
+    the cause when it was still not read; else None. A stream that starts playing straight to
+    the headset after the hold, or that a replug relinks there, still plays at 0 dB."""
     named = WORDS[model.key]
 
     def look() -> str | None:
@@ -654,11 +667,11 @@ def switch_on(run: pipewire_client.Run = subprocess.run, *,
     headset before the headset is at 0 dB, and is never louder on the way, and start the
     watch for the headset's return; nothing while it runs or starts. A sink that did not take
     the volume and mute, or a pick that failed or did not show (pipewire_unit.pick_default) while the headset's
-    own output is the default, leaves the headset unheld and unwatched, with no wait, as does
-    a card with no route to hold (Words.no_route, in Words.not_held's note); a
-    Gearbench Spatial that did not move or could not be read, or sound still straight on the
-    headset's own output, or a look for it that could not be read (straight_gone), leaves it
-    unheld and unwatched too.
+    own output is the default, leaves the headset unheld and unwatched, with no wait (the
+    owner's decision of 2026-10-25), as does a card with no route to hold (Words.no_route,
+    in Words.not_held's note); a Gearbench Spatial that did not move or could not be read,
+    or sound still straight on the headset's own output, or a look for it that could not be
+    read (straight_gone), leaves it unheld and unwatched too.
     EqError while the headset's output is not in PipeWire, Words.no_output while its card
     is, for a runtime folder conf_path refuses, and Words.stopped when the unit stopped as it
     started, looked for once it has settled (pipewire_unit.settle_start), before any pick or
@@ -828,7 +841,9 @@ def watch(chunks: Iterable[bytes], run: pipewire_client.Run = subprocess.run,
     keeps, a unit not read at the start, the first hold of each return, however many follow
     it, each hold that failed, and each print not read. The headset is output_node's for
     the unit's MainPID, read at the start, 0 when the unit has none or was not read. A
-    runtime folder conf_path refuses ends it, as load_record raises EqError there."""
+    runtime folder conf_path refuses ends it, as load_record raises EqError there.
+    The watch is the equalizer's, not the daemon's: the daemon runs no PipeWire program, and
+    the headset's HID node, which it reads, does not say when PipeWire's card is there."""
     named = WORDS[model.key]
     objects: dict[int, dict] = {}
     seen = Seen()

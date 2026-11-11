@@ -37,7 +37,9 @@ RIPPLE_WIDTH = 1.5
 RIPPLE_FADE = 0.5
 #: How many ripples the drawn board keeps spreading, the newest, the oldest dropped as a new one
 #: starts: a guess that bounds a frame's cost, since every lit key is shaded for each ring and a
-#: ring lasts about 23 periods on a full-size board.
+#: ring lasts about 23 periods on a full-size board. Under ripple at 1000 ms, a key typed every
+#: 200 ms, the window took 4.2% of one core with 8 rings and 8.7% with 87 before the cap
+#: (measured on an offscreen display, 2026-10-24).
 RIPPLE_LIMIT = 8
 #: The least of its brightness Pulsar point's second color falls to between its wave's crests:
 #: a guess, about a third of full. The owner saw "Dimmer magenta" there, never dark (2026-10-24).

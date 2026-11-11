@@ -248,9 +248,12 @@ G915_TKL = KeyboardModel("G915 TKL", WITNESS, G915_TKL_BOARD, wave_directions=G9
 # for byte (Solaar's listing of U1 31.02.B0018, five more units' in Solaar's issues, and the
 # raw HID++ of Solaar issue 2968 and libratbag issues 1127 and 1752); cabled alone. Its HID++
 # shares interface 01 with what is typed on it, and that collection declares the long report
-# alone, no short one. Its paints are cut, since how this firmware takes a zone it lacks is
-# not known; its zones are the G915's. Its wave takes the G915's directions: the same effect
-# records, its own direction check not read. The G813 is on the same id.
+# alone, ids 0x11 and 0x12 on page 0xFF43, no short one, in a published report descriptor,
+# unconfirmed until a G815's device report reads it. The transport drops its key, pointer,
+# media and 0x12 reports unread, though each wakes the daemon's loop. Its paints are cut,
+# since how this firmware takes a zone it lacks is not known; its zones are the G915's. Its
+# wave takes the G915's directions: the same effect records, its own direction check not
+# read. The G813 is on the same id.
 G815 = KeyboardModel("G815", WITNESS, G815_BOARD, wave_directions=G915_WAVE, interface=1,
                      cut_to_board=True, long_only=True)
 # Solaar issue 3155's listing of a cabled unit (MPK 23.00.B0008): the G915 TKL's G keys
@@ -382,10 +385,12 @@ G512_X_98 = g515_generation("G512 X 98", G512X98_BOARD, G512X98_FN_KEYS,
 #: G515 LIGHTSPEED TKL on its cable (G HUB's device database), then the G515 LIGHTSPEED TKL on
 #: a node of its own that hid-logitech-dj gives it behind its c547 receiver, which the installed
 #: 7.0.0 kernel binds, as the G502 X PLUS's 4099 node shows (Solaar 1.1.13's listing of it on
-#: 40B4), after its cable, then the G915 TKL on its cable, on its own node on a kernel whose
-#: hid-logitech-dj binds its c545 receiver, and
-#: through the receiver's own node where hid-generic holds the receiver, as the installed
-#: 7.0.0 kernel does (the image's ids and Solaar's records). The node of its own goes first:
+#: 40B4), after its cable; the driver keeps that node while the keyboard is off or on its
+#: cable, since it forwards the link-down notice to it and removes a node only when its device
+#: is unpaired (read from the kernel's source). Then the G915 TKL on its cable, on its own
+#: node on a kernel whose hid-logitech-dj binds its c545 receiver, and through the
+#: receiver's own node where hid-generic holds the receiver, as the installed 7.0.0 kernel
+#: does (the image's ids and Solaar's records). The node of its own goes first:
 #: a kernel whose hid-logitech-dj binds the c545 keeps the receiver's node too, and hands the
 #: keyboard's replies to the other (inferred from the c547, where the G502 X PLUS answers on
 #: a node of its own). Then the G815, on its cable alone (Solaar's listing; G HUB's record).
@@ -557,7 +562,8 @@ def shown_lighting(entries: Mapping[str, Lighting], key: str | None, leader: str
 #: The ids a keyboard reports on its own cable; the others are its receiver's. They decide
 #: the route, never the interface: cabled, the keyboard is on external power and its battery
 #: is not asked; on the receiver the cable is looked for by these ids, and on a receiver's
-#: own node the link notices are turned on (RECEIVER_NODE_IDS).
+#: own node the link notices are turned on (RECEIVER_NODE_IDS). Listed by hand: a new
+#: model's cabled id goes here too.
 CABLED_IDS = frozenset({0xC33E, 0xC358, 0xC355, 0xC343, 0xC33F, 0xC352, 0xC336,
                         0xC359, 0xC356, 0xC357, 0xC361, 0xC36B, 0xC35F, 0xC360})
 

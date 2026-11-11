@@ -3,7 +3,8 @@
 Most commands go through the daemon's control socket: the daemon holds the lighting
 claims, and a second process writing lighting would fight them. The man page's
 DESCRIPTION names the commands that need no daemon. A command that runs systemd's or PipeWire's
-programs runs them in this process, so the daemon's sandbox never has to allow them.
+programs runs them in this process, outside the daemon's sandbox; `daemon` itself runs
+one, `systemctl --user reenable`, as it starts (spatial.reenable_old_switch_on).
 
 This module has `build_parser` and `main`. A group of subcommands is a module with its
 handlers and the functions that add its subcommands to the parser:
@@ -95,6 +96,22 @@ def _keeping_brightness(tested: bool) -> list[str]:
                               if model.keeps_brightness and model.tested == tested))
 
 
+#: Where --help says the mouse's backups go when no home folder can be found.
+BACKUP_WORDS = "the backup folder in Gearbench's settings folder"
+
+
+def _backup_words() -> str:
+    """The folder --help names for the mouse's backups, or BACKUP_WORDS where Path.home raises
+    its RuntimeError, as for a user with no HOME and no passwd entry: every command, --version
+    included, builds the parser that says it."""
+    try:
+        folder = escaped(shown_path(backup_dir()))
+    except RuntimeError:
+        return BACKUP_WORDS
+    # argparse %-formats a text holding "%(prog)", and only such a text.
+    return f"{folder.replace('%', '%%') if '%(prog)' in folder else folder}/"
+
+
 def build_parser() -> argparse.ArgumentParser:
     # The epilog from the records, so a model added or a model's write test changes what
     # --help says; the description is what Gearbench is, the one sentence of every view.
@@ -108,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
                "sent through a power-off"
                + (f", as a {word_list(taken)} is taken to" if taken else "") + ". "
                "The mouse-* commands that say so rewrite onboard profile 1, backed up first "
-               f"to {escaped(shown_path(backup_dir()))}/. The G432's adapter kept the level "
+               f"to {_backup_words()}. The G432's adapter kept the level "
                "g432-sidetone wrote through an unplug when tested; g432-auto-off and "
                "g432-lights --startup and --store write what a headset of its family keeps, "
                "refused on a model not tested on its hardware. Only headset-save writes the "
@@ -189,6 +206,11 @@ def _flushed() -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the command line `argv`, sys.argv's for None, and give its exit status: the
+    handler's, 1 for a refusal; 2 for a failed request to the daemon (none running, a busy
+    one, a reply that could not be read) and, through SystemExit, for a command line
+    argparse refuses; 130 for Ctrl-C; READER_LEFT where stdout's reader closed it early. An
+    error raised outside output.send is not the daemon's and goes through (_from_daemon)."""
     try:
         code = _run(build_parser().parse_args(argv))
     except SystemExit:

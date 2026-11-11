@@ -1,6 +1,7 @@
 """The mice's controller, `Mice`: attaching, `mouse_call`, silence and rechecks, HOST mode's
-arm and hand-back, the teardown, and the commands no part gives. The parts Mice.__init__
-builds do the rest; attached.py holds the attached-mouse record."""
+arm and hand-back, the teardown, the mice's entries for `problems`, and the commands no part
+gives, `mouse_select` and `mouse_host_mode`. The parts Mice.__init__ builds do the rest;
+attached.py holds the attached-mouse record."""
 
 from __future__ import annotations
 
@@ -429,8 +430,8 @@ class Mice:
                 wait = self._mouse_backoff = MOUSE_RETRY
             else:
                 # Doubled for next time, so the first retry stays prompt.
-                wait = self._mouse_backoff
-                self._mouse_backoff = min(wait * 2, MOUSE_RETRY_MAX)
+                wait = min(self._mouse_backoff, self.unattached.hold_left())
+                self._mouse_backoff = min(self._mouse_backoff * 2, MOUSE_RETRY_MAX)
             self._mouse_retry = min(self._mouse_retry, time.monotonic() + wait)
 
     def attached_models(self) -> set[int]:
@@ -460,7 +461,8 @@ class Mice:
     def keep_waiting(self, dev: Hidpp, found: tuple[Path, int, int]) -> None:
         """Keep a mouse node open after its first probe went unanswered, so the mouse is heard
         when it comes on (pump_waiting). The retry still asks it, for a receiver that says
-        nothing, and sooner once the node carries motion or a late reply."""
+        nothing, and sooner once the node carries motion or a late reply, or an attach a
+        notification started goes unanswered."""
         self._mouse_waiting[str(found[0])] = (dev, found)
         self.d.selector.register(dev.fileno, selectors.EVENT_READ, ("mouse-wait", str(found[0])))
 
@@ -478,11 +480,15 @@ class Mice:
     def pump_waiting(self, key: str) -> None:
         """Read a mouse node kept open by keep_waiting. The receiver's link notice attaches the
         mouse at once, and so does anything else it says, which is then acted on as from any
-        attached mouse. A link-down notice is dropped, and a node that has gone is closed.
+        attached mouse, unless an attach a notification started went unanswered within the last
+        MOUSE_RETRY: a probe that misses costs the loop 1.5 s, so what the node says then is
+        dropped and the retry asks it next. A link-down notice is dropped, and a node that has
+        gone is closed.
 
-        Motion through the receiver, or a HID++ report that queues nothing, such as the probe's
-        late reply, says the mouse is on: the retry is brought forward to now, at most once per
-        MOUSE_RETRY, since a probe that misses costs the loop 1.5 s.
+        Motion through the receiver, or a HID++ report that starts no attach, such as the probe's
+        late reply or a notification held back, says the mouse is on: the retry is brought
+        forward to now, at most once per MOUSE_RETRY, since a probe that misses costs the loop
+        1.5 s.
         """
         dev, found = self._mouse_waiting[key]
         try:
@@ -496,16 +502,17 @@ class Mice:
             if event.link_down:
                 down = True
                 continue
-            if found[1] in self.attached_models():
+            if found[1] in self.attached_models() or self.unattached.holds_back(key):
                 # The same mouse attached on its cable meanwhile: its receiver is not probed,
-                # as at the retry.
+                # as at the retry. Or an attach a notification started just went unanswered:
+                # the retry asks it next.
                 continue
             log.info("the mouse on %s %s; attaching it", key,
                      "linked to its receiver" if event.link else "said something")
             if not self.connect_mouse(found):
                 # Kept again only by a probe that went unanswered (keep_waiting).
                 if key in self._mouse_waiting:
-                    log.info("the mouse on %s did not answer; still waiting for it", key)
+                    self._mouse_retry = min(self._mouse_retry, self.unattached.notice_missed(key))
             elif not event.link:
                 attached = next(m for m in self.attached if m.dev is dev)
                 self.mouse_event(attached, event)

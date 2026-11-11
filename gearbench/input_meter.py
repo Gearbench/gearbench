@@ -1,13 +1,17 @@
 """The input meter of a headset's microphone: its level, read live from the microphone's node
 in PipeWire by pw-record, PipeWire's own recorder (pw-cat(1)), for the Input level row of
-each headset page's Microphone group (gui/input_meter_row.py).
+each headset page's Microphone group (gui/input_meter_row.py), the owner's decision of
+2026-10-24.
 
 The level is the one GNOME's Sound settings show for an input (gnome-control-center's
 panels/sound/cc-level-bar.c, read 2026-10-24): the loudest sample of each 1/25 s as a
 fraction of full scale, the bar moving 0.3 of the way to each, on a linear bar from 0 to 1.
 `Meter` takes it from the samples pw-record writes. The meter reads levels only: the samples
 come through a pipe into memory, each window's peak is taken and its samples are dropped, and
-nothing is written or sent anywhere.
+nothing is written or sent anywhere. Fed by a stand-in pw-record, a pipe given a 4096-byte
+block every 42.7 ms for 10 s, the row on the tests' broadway display took 0.53% and 0.59% of
+one core in two runs, of which Meter's arithmetic was 0.05% (measured 2026-10-24);
+pw-record's own share is not measured.
 
 Standard library only. pw-dump goes through a `run` argument (pipewire_client.dumped) and
 pw-record through a `spawn` one; `Recording` holds all of pw-record: its start, its reads and

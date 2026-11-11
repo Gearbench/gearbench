@@ -95,7 +95,7 @@
   <screenshots>
     <screenshot type="default">
       <caption>Keyboard: keys painted by click or drag, G keys and M profiles</caption>
-      <image>https://raw.githubusercontent.com/gearbench/gearbench/v1.3.0/docs/images/hero.png</image>
+      <image>https://raw.githubusercontent.com/gearbench/gearbench/v1.3.1/docs/images/hero.png</image>
     </screenshot>
   </screenshots>
 
@@ -200,15 +200,15 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
-    <release version="1.3.0" date="2026-11-04">
+    <release version="1.3.1" date="2026-11-11">
       <description>
-        <p>Gearbench Game, Chat and Media: three outputs for games, voice
-        chat and music, with a balance between game and chat. Noise
-        suppression for headset microphones, with a test that plays your
-        voice back.</p>
-        <p>G-Shift on keyboards, mice and headsets' G keys, low-battery
-        notices set per device, and a Firmware row on the Keyboard and
-        Mouse tabs. Packages for Fedora and Arch Linux beside the .deb.</p>
+        <p>Fixes. Switching Outputs or noise suppression off keeps the
+        output or input you picked while it ran. At a power-off the
+        keyboard and a mouse that follows it stay dark.</p>
+        <p>Settings files and commands run as root refuse links and
+        folders another account could change, and a reply from the daemon's
+        socket is read only up to a size limit. Fixes to game profiles,
+        macros, the G HUB import and the device report.</p>
       </description>
     </release>
   </releases>

@@ -808,10 +808,12 @@ class Descriptor:
 
 
 #: Item tags (HID 1.11, section 6.2.2): main Input, Collection and End Collection; global
-#: Usage Page, Report ID, Push and Pop; local Usage.
+#: Usage Page, Report ID, Push and Pop; local Usage and Usage Minimum.
 _INPUT, _COLLECTION, _END_COLLECTION = (0, 0x8), (0, 0xA), (0, 0xC)
 _USAGE_PAGE, _REPORT_ID, _PUSH, _POP = (1, 0x0), (1, 0x8), (1, 0xA), (1, 0xB)
-_USAGE = (2, 0x0)
+_USAGE, _USAGE_MINIMUM = (2, 0x0), (2, 0x1)
+#: A main item's type.
+_MAIN = 0
 #: A long item's prefix byte.
 _LONG_ITEM = 0xFE
 
@@ -820,13 +822,18 @@ def describe(data: bytes) -> Descriptor:
     """Walk a report descriptor's items, HID 1.11's short and long forms, and keep what
     Descriptor holds. Bytes past an item cut short are not read."""
     reports: dict[int, int] = {}
-    key_reports = cut = False
+    key_reports = cut = usage_on_keys = False
     page, pages, depth, top_page = 0, [], 0, 0
     usage: tuple[int | None, int] = (None, 0)
     # Report ids declared outside every collection: a Report ID is global (HID 1.11,
     # 6.2.2.7), so one before a top-level collection numbers that collection's reports.
     waiting: list[int] = []
     for kind, value, size in _items(data):
+        # A local item lasts to the next Main item of any kind (HID 1.11, 6.2.2.8).
+        key_reports |= kind == _INPUT and usage_on_keys
+        usage_on_keys = kind[0] != _MAIN and (usage_on_keys or (
+            kind in (_USAGE, _USAGE_MINIMUM) and size == 4
+            and value >> 16 == KEYBOARD_KEYPAD_PAGE))
         if kind == _CUT:
             cut = True
         elif kind == _USAGE_PAGE:
@@ -1348,6 +1355,9 @@ class Hidpp(HidrawNode):
             self._features.setdefault(feature_id, found)
 
     def require(self, feature_id: int, name: str) -> Feature:
+        """`feature`'s answer for a feature a decoder cannot work without, `name` its name
+        for the refusal: RuntimeError where this firmware lacks it, which a device's setup
+        catches beside HidppFailure."""
         found = self.feature(feature_id)
         if found is None:
             raise RuntimeError(

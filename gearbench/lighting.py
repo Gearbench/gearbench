@@ -586,6 +586,10 @@ class LightingTables:
 
 
 class Lighting:
+    """A device's 0x8071 lighting, a keyboard's and a mouse's alike: its tables (__init__),
+    the claim, its release and the power modes, zone effects, 0x8081's per-key frames and
+    0x8040's brightness, the last two where the device has them."""
+
     def __init__(self, dev: Hidpp, per_key_cluster: bool = False,
                  names: Mapping[int, str] | None = None, zone_bitmap: bool = False,
                  whole_board: Collection[str] = (), *,

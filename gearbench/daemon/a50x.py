@@ -344,8 +344,8 @@ class A50XHeadset(BatteryNotices):
             self._lookout.looked()
 
     def _attach(self, path: Path, model: Model) -> bool:
-        """connect's attach of one node; True once it attached, though a node gone or a
-        headset that does not answer at its first read lets it go again. A failure is the
+        """connect's attach of one node; True once it attached and is still attached after its
+        first read, which a node gone or a headset that does not answer ends. A failure is the
         problem said, until a node tried after it in the same look attaches."""
         try:
             reports = describe(descriptor_of(path)).reports
@@ -384,7 +384,8 @@ class A50XHeadset(BatteryNotices):
             return False
         self._notes.attached()
         self._lookout.unanswered = self._away = None
-        self.dev, self.path, self._kept = dev, path, None
+        kept, self._kept = self._kept, None
+        self.dev, self.path = dev, path
         self.BATTERY_BODY = model.charge
         # By its key, which the G522's cable and receiver share.
         self.armed_for(model.key,
@@ -401,9 +402,12 @@ class A50XHeadset(BatteryNotices):
                      model.name, version, taken)
         if (refused := self._call(partial(self._read, set(dev.features)))) is not None:
             log.info("a50x: reading the %s stopped: %s", model.name, refused["detail"])
+            if self._away is not None and kept is not None:
+                # Let go at its first read, which found less than what was kept.
+                self._kept = kept
         self.d.forget_slow("a50x")
         self.d.note_slow(started, f"{model.name} connect on {path}")
-        return True
+        return self.dev is not None
 
     def _open(self, path: Path, model: Model, framing: Framing) -> A50X | None:
         """The base's channel, or None: a node this user may not open is refused (_refused),
@@ -749,8 +753,9 @@ class A50XHeadset(BatteryNotices):
         """`a50x`'s answer while `model`'s headset does not answer its receiver, with answering
         false, as a mouse's reply keeps a silent mouse's: what is said of the model now
         (_about), and the readings kept when its receiver was let go for the headset's leaving
-        or silence or for its cable (_kept), until a base attaches, or none, as for a receiver
-        unplugged while its headset answered. Its writes are refused (missing)."""
+        or silence or for its cable (_kept), until a base attaches and answers its first read,
+        or none, as for a receiver unplugged while its headset answered. Its writes are refused
+        (missing)."""
         return {"ok": True, "answering": False, **self._about(model), **NOTHING_KEPT,
                 **self._kept_of(model)}
 

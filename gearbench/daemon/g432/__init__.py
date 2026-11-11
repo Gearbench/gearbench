@@ -38,15 +38,17 @@ again.
 The first read the daemon makes of a headset's sidetone keeps the level found for its product
 id, and a reset writes it back, or SIDETONE_UNREAD_RESET where no read found one before the
 first write. A preset of the model's library picked through `g432_headset_eq` is kept in its
-own file, the daemon's alone, and sent again at each attach, or once an equalizer the attach
-could not read is read, since the headset keeps the gains it is sent in its RAM alone (the
-owner's decision of 2026-10-23, "Library and re-send"), and once at each return, since no
-location gives the gains a G933 plays (EQ_ACTIVE; the owner's decisions of 2026-10-25);
-Flat forgets it. With none picked, each attach sends flat, 0 dB on every band, since the
-headset may still play gains sent before it, as across a restart of the daemon, and a return
-from away, which is taken as a switch-on, plays flat with nothing sent (the owner's decisions
-of 2026-10-25): what the headset plays reads flat from either until a write answers
-(_playing).
+own file, the daemon's alone, and sent again at each attach, or where the attach could not
+read the equalizer once _read_unread reads it, since the headset keeps the gains it is sent in
+its RAM alone (the owner's decision of 2026-10-23, "Library and re-send"), and once at each
+return, since no location gives the gains a G933 plays (EQ_ACTIVE; the owner's decisions of
+2026-10-25); Flat forgets it. With none picked, each attach sends flat, 0 dB on every band,
+since the headset may still play gains sent before it, as across a restart of the daemon, and
+a return from away, which is taken as a switch-on, plays flat with nothing sent (the owner's
+decisions of 2026-10-25): what the headset plays reads flat from either until a write answers
+(_playing). A `g432_headset_eq` that reads such an equalizer first sends neither, and what the
+headset plays stays, so the pick waits for the next return and flat for the next attach (the
+owner's decision of 2026-10-25).
 The node also carries the headset's volume wheel and mute, whose reports pump reads and
 drops, the battery's broadcasts, which it takes as readings, but for one of no state
 from behind a receiver, which marks the headset not answering (_take_broadcast), and its G
@@ -172,7 +174,8 @@ class G432Headset(BatteryNotices):
         self._sidetone_was: dict[int, int] = {}
         #: By product id, the level the first read since the daemon started found, kept
         #: across a replug, and each id written: a read after a write finds the daemon's own
-        #: level, so only a read before any write is kept.
+        #: level, so only a read before any write is kept, and a reset on one model never
+        #: writes another's.
         self._first: dict[int, int] = {}
         self._written: set[int] = set()
         #: When to look for a headset again, and the node whose lookup got no answer.
@@ -639,23 +642,23 @@ class G432Headset(BatteryNotices):
                 self._send_flat()
             return
         self.picked = picked.name
+        # preset_name refuses a control alone: a line separator or a bidi override stays in it.
+        shown = escaped(picked.name)
         if self.eq is None:
-            log.info("%s: %s was not sent again: its equalizer was not read", model.key,
-                     picked.name)
+            log.info("%s: %s was not sent again: its equalizer was not read", model.key, shown)
             return
         try:
             gains = g432_library.gains_for(picked, self.eq.frequencies, model.short)
             dev.set_gains(self.eq, gains)
             self._played(gains)
         except ValueError as exc:
-            log.info("%s: %s was not sent again: %s", model.key, picked.name, exc)
+            log.info("%s: %s was not sent again: %s", model.key, shown, exc)
             return
         except HidppFailure as exc:
-            log.info("%s: %s could not be sent again: %s", model.key, picked.name,
-                     failure_reason(exc))
+            log.info("%s: %s could not be sent again: %s", model.key, shown, failure_reason(exc))
             return
-        log.info("%s: equalizer set to %s again, the preset picked: %s", model.key,
-                 picked.name, " ".join(f"{gain:+d}" for gain in gains))
+        log.info("%s: equalizer set to %s again, the preset picked: %s", model.key, shown,
+                 " ".join(f"{gain:+d}" for gain in gains))
         self._try_read("equalizer", self._read_eq)
 
     def _send_flat(self) -> None:
@@ -665,7 +668,7 @@ class G432Headset(BatteryNotices):
         are refused, or a write that fails, is said in the journal. Never raises."""
         if self.eq is None:
             # Not listed, of which the journal says nothing, or not read at the attach, which
-            # said why: _read_unread sends flat once a listed one reads.
+            # said why: _read_unread sends flat once its read of a listed one goes through.
             return
         try:
             cast("G432", self.dev).set_gains(self.eq, flat_gains(self.eq))
@@ -937,7 +940,7 @@ class G432Headset(BatteryNotices):
 
     def _next_preset(self) -> dict:
         """The preset after the one picked in the model's library, or its first after the
-        last or with none picked, past any preset whose bands the headset does not play
+        last or with none picked, past any preset whose bands or gains the headset does not take
         where its equalizer was read, picked as `g432_headset_eq` with `preset` picks it. Refused
         before any read on a model with no equalizer of its own, as the G635, whose
         `<key>-eq.json` holds its equalizer on the computer, another library."""
@@ -952,12 +955,12 @@ class G432Headset(BatteryNotices):
         names = [preset.name for preset in presets]
         after = names.index(self.picked) + 1 if self.picked in names else 0
         turn = presets[after:] + presets[:after]
-        if self.eq is not None:
-            # A preset of other bands is refused with nothing picked, so the next press
-            # would come back to it.
-            frequencies = self.eq.frequencies
+        if (eq := self.eq) is not None:
+            # A preset of other bands, or of gains past the headset's range, is refused with
+            # nothing picked, so the next press would come back to it.
             turn = tuple(preset for preset in turn
-                         if g432_library.fits(preset, frequencies)) or turn
+                         if g432_library.fits(preset, eq.frequencies)
+                         and all(eq.low <= band.gain <= eq.high for band in preset.bands)) or turn
         return self._cmd_g432_headset_eq(turn[0].request())
 
     def _toggle_sidetone(self) -> dict:
@@ -976,8 +979,10 @@ class G432Headset(BatteryNotices):
         and the preset picked forgotten (_flat); then read again, the gains written standing
         as the playing ones (_played), and a pick kept or forgotten where the headset plays
         them (_plays), whether or not the read after the write answers, a read that fails
-        being the reply's refusal. With none, read again. Refused on a model with no equalizer
-        of its own, and, with nothing sent, for more than one of the three (ONE_CHANGE)."""
+        being the reply's refusal. With none, read again. An equalizer the attach could not read
+        is read first, and what _read_unread would send after that read is not sent. Refused on
+        a model with no equalizer of its own, and, with nothing sent, for more than one of the
+        three (ONE_CHANGE)."""
         if self.dev is None:
             return {"ok": False, "error": self.missing()}
         dev, model = self.dev, self.model
@@ -1031,7 +1036,7 @@ class G432Headset(BatteryNotices):
             gains = g432_library.gains_for(preset, eq.frequencies, model.short)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
-        refused = self._set_gains(eq, gains, f"equalizer set to {preset.name}:")
+        refused = self._set_gains(eq, gains, f"equalizer set to {escaped(preset.name)}:")
         if refused is not None and not self._plays(gains):
             return refused
         try:

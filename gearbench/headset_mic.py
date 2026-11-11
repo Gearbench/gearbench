@@ -62,10 +62,11 @@ FEATURE = "Noise suppression"
 #: owner's decision of 2026-10-28).
 INPUT_NAME = "{} Microphone (Noise Filter)"
 #: The default input's notes: switch_on's, by the input's name, then why not; switch_off's,
-#: by the input given back as GNOME lists it, then why not; for one given back while it is
-#: away, by its name, then why it was not kept; and a read that failed before the give-back,
-#: by why. In a note of an input not picked, given back or kept, the cause follows "; ", so
-#: a toast too short for the note shows what failed (style.toast_clause).
+#: by the input given back as GNOME lists it, then why not; for one given back or picked
+#: since that is away, by its name, then why it was not kept; and a read that failed before
+#: the give-back, by why. In a note of an input not picked, given back or kept, the cause
+#: follows "; ", so a toast too short for the note shows what failed (style.toast_clause),
+#: and each of those and the read's goes out as a pipewire_client.FailedStep.
 SELECTED = "{} is the default input"
 NOT_SELECTED = "{} is not the default input; {}"
 GIVEN_BACK = "{} is the default input again"
@@ -100,7 +101,7 @@ MONO_ASSUMED = "The {}'s microphone is mono, assumed from the G432's"
 MAPPED_SETS = (pipewire_headsets.PROFILE_SET, pipewire_headsets.A50_X_PROFILE_SET)
 #: The test's count before it records, in numbers said one each COUNT_STEP seconds, so the
 #: user is speaking as the recording starts: "Recording in 3, 2, 1" (the owner's decision of
-#: 2026-10-28).
+#: 2026-10-28). Each front end shows the count and waits it out itself.
 COUNT_IN = 3
 COUNT_STEP = 1
 #: The test's length, and its samples' bytes at input_meter's format, s16 at 48000 Hz on one
@@ -268,7 +269,8 @@ def heard(objects: Sequence[object], key: str) -> str | None:
     """The node name of the output the echo canceler reads, for the headset of `key`: the
     headset's own (pipewire_headsets.output_of on pipewire_headsets.card_of's card), where
     Gearbench Spatial and Gearbench Game and Media play, through the headset's equalizer while
-    it is on, whichever the default output is; None while its card has none."""
+    it is on, whichever the default output is, and Chat too but on a headset with a Chat
+    output of its own (pipewire_headsets.Headset.chat); None while its card has none."""
     headset = pipewire_headsets.HEADSET_KEYED[key]
     card = pipewire_headsets.card_of(headset, objects)
     return None if card is None else pipewire_headsets.output_of(headset, card[1])
@@ -304,14 +306,19 @@ def render(target: str, output: str | None, *, key: str) -> str:
 #: output), and WirePlumber 0.5.13 linking a stream by the Input in its class
 #: (lib/common-utils.lua mediaClassToDirection, node/create-item.lua), each read in its
 #: source. Measured on 2026-11-03: no microphone icon while nothing records, on GNOME 50
-#: and 51 and Plasma 6.8.1, and the icon while the test records.
+#: and 51 and Plasma 6.8.1, and the icon while the test records. With the class the module
+#: gives them by default, the two lit the icon the whole time the unit ran (measured
+#: 2026-10-28).
 STREAM_CLASS = "Stream/Input/Audio/Internal"
 
 #: The capture lingers: WirePlumber 0.5.13 destroys a stream with node.dont-fallback whose
 #: target.object is not there unless it has node.linger (linking/find-defined-target.lua,
 #: read in its source), and nothing would make it again once the microphone is back. With
 #: it, the capture stays while the G432 is away and relinks when it is back (measured on
-#: WirePlumber 0.5.13 on 2026-11-03).
+#: WirePlumber 0.5.13 on 2026-11-03). In a throwaway PipeWire 1.6.2 on 2026-10-18 the conf
+#: made the input, the capture linked to a stand-in of the G432's microphone and the
+#: monitor's stream, and white noise came through 17.8 dB down, against 0.3 dB with the
+#: suppression off.
 TEMPLATE = """\
 # Gearbench: {description}. Gearbench writes this file at each switch-on, aimed at
 # the {short}'s microphone, and a transient user unit, {unit},
@@ -421,7 +428,9 @@ def saved_input(objects: Sequence[object], key: str) -> str | None:
     or away, before the one WirePlumber records from meanwhile, but this headset's own input,
     a pick of it a logout left, which stops the unit with nothing given back, and another
     headset's input that its unit has not made (inputs_there), gone with its unit or another
-    program's of that name; None for none."""
+    program's of that name; None for none. After a logout WirePlumber 0.5.13 keeps the input
+    as the configured default, gone, and records from the most recent earlier pick that is
+    there (default-nodes/state-default-nodes.lua)."""
     there = inputs_there(objects)
     return next((name for name in pipewire_unit.users_defaults(objects, "source")
                  if name != WORDS[key].source and (name not in INPUT_KEYS or name in there)),
@@ -551,8 +560,9 @@ def switch_on(run: pipewire_client.Run = subprocess.run, *, key: str) -> Switche
                                        lambda state: summary(state, key=key),
                                        MicError(named.stopped))
     failed = pipewire_unit.pick_default(run, named.source, "source")
-    return Switched(state, (SELECTED.format(named.description) if failed is None
-                            else NOT_SELECTED.format(named.description, failed),))
+    return Switched(state, (
+        SELECTED.format(named.description) if failed is None
+        else pipewire_client.FailedStep(NOT_SELECTED.format(named.description, failed)),))
 
 
 def switch_off(run: pipewire_client.Run = subprocess.run, *, key: str) -> list[str]:
@@ -560,28 +570,32 @@ def switch_off(run: pipewire_client.Run = subprocess.run, *, key: str) -> list[s
     before the unit stops, so a program that records the default moves to it first; one away,
     or on a route WirePlumber holds unavailable (inputs_there), is written as the user's pick
     after the stop (pipewire_unit.default_argv), which WirePlumber makes the default on its
-    return, recording from another meanwhile, as Outputs gives back an output away. With
-    another input the default, the user's pick since, nothing is given back. Then stop the
-    unit, which removes the input; a unit not loaded is off already. A read or a pick that
-    fails is a note, and the unit stops all the same; StepError when the stop fails, its
-    words followed by the notes said by then. The notes to say."""
+    return, recording from another meanwhile, as Outputs gives back an output away. A pick
+    made since that is away (saved_input), which WirePlumber keeps while it records from the
+    input meanwhile, is written after the stop in the saved one's place. With another input
+    the default, the user's pick since, nothing is given back. Then stop the unit, which
+    removes the input; a unit not loaded is off already. A read or a pick that fails is a
+    note, and the unit stops all the same; StepError when the stop fails, its words followed
+    by the notes said by then. The notes to say."""
     named = WORDS[key]
     notes: list[str] = []
     away = None
     try:
         objects = pipewire_client.dump_objects(run)
-        back = pipewire_client.shaped(
-            lambda found: back_to(found, key) if pipewire_unit.default_named(
-                found, pipewire_unit.default_key("source")) == named.source else None, objects)
+        back, since = pipewire_client.shaped(
+            lambda found: (back_to(found, key), saved_input(found, key))
+            if pipewire_unit.default_named(found, pipewire_unit.default_key("source"))
+            == named.source else (None, None), objects)
         if back is not None and back in inputs_there(objects):
             failed = pipewire_unit.pick_default(run, back, "source")
-            words = pipewire_client.described(objects, back)
+            words = spatial.shown_name(pipewire_client.described(objects, back))
             notes.append(GIVEN_BACK.format(words) if failed is None
-                         else NOT_GIVEN_BACK.format(words, failed))
+                         else pipewire_client.FailedStep(NOT_GIVEN_BACK.format(words, failed)))
+            away = since
         else:
-            away = back
+            away = since or back
     except pipewire_client.StepError as err:
-        notes.append(DEFAULT_UNREAD.format(err))
+        notes.append(pipewire_client.FailedStep(DEFAULT_UNREAD.format(err)))
     try:
         pipewire_unit.stop(run, named.unit)
     except pipewire_client.StepError as err:
@@ -589,9 +603,9 @@ def switch_off(run: pipewire_client.Run = subprocess.run, *, key: str) -> list[s
         raise pipewire_client.StepError("; ".join([str(err), *notes])) from None
     if away is not None:
         failed = pipewire_unit.written(run, pipewire_unit.default_argv(away, "source"))
-        shown = pipewire_client.described(objects, away)
+        shown = spatial.shown_name(pipewire_client.described(objects, away))
         notes.append(UNTIL_BACK.format(shown) if failed is None
-                     else NOT_KEPT.format(shown, failed))
+                     else pipewire_client.FailedStep(NOT_KEPT.format(shown, failed)))
     return notes
 
 

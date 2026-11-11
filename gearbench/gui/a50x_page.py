@@ -65,6 +65,7 @@ from .style import (
     STREAM_MIX,
     NoticesRow,
     confirm,
+    displayable,
     page_of,
     plain_row,
     preset_label,
@@ -546,8 +547,6 @@ class A50XPage:
     def _missing(self, why: str) -> None:
         show_gone(self.state_row, self.state_dot, self.battery_row, self.battery_icon,
                   self.notices, why)
-        self.balance_row.set_visible(False)
-        self.boom_row.set_visible(False)
         self.computer.gone()
         self._show_mic_group()
         self._writable = False
@@ -559,7 +558,8 @@ class A50XPage:
     def show(self, info: dict) -> None:
         """Every row from the `a50x` reply. A slider stays where it is while its send
         settles."""
-        self.status_group.set_title(GLib.markup_escape_text(str(info.get("name") or TITLE)))
+        self.status_group.set_title(
+            GLib.markup_escape_text(displayable(str(info.get("name") or TITLE))))
         model = reply_model(info)
         # Away behind its receiver, as a keyboard or a mouse asleep: amber, what to do, and
         # the last readings with every row that writes off.
@@ -771,6 +771,10 @@ class A50XPage:
                 off.add(key)
         if not self._writable:
             self.put_back_row.set_sensitive(False)
+        # Each reading shown goes gray with the rows that write, the last ones of a headset
+        # that went away among them (the owner's decision of 2026-11-07).
+        for row in (self.balance_row, self.boom_row):
+            row.set_sensitive(self._writable)
         for instance in INSTANCES:
             read = (self._writable and instance in self._equalizers
                     and bands_written(self.model, instance))

@@ -175,7 +175,10 @@ class Loop:
         if TYPE_CHECKING:
             # mypy reads gi's modules and the context as start() leaves them. Nothing uses one
             # before that: each use is behind `available` or follows from a connection, and
-            # none is opened before start().
+            # none is opened before start(). mypy 2.4.0 reads them so in a method's own body
+            # alone: a name read on self.gio or self.glib in a function nested in one is Any
+            # (measured 2026-10-06), and so is one read through another object's attribute,
+            # as Desktop and TrayExport read self._loop.gio (measured 2026-10-15).
             self.gio, self.glib = Gio, GLib
             self._ctx: GLib.MainContext
         else:

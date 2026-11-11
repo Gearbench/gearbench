@@ -46,6 +46,9 @@ from .pipewire_headsets import (
     stranded,
 )
 
+#: Spatial's names, the unit's here and the sink's, its output's, the conf's and the launch
+#: option's below, are defined in this module alone: the tests hold the chain's template and
+#: the unit file to them.
 UNIT = "gearbench-spatial.service"
 #: The program's name, not a headset's, since one output plays to each headset (the owner's
 #: decision of 2026-10-18), and the unit's: so one launch option reaches every headset.
@@ -101,9 +104,11 @@ ENABLED_STATES = ("enabled", "enabled-runtime")
 OLD_WANTS = Path("systemd", "user", "default.target.wants", UNIT)
 #: What to do about a missing unit file, in unit_kind and under the CLI's systemctl error.
 INSTALL_HINT = "run `./install.sh` again, or reinstall the Gearbench package"
-#: What to do about a file of the chain's data that is missing or not the WAV it takes: the
-#: checkout tracks these files, and the package installs them under PACKAGED.
+#: What to do about a file of the chain's data that is missing, or not the WAV or the text it
+#: takes: the checkout tracks these files, and the package installs them under PACKAGED.
 DATA_HINT = "restore the checkout's spatial folder, or reinstall the Gearbench package"
+#: The refusal of a file of the chain's data that is missing, given its path.
+MISSING_DATA = f"{{}} is missing: {DATA_HINT}"
 
 
 @dataclass(frozen=True)
@@ -274,7 +279,13 @@ def render(choices: Choices, target: Target, data: Path | None = None) -> str:
         raise pipewire_client.StepError(UNNAMED_OUTPUT.format(wording.escaped(target.node)))
     # PipeWire resolves a relative filename against its own working directory.
     base = (data_dir() if data is None else data).absolute()
-    template = file_bytes(base / TEMPLATE).decode("utf-8")
+    try:
+        template = file_bytes(base / TEMPLATE).decode("utf-8")
+    except FileNotFoundError as err:
+        raise pipewire_client.StepError(MISSING_DATA.format(base / TEMPLATE)) from err
+    except UnicodeDecodeError as err:
+        raise pipewire_client.StepError(
+            f"{base / TEMPLATE} is not UTF-8 text: {DATA_HINT}") from err
     hrir = base / "sadie-ii" / HEAD_SUBJECTS[choices.head]
     room = base / ROOM_WAV
     for path in (hrir, room):
@@ -285,7 +296,7 @@ def render(choices: Choices, target: Target, data: Path | None = None) -> str:
                 "and run `./install.sh` again")
     for path in (*(hrir / name for name in HRIR_FILES), room):
         if not path.is_file():
-            raise pipewire_client.StepError(f"{path} is missing: {DATA_HINT}")
+            raise pipewire_client.StepError(MISSING_DATA.format(path))
         channels, rate = wav_info(path)
         if (channels, rate) != (2, 48000):
             raise pipewire_client.StepError(f"{path} is {wording.counted(channels, 'channel')} "
@@ -360,6 +371,10 @@ def _channels(info: dict) -> int | None:
 #: The longest name of a client's node kept whole. The client sets it, and GTK takes seconds
 #: to wrap a few thousand characters with no space, each time the Headset tab shows a new one.
 NAME_MAX = 100
+#: The most client-named streams one line lists, a client setting how many there are: one
+#: measure of a row held the window's main thread 1.4 s with 1,000 names of NAME_MAX and
+#: 4.9 s with 2,000, on a broadway display (measured 2026-11-06).
+NAMES_MAX = 8
 
 
 def shown_name(name: object) -> str:
@@ -405,9 +420,9 @@ def graph_state(objects: Sequence[object], owner: int | None = None) -> dict:
     took from the owning client's socket (pipewire_client.node_pids) and that process's
     parent (pipewire_client.parent_of), since any client can name a node gearbench-spatial;
     with `owner` None the name and class decide, the first node of a client PipeWire did
-    not restrict (pipewire_client.trusted_clients) before any other. The headset and the
-    node it plays to are the ones its sink's props name (TARGET_PROPS), and the profile set
-    is that headset's card's.
+    not restrict that is its own (pipewire_client.trusted_node) before any other. The
+    headset and the node it plays to are the ones its sink's props name (TARGET_PROPS), and
+    the profile set is that headset's card's.
     """
     found_nodes = pipewire_client.of_type(objects, "Node")
     nodes = {node: info for node, info, _props in found_nodes}
@@ -426,7 +441,7 @@ def graph_state(objects: Sequence[object], owner: int | None = None) -> dict:
         if owner is None:
             # A sandboxed app's node of the name, listed first, would take the room set on
             # the user's own chain; min keeps pw-dump's order among equals.
-            return min(named, key=lambda each: pipewire_client.node_client(each[1]) not in trusted,
+            return min(named, key=lambda each: not pipewire_client.trusted_node(each[1], trusted),
                        default=(None, {}))[0]
         return next((node for node, _props in named
                      if owner > 0 and node in pids
@@ -503,8 +518,10 @@ def restart_needed(state: State, headset: Headset) -> bool:
     """Whether the outputs rows ask for WirePlumber's restart for `headset`, joined_headset's:
     for one with a named output (Headset.game), whose other set joins Game and Chat or leaves
     Game out until then; for another, while that set left it without the output the chain
-    plays to. One that kept it, as the G432's analog output under default.conf, plays the
-    same until then, so the restart is not asked for."""
+    plays to. One that kept it, as the G432's analog output under default.conf, where a
+    package install leaves its card until WirePlumber restarts, plays the same until then, so
+    the restart is not asked for: on Fedora the VM checks of 2026-10-28 found it asked for
+    with the G432 linked and playing."""
     return headset.game is not None or headset.key not in state.present
 
 
@@ -663,7 +680,8 @@ def _room_of(gain: float | None) -> str | None:
 
 def _streams_words(streams: tuple[Stream, ...]) -> str:
     """Each name and channel count once, with a count when a program plays
-    several streams: Arc Raiders played three (measured 2026-09-28)."""
+    several streams: Arc Raiders played three (measured 2026-09-28). The first NAMES_MAX,
+    then how many more."""
     words = []
     for stream, count in Counter(streams).items():
         parts = [stream.name]
@@ -672,7 +690,7 @@ def _streams_words(streams: tuple[Stream, ...]) -> str:
         if count > 1:
             parts.append(f"{count} streams")
         words.append(", ".join(parts))
-    return "; ".join(words)
+    return "; ".join(wording.with_more(words, NAMES_MAX))
 
 
 #: The playing kind's words: summary's go on to list the streams, describe's stop here.
@@ -747,12 +765,13 @@ def stereo_hint(state: State) -> str | None:
 
 
 def stale_hint(state: State) -> str | None:
-    """What to do about games whose launch option names RETIRED_SINK, which no sink has."""
+    """What to do about games whose launch option names RETIRED_SINK, which no sink has: the
+    first NAMES_MAX, then how many more."""
     if not state.stale:
         return None
     one = len(state.stale) == 1
-    return (f"{wording.word_list(state.stale, 'and')} {'plays' if one else 'play'} on the "
-            f"default output: change {RETIRED_SINK} in "
+    games = wording.up_to(state.stale, NAMES_MAX)
+    return (f"{games} {'plays' if one else 'play'} on the default output: change {RETIRED_SINK} in "
             f"{'its launch option' if one else 'their launch options'} to {SINK}")
 
 

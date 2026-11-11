@@ -148,7 +148,8 @@ class TrayExport:
     `show` and `refresh`, which the daemon calls outside it. `connected`, `dropped` and
     `shell_appeared` are how its holder tells it that the daemon's own session connection is
     set up or gone, or that the Shell appeared. Whether the Shell runs it reads from
-    `session.owners`, which the holder's `Loop.watch` of SHELL on that bus keeps."""
+    `session.owners`, which the holder's `Loop.watch` of SHELL on that bus keeps. It keeps no
+    clock of its own: the daemon asks it to compare the menu with the tray (`refresh`)."""
 
     def __init__(self, loop: Loop, session: Bus) -> None:
         self._loop = loop

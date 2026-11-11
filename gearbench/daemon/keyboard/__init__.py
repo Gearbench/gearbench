@@ -497,6 +497,11 @@ class Keyboard:
         """The model's name for a note, "keyboard" before one is known (keyboard.name)."""
         return keyboard_name(self.keyboard_product)
 
+    def refused(self, failure: HidppFailure) -> dict:
+        """The reply to a HID++ failure of this keyboard, by its name and route."""
+        return hidpp_refusal(self.model_name(), failure,
+                             cabled=self.keyboard_product in CABLED_IDS)
+
     def zone_lit(self) -> bool:
         """Whether the model this controller drives, drove last or last tried to set up
         (model) is lit through 0x8070's zones (KeyboardModel.zone_lighting), attached or
@@ -539,13 +544,8 @@ class Keyboard:
         failed = self.change_unreached()
         detail = None
         if self.lighting is None or failed is not None:
-            if failed is None and self.keys is not None:
-                # Attached without lighting: no lighting write clears the M and MR LEDs, so
-                # they are due at once, or go off now on a dark board.
-                if self.lights != DARK:
-                    self.leds_due = time.monotonic()
-                elif self.keyboard_answering():
-                    self.write_led(lambda keys: keys.all_leds_off(), "M and MR", owed=True)
+            if failed is None:
+                self.paint.leds_unlit()
             self.sync_devices(shown)
             self.last_apply_error, self.last_apply_detail = failed, detail
             return failed
@@ -975,8 +975,10 @@ class Keyboard:
         # effect, as the G915's does.
         go_dark = ((self.lighting, self.lights_out, "lights out"),
                    *((onboard,) if "typed_keys" in self.keyboard_able else ()))
-        # A G515's on-board mode before the release: released while in host mode, the G515 TKL
-        # kept showing the last paint, though the on-board mode followed (2026-10-24).
+        # A G515's on-board mode before the release: released while in host mode, the wired
+        # G515 TKL kept showing the last paint, though the on-board mode followed, and with the
+        # on-board mode first its own effect came back (measured with the owner on 2026-10-24,
+        # whose decision that day was to settle the order by that test).
         give_back = ((self.key_control.host_mode, self.key_control.give_back_mode, "onboard mode"),
                      (self.lighting, lambda: self._lighting.release(), "LED claim"), onboard)
         keys = ((self.keys, lambda: self._keys.all_leds_off(), "M/MR LEDs"),
@@ -1107,7 +1109,9 @@ class Keyboards:
         is waited on no more. So is one whose connect fails otherwise, its open refused, its
         keyboard held on its own profile or its setup cut short: that look would be due at
         every pass, and the loop's select would not wait (deadlines). It is tried every
-        RECONNECT_DELAY again (connect_others), as a cable's node is."""
+        RECONNECT_DELAY again (connect_others), as a cable's node is. A keyboard set up has
+        each other keyboard whose lighting or brightness its setup changes, as when it takes
+        the lead, painted (repaint_changed)."""
         path = str(found[0])
         if not self.waiting.due(path):
             return False
@@ -1126,17 +1130,18 @@ class Keyboards:
         """At the looks' pace (Plugs.pace), connect each keyboard plugged in
         (keyboard.attached_keyboards) whose model no controller drives, but for `tried`, which
         connect_due tried already in this pass, and one held
-        (OnboardHold.held_onboard); sooner after one that failed (retry_in). From sysfs, over
-        one walk."""
+        (OnboardHold.held_onboard); after one that failed, retry_in from its failure. From
+        sysfs, over one walk."""
         now = time.monotonic()
         if not look_due(now, self._look_at):
             return
         self._look_at = now + self.d.plugs.pace(CABLE_LOOK)
-        for found in attached_keyboards():
-            if (found != tried and self.of_model(model_key(found[1])) is None
-                    and not self.connect_on(found)):
-                # From the failure: a connect nothing answers holds the loop seconds.
-                self._look_at = min(self._look_at, time.monotonic() + self.retry_in(found))
+        # From each failure: a connect nothing answers holds the loop seconds, past the looks' own
+        # pace where no watch runs (Plugs.pace).
+        retries = [time.monotonic() + self.retry_in(found) for found in attached_keyboards()
+                   if found != tried and self.of_model(model_key(found[1])) is None
+                   and not self.connect_on(found)]
+        self._look_at = min(retries, default=self._look_at)
 
     def look_for_cables(self, force: bool = False) -> bool:
         """Each driven keyboard's look for its cable while on its receiver, when due or with
@@ -1364,7 +1369,7 @@ class Keyboards:
             # Here, not in handle_command, which names the leader.
             if isinstance(exc, DeviceGone):
                 keyboard.teardown_device()
-            return hidpp_refusal(keyboard.model_name(), exc)
+            return keyboard.refused(exc)
 
     def aimed(self, request: dict) -> Keyboard:
         """The keyboard a lighting command acts on: the one its `keyboard` names, by any of

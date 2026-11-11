@@ -59,6 +59,7 @@ else:
 
 
 def ioc(direction: int, kind: int, nr: int, size: int) -> int:
+    """An ioctl's request number as the running machine's kernel decodes it (_IOC)."""
     return (direction << _IOC_DIRSHIFT) | (size << 16) | (kind << 8) | nr
 
 

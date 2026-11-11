@@ -317,6 +317,9 @@ class GameCommands:
         imported = GameProfile.from_json(request.get("profile"), f"{command}.profile")
         loaded, existing = self.games.loaded_copy(imported.name)
         if existing is not None and request.get("replace") is not True:
+            # The loaded copy of a file the library left out: no plan lists it, so importing
+            # again would end here again. This names the file instead.
+            existing.check_unchanged()
             # Read after the import's 'game profile "X": ' (import_plan._what): the plan sends
             # replace for each name it found taken, so this one was saved since.
             return {"ok": False, "error": "one of that name was saved since the import read "

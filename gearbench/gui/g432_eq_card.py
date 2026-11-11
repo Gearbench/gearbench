@@ -483,7 +483,7 @@ class G432EqCard:
             self._a50_labels = labels
             self.a50_list.set_model(Gtk.StringList.new(labels))
         self._a50 = found
-        self.copy_row.set_subtitle("" if found else capitalized(why))
+        self.copy_row.set_subtitle("" if found else displayable(capitalized(why)))
         self._set_sensitive()
 
     def on_switch(self, row: Adw.SwitchRow, _pspec: GObject.ParamSpec) -> None:
@@ -508,14 +508,19 @@ class G432EqCard:
 
     def _acted(self, result: Result, failed: str, switching: bool, model: HeadsetModel) -> None:
         """An action's end for `model`: its failure toasted, and the window told (kept_up),
-        or the notes a switch gave, one toast each, then the equalizer's state read again."""
+        or the notes a switch gave, one toast each, and the window told of a note of a failed
+        step; then the equalizer's state read again."""
         if self._closed:
             return
         self._acting -= 1
         if isinstance(result, list):
+            named = EQ_WORDS[model.key]
+            # Any other note says a step failed, and the toast is all that says it.
+            if set(result) - {named.selected, named.reselected, named.moved, named.moved_nowhere}:
+                self._parent.kept_up()
             # Notes come from an equalizer's switch alone, on a model whose equalizer runs here.
             for note in result:
-                toast_note(self._toast, note, EQ_WORDS[model.key].description)
+                toast_note(self._toast, note, named.description)
         elif isinstance(result, OSError) and not switching:
             # Only a save raises one: the programs' failures come as StepError.
             self._parent.kept_up()

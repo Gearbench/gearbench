@@ -19,7 +19,7 @@ from ..profiles import GameProfile
 from ..tray import listed_profiles
 from ..wording import GAME_PROFILE_NEEDS_A_NAME, LEFT_OUT, NO_GAME_PROFILE, capitalized, word_list
 from .profile_manager import programs_text
-from .style import LeftOutRows, ask_name, confirm, first_under, say_not_shown
+from .style import LeftOutRows, ask_name, confirm, displayable, first_under, say_not_shown
 from .worker import named_layer, send_switch
 
 if TYPE_CHECKING:                       # pragma: no cover
@@ -275,9 +275,9 @@ class GameCard:
             # The status's profile: `overlay` changes only once the files
             # are read or the Loaded row's pick is answered, and a profile just loaded would
             # read as held off.
-            self.focus_row.set_title(focus_text(focus, win.status_overlay,
-                                                win.overlay_auto, win.keep_loaded,
-                                                held=win.held_off is not None))
+            self.focus_row.set_title(displayable(focus_text(focus, win.status_overlay,
+                                                            win.overlay_auto, win.keep_loaded,
+                                                            held=win.held_off is not None)))
             self.focus_row.set_subtitle(FOCUS_HELP if focus[0] == SHELL
                                         else FOCUS_HELP_X11)
 
@@ -288,7 +288,7 @@ class GameCard:
         if held is not None:
             title, subtitle = held_off_text(*held, followed=self.follows_focus(),
                                             more=self.win.held_off_more)
-            self.held_row.set_title(title)
+            self.held_row.set_title(displayable(title))
             self.held_row.set_subtitle(subtitle)
 
     def on_let_load(self, _b: Gtk.Button | None) -> None:

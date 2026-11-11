@@ -470,6 +470,8 @@ def cmd_mouse_dpi_stages(args: argparse.Namespace) -> int:
         print(f"error: give 1 to {DPI_STAGES} stages, not {len(stages)}",
               file=sys.stderr)
         return 1
+    # A number under every sensor's range is a stage's number typed for its DPI (the owner's
+    # decision of 2026-09-28).
     for option, value in (("--default", args.default), ("--shift", args.shift)):
         if value is not None and value < WIDEST_DPI_RANGE[0]:
             print(f"error: {option} {value}: give a DPI, not a stage number; no "

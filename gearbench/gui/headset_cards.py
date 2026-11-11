@@ -387,7 +387,8 @@ class LightsCard:
         lighting are insensitive, as the Mouse tab's own color rows are; else the Color row
         is under an effect that takes no color (_show_picker). While the headset does not
         answer (`answering` false), every row but the follow switch is insensitive: the switch
-        is Gearbench's, live while the headset is away, as the Mouse tab's is."""
+        is Gearbench's, live while the headset is away, as the Mouse tab's is (the owner's
+        decision of 2026-10-31)."""
         self.group.set_visible(isinstance(lights, dict))
         if not isinstance(lights, dict):
             return
@@ -428,9 +429,10 @@ class LightsCard:
     def _show_picker(self) -> None:
         """The picker on while Gearbench writes the lights under an effect that takes a color;
         under Off or one with no color of its own (mouse.COLORLESS_EFFECTS) grayed out with the
-        Keyboard tab's line saying why (style.no_color_line); while the follow switch is on it
-        is grayed out without that line, showing the keyboard's color where the lights take
-        it (`follows`)."""
+        Keyboard tab's line saying why (style.no_color_line), as the Mouse tab's picker is
+        (the owner's decision of 2026-10-31); while the follow switch is on it is grayed out
+        without that line, showing the keyboard's color where the lights take it
+        (`follows`)."""
         synced = self.sync_row.get_active()
         index = self.effect_row.get_selected()
         effect = self._effects[index] if index < len(self._effects) else None

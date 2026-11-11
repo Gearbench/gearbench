@@ -116,9 +116,11 @@ def launcher_warning(name: str) -> str | None:
 
 #: GNOME and Flatpak end an app's scope with a pid, KDE Plasma's KIO with a UUID of 32 hex
 #: digits; with systemd 250 or later KIO starts a service instead, app-<id>@<uuid>.service.
-#: xdg-autostart's app-<id>@autostart.service does not match.
+#: systemd's xdg-autostart generator starts an autostart entry as app-<id>@autostart.service;
+#: running_apps keeps only a launcher's.
 _SCOPE = re.compile(r"^app-(?:gnome-|flatpak-)?(?P<app>.+?)-(?:\d+|[0-9a-f]{32})\.scope$")
-_KDE_SERVICE = re.compile(r"^app-(?P<app>[^@]+)@[0-9a-f]{32}\.service$")
+_KDE_SERVICE = re.compile(r"^app-(?P<app>[^@]+)@(?:[0-9a-f]{32}|autostart)\.service$")
+_AUTOSTART_UNIT = "@autostart.service"
 #: snap run moves a snap into its own scope: snap.discord.discord-<uuid>.scope. An app
 #: name can hold hyphens (snap-store), so the UUID's shape ends it; a hook's scope,
 #: snap.<snap>.hook.<hook>-<uuid>, has a dot there and does not match.
@@ -516,8 +518,9 @@ class RunningApp:
 def running_apps() -> list[RunningApp]:
     """Distinct (app, process) pairs the user is running interactively.
 
-    An app with an autostart entry is left out, except a launcher, which the session can
-    start too (Steam's "Run Steam when my computer starts"): its games run in its scope.
+    An app with an autostart entry, or in the unit that starts one, is left out, except a
+    launcher, which the session can start too (Steam's "Run Steam when my computer starts"):
+    its games run in its scope or unit.
     """
     uid = os.getuid()
     root = CGROUP_ROOT / "user.slice" / f"user-{uid}.slice" / f"user@{uid}.service" / "app.slice"
@@ -528,7 +531,8 @@ def running_apps() -> list[RunningApp]:
         if match is None:
             continue
         app_id = _unescape(match.group("app"))
-        if _is_autostart(app_id) and _app_stem(app_id).lower() not in LAUNCHER_APPS:
+        autostarted = scope.name.endswith(_AUTOSTART_UNIT) or _is_autostart(app_id)
+        if autostarted and _app_stem(app_id).lower() not in LAUNCHER_APPS:
             continue
         try:
             pids = [int(line) for line in (scope / "cgroup.procs").read_text().split()]

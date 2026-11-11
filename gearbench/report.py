@@ -1,8 +1,8 @@
 """The device report: what every Logitech HID++ device attached over USB says about itself,
 for an owner of any model to post, so that a model nobody here holds can be supported and
 its faults fixed (`gearbench-ctl report`). Where it is posted, REPORT_FORM, and which
-attached models it is asked of, those not yet run on (`untested`, `untested_note`), are
-here too.
+attached models it is asked of, those not yet run on (`untested`, `untested_note`, the
+owner's decision of 2026-10-18), are here too.
 
 It reads and never writes, by construction. READS lists each (feature id, function) the
 report may send, with the function's name and two sources that call it a read, or for
@@ -248,9 +248,10 @@ class Read:
 
 
 #: Every (feature id, function) the report may send. A function only one source calls a
-#: read stays off but 0x1B10's (F_CONTROL_LIST), as do reads of what names the unit or its
-#: owner: 0x0003's serial number (function 2), 0x0007's friendly name, 0x1814 and 0x1815's
-#: host names. The DFU features (0x00C0 to 0x00D0) and 0x1802's reset are never on it.
+#: read stays off but 0x1B10's (F_CONTROL_LIST, the owner's decision of 2026-10-22), as do
+#: reads of what names the unit or its owner: 0x0003's serial number (function 2), 0x0007's
+#: friendly name, 0x1814 and 0x1815's host names. The DFU features (0x00C0 to 0x00D0) and
+#: 0x1802's reset are never on it.
 READS: Mapping[tuple[int, int], Read] = {
     (ROOT_FEATURE, 0): Read("getFeature", (SPEC.format("x0000 root v2"),
                                            SOLAAR.format("hidpp20.py, FeaturesArray"))),

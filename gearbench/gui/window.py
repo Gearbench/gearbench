@@ -306,6 +306,9 @@ class Window(Adw.ApplicationWindow):
 
     #: The close waits for the changes on their way (_on_close).
     _flushing = False
+    #: A refusal landed during a drag outside Per-key and its release has not answered it: the
+    #: first tick after the drag takes the lighting back (send_lighting).
+    _take_back_owed = False
     #: A change was refused, held or failed while the close waited, or found no daemon or a
     #: socket it could not use: the window stays up to say so.
     _flush_refused = False
@@ -752,10 +755,10 @@ class Window(Adw.ApplicationWindow):
 
         A change refused or held (call) is taken back to `_known` and drawn once no other is
         out, since the read after it takes nothing while a file does not parse. During a drag
-        outside Per-key the release's reply or the read owed after it takes it back instead.
-        One whose round trip raised is left to that read, since one that timed out may have
-        been made. Either way it is read back (resync), or what the daemon refused would stay
-        drawn as if saved.
+        outside Per-key the release's reply takes it back instead, or the first tick after the
+        drag, since not every release sends lighting. One whose round trip raised is left to
+        the read, since one that timed out may have been made. Either way it is read back
+        (resync), or what the daemon refused would stay drawn as if saved.
         """
         self._lighting_unanswered += 1
         sent = self.lighting.copy()
@@ -764,6 +767,7 @@ class Window(Adw.ApplicationWindow):
             self._lighting_unanswered -= 1
             if reply is not None:
                 self._known = sent
+                self._take_back_owed = False
                 digest = reply.get("lighting")
                 if (isinstance(digest, str) and self._seen is not None
                         and reply.get("was") == self._seen.lighting):
@@ -772,14 +776,19 @@ class Window(Adw.ApplicationWindow):
                 if self.dragging and self.lighting.mode != PER_KEY:
                     # A drag outside Per-key shows each color on the keyboard; taken back to
                     # Per-key mid-drag, its release would send nothing and leave the last frame
-                    # there. The release's own reply takes it back, or the read owed after it.
-                    self._read_again = True
+                    # there. The release's own reply takes it back, or the next tick.
+                    self._read_again = self._take_back_owed = True
                 else:
-                    self.lighting.take(self._known)
-                    self.refresh()
+                    self._take_back()
             if reply is None or (self._read_again and not self._lighting_unanswered):
                 self.resync()
         self.call(request, done, lambda _error: done(None, refused=False))
+
+    def _take_back(self) -> None:
+        """Draw the lighting the daemon holds (`_known`), and owe no take-back."""
+        self._take_back_owed = False
+        self.lighting.take(cast("LightingState", self._known))
+        self.refresh()
 
     def send_processes(self, profile: GameProfile, processes: list[str],
                        said: str | None) -> None:
@@ -932,9 +941,12 @@ class Window(Adw.ApplicationWindow):
         # one the user was on.
         if self.dragging or self._tick_pending:
             return
-        if self._read_again and not self._lighting_unanswered:
-            self.resync()
-            return
+        if not self._lighting_unanswered:
+            if self._take_back_owed:
+                self._take_back()
+            if self._read_again:
+                self.resync()
+                return
         self._tick_pending = True
         request = self.status_read()
         self.worker.call(request, lambda status: self._on_tick(status, request.get("keyboard")))
@@ -1105,7 +1117,7 @@ class Window(Adw.ApplicationWindow):
         self.lock_lights = bool(status.get("lights_off_when_locked"))
         problem = next((p for p in status.get("problems") or ()
                         if p["code"] == "desktop_unavailable"), None)
-        self.lock_unavailable = problem["message"] if problem else None
+        self.lock_unavailable = displayable(problem["message"]) if problem else None
         self.keyboard.light.show_lock()
 
     def editing(self) -> str:
@@ -1114,9 +1126,10 @@ class Window(Adw.ApplicationWindow):
         # The program loaded status_overlay; overlay catches up once the files are read.
         program = self.auto_process if self.overlay == self.status_overlay else None
         profile = self.game_profile(self.overlay)
-        return editing_text(self.overlay, self.overlay_auto,
-                            profile.processes if profile is not None else [], self.active,
-                            self.profile_names.get(self.active, ""), program)
+        return displayable(editing_text(self.overlay, self.overlay_auto,
+                                        profile.processes if profile is not None else [],
+                                        self.active, self.profile_names.get(self.active, ""),
+                                        program))
 
     def take_names(self, status: dict) -> None:
         """The M profiles' names. The daemon owns them; this window mirrors."""

@@ -23,10 +23,18 @@ from . import wording
 #: any props, a card's ids and device.id among them: WirePlumber 0.5.13 gives it "rx"
 #: (access-default.lua).
 TRUSTED_ACCESS = frozenset({"unrestricted", "default"})
-#: The marks PipeWire 1.6.2 gives a Flatpak app's client in either mode: module-access sets
-#: both, pipewire-pulse the app_id. A client can set no pipewire.sec.* key and change no
-#: pipewire.* key once set (impl-client's check_client_property_update).
-SANDBOXED = ("pipewire.sec.flatpak", "pipewire.access.portal.app_id")
+#: The marks PipeWire 1.6.2 gives a sandboxed app's client: a Flatpak app's in either mode,
+#: module-access setting both of its marks and pipewire-pulse the app_id, and on a build with
+#: snap support, as Ubuntu's, a Snap's on the pulse socket, which pipewire-pulse sets with its
+#: client access unset and WirePlumber 0.5.13 restricts by (access-snap.lua). A client can set
+#: no pipewire.sec.* key and change no pipewire.* key once set (impl-client's
+#: check_client_property_update).
+SANDBOXED = ("pipewire.sec.flatpak", "pipewire.access.portal.app_id", "pipewire.snap.id")
+#: The key pipewire-pulse 1.6.2 sets on a node a pulse client's load-module makes. The node's
+#: maker is then pipewire-pulse's own connection, which trusted_clients counts, and any pulse
+#: client can ask, a sandboxed app's included: load-module reads no client access. Read from
+#: module-null-sink.c and the other modules' sources, not measured.
+PULSE_MODULE = "pulse.module.id"
 #: The client's settings, which each chain's conf opens with after its first comment.
 CLIENT_CONTEXT = """\
 # PipeWire's default: at 0, a conf that fails to load leaves the unit's
@@ -71,7 +79,7 @@ DUMP = ["pw-dump", "--no-colors"]
 MONITOR = ["pw-dump", "--monitor", "--no-colors"]
 #: The program that runs a filter chain's conf, `pipewire -c`.
 PIPEWIRE = "/usr/bin/pipewire"
-#: The most one print may hold before printed drops it: far over the 74 KB of a
+#: The most bytes one print may hold before printed drops it: far over the 74 KB of a
 #: throwaway PipeWire's first dump (2026-10-17), and far under what would fill the memory.
 PRINT_MAX = 64 * 2 ** 20
 #: The most pw-dump --monitor's pipe is read in one go, in bytes.
@@ -99,6 +107,19 @@ class StepError(Exception):
 
 class NotInstalled(StepError):
     """The program is not installed."""
+
+
+class FailedStep(str):
+    """A note, in words, of a step that failed where a switch went on all the same or a
+    move's writes stand, as a StepError stops either: a str to whatever prints or compares
+    it. step_failed finds one."""
+
+    __slots__ = ()
+
+
+def step_failed(notes: Iterable[str]) -> bool:
+    """Whether a note of `notes` says a step failed (FailedStep)."""
+    return any(isinstance(note, FailedStep) for note in notes)
 
 
 def program_words(done: subprocess.CompletedProcess, program: str) -> str:
@@ -179,9 +200,10 @@ class Prints:
 
     def feed(self, line: str) -> Iterator[list | None]:
         """The print `line` ends, if it ends one: a JSON array, or None for one that is no
-        JSON or is over PRINT_MAX, which is not kept past it. A print ends at a line that is
-        "]" alone."""
-        self._size += len(line)
+        JSON or is over PRINT_MAX bytes, which is not kept past it. A print ends at a line
+        that is "]" alone."""
+        # In bytes, as lines_of cuts: in characters, text of wider characters passes the cap.
+        self._size += len(line.encode())
         if self._size <= PRINT_MAX:
             self._held.append(line)
         if line.rstrip("\n") != "]":
@@ -388,10 +410,14 @@ def listed_name(props: dict) -> str:
 
 
 def described(objects: Sequence[object], name: str) -> str:
-    """The node named `name` in pw-dump's objects as GNOME lists it (listed_name), else the
+    """The node named `name` in pw-dump's objects as GNOME lists it (listed_name), by the
+    first such node of a Client PipeWire did not restrict (trusted_clients) that is its own
+    (trusted_node), since any client can name a node so and word its description; else the
     name, as text a line holds (wording.printable)."""
+    trusted = trusted_clients(objects)
     props = next((props for _node, _info, props in of_type(objects, "Node")
-                  if props.get("node.name") == name), {"node.name": name})
+                  if props.get("node.name") == name and trusted_node(props, trusted)),
+                 {"node.name": name})
     return wording.printable(listed_name(props))
 
 
@@ -414,6 +440,13 @@ def node_client(props: dict) -> int | None:
     if props.get("object.linger") in (True, 1):
         return None
     return as_whole(props.get("client.id"))
+
+
+def trusted_node(props: dict, trusted: set[int]) -> bool:
+    """Whether a Node, by its props in pw-dump, is its maker's own (node_client), a Client of
+    `trusted`: not one a pulse client's load-module made (PULSE_MODULE), which pipewire-pulse
+    makes through its own connection."""
+    return node_client(props) in trusted and PULSE_MODULE not in props
 
 
 def node_pids(objects: Sequence[object]) -> list[tuple[int, dict, dict, int]]:

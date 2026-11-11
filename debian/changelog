@@ -1,13 +1,13 @@
-gearbench (1.3.0) resolute; urgency=medium
+gearbench (1.3.1) resolute; urgency=medium
 
-  * Gearbench Game, Chat and Media: three outputs for games, voice chat and
-    music, and a balance between game and chat.
-  * Noise suppression for headset microphones, with a microphone test.
-  * G-Shift on keyboards, mice and headsets' G keys; low-battery notices
-    set per device; a Firmware row on the Keyboard and Mouse tabs.
-  * Settings move to format 4, which 1.2.1 and earlier refuse: each file's
-    copy as it was is kept in the settings folder's backup/.
-  * Packages for Fedora (.rpm) and Arch Linux beside the .deb.
+  * Switching Outputs or noise suppression off keeps the output or input
+    you picked while it ran, and gives it back when it returns.
+  * At a power-off the keyboard and a mouse that follows it stay dark.
+  * Settings files and commands run as root refuse links and folders
+    another account could change, and a reply from the daemon's socket is
+    read only up to a size limit.
+  * Fixes to game profiles, macros, the G HUB import, the headsets'
+    preset key and the device report.
 
- -- wmuschetto <113629853+wmuschetto@users.noreply.github.com>  Wed, 04 Nov 2026 02:31:16 +0000
+ -- wmuschetto <113629853+wmuschetto@users.noreply.github.com>  Wed, 11 Nov 2026 20:43:09 +0000
 

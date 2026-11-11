@@ -108,7 +108,10 @@ def read_astroeq(text: str) -> EqPreset:
 
 #: The largest .astroeq file read. Command Center's own are under 300 bytes.
 #: configparser's work on a line without "=" grows with the square of a run of white
-#: space inside it, and on a run of bad lines with the square of their count.
+#: space inside it, and on a run of bad lines with the square of their count: a line
+#: holding a 16 KiB run took 0.34 s and one holding a 128 KiB run 23 s (measured
+#: 2026-10-03), and the window reads a file on its one thread to the daemon
+#: (DaemonWorker), which sends no other request meanwhile.
 ASTROEQ_MAX = 16 << 10
 
 

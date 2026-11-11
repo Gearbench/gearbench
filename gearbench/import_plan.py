@@ -3,7 +3,7 @@
 `Existing` is what Gearbench has now, read from the libraries and config.json. A `Plan`
 holds what an import would write, its clashes with what is there and the sentences that say
 what it leaves out. `ghub_plan.make_plan` and `pack.make_plan` each build one, with
-`take_programs` (`programs_for` and `keepers_last`) for a program another game profile
+`take_programs` (`programs_for`, `keepers_last` and `_written_as_sent`) for a program another game profile
 already loads. `requests` turns a plan into control socket commands, the one place they are
 built, so the daemon writes every file and its hand-edit protection covers an import;
 `failed_saves`, `held_back` and `reply_lines` are for the front end that sends them.
@@ -13,6 +13,7 @@ setting.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -290,13 +291,35 @@ def take_programs(plan: Plan, taking: list[tuple[list[str], str, str | None]],
                   existing: Existing, limit: int | None = None) -> None:
     """Each game profile of `taking`, already in `plan`, given the programs it loads for and
     the sentences for those it goes without (`programs_for`), and the keepers sent last
-    (`keepers_last`): once every game profile is in `plan`."""
+    (`keepers_last`), less what the daemon leaves out as they are sent (`_written_as_sent`):
+    once every game profile is in `plan`."""
     programs, keeping = programs_for(taking, existing, limit)
     for body, _replace in plan.profiles:
         if body["name"] in programs:
             body["processes"], said = programs[body["name"]]
             plan.said += said
     keepers_last(plan, keeping)
+    _written_as_sent(plan, existing)
+
+
+def _written_as_sent(plan: Plan, existing: Existing) -> None:
+    """Each game profile of `plan` less the programs the daemon leaves out as they are sent
+    in order (GameCommands._programs_free), which is said: keepers that wait for each other
+    cannot all keep theirs (`keepers_last`)."""
+    loads = {slug(name): game.processes for name, game in existing.games.items()}
+    # What a profile of yours loads until it is sent. What one sent writes needs no place here:
+    # `programs_for` gave each program to one profile, so it meets none a later one loads.
+    held = Counter(form for programs in loads.values()
+                   for form in set().union(*map(wanted_forms, programs)))
+    for body, _replace in plan.profiles:
+        if body["name"] in plan.kept:
+            continue
+        held.subtract(set().union(*map(wanted_forms, loads.get(slug(body["name"]), ()))))
+        free = [p for p in body["processes"] if not any(held[f] for f in wanted_forms(p))]
+        plan.said += [f'Game profile "{body["name"]}" is imported without {program}, which '
+                      f'another game profile loads.'
+                      for program in body["processes"] if program not in free]
+        body["processes"] = free
 
 
 def keepers_last(plan: Plan, keeping: Mapping[str, list[str]]) -> None:

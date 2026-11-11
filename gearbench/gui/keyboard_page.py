@@ -82,6 +82,7 @@ from .style import (
     Switcher,
     blank,
     confirm,
+    displayable,
     firmware_row,
     name_button,
     route_text,
@@ -478,7 +479,7 @@ class KeyboardPage:
         elif not self.view.seen:
             self.view.missing(NO_KEYBOARD, message)
             return
-        self.away_banner.set_title(AWAY_BANNER.format(name or "keyboard"))
+        self.away_banner.set_title(displayable(AWAY_BANNER.format(name or "keyboard")))
         self.away_banner.set_revealed(not here)
         self._show_switch(connected)
         if not connected:
@@ -573,7 +574,7 @@ class KeyboardPage:
         able = set(status.get("capabilities") or ())
         name = str(status.get("name") or KEYBOARD_TAB)
         # A group's title is markup, and the name is the daemon's.
-        self.status_group.set_title(GLib.markup_escape_text(name))
+        self.status_group.set_title(GLib.markup_escape_text(displayable(name)))
         show_untested(self.untested_row, status.get("untested"))
         show_firmware(self.firmware_row, status.get("firmware"))
         self.light.show_capabilities(able, status.get("dims") is not False)
@@ -854,7 +855,7 @@ class KeyboardPage:
             return
         unread = win.profile_unread()
         self._draw_board(unread)
-        self.board_row.set_title(self._board_title(unread, following))
+        self.board_row.set_title(displayable(self._board_title(unread, following)))
         self.light.show_picker(self.sampling)
         self.board.set_sampling(self.sampling)
         self.refresh_css()

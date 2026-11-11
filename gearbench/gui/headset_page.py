@@ -93,6 +93,7 @@ from .style import (
     astroeq_dialog,
     between,
     confirm,
+    displayable,
     firmware_row,
     header_spinner,
     holds_focus,
@@ -282,7 +283,9 @@ class HeadsetPage:
     with the whole `headset` reply, which sets the rows. `kept_up` is told of an action the
     page runs itself that failed (Window.kept_up). HeadsetStack puts the groups every
     headset page shares in `shared` while this page shows: under the status page until an
-    A50 is seen, then under Revert, in `page`.
+    A50 is seen, then under Revert, in `page`. This page shows for every headset while none
+    is attached, and the groups work without one, so Outputs' line for a headset away shows
+    here once that headset's page has gone (seen on the hardware, 2026-10-28).
     """
 
     #: The last reply said the base station answers, and a save is running.
@@ -561,7 +564,7 @@ class HeadsetPage:
         the problem, saying how to wake it (show_state), and the reply's refusal says the
         others (_failed)."""
         message = str((problem or {}).get("message") or "")
-        self._problem = capitalized(message) if message else None
+        self._problem = displayable(capitalized(message)) if message else None
         self._reason = self._problem or (NO_HEADSET_FOUND if none_attached else None)
         if self._reason and not self.view.seen:
             self.view.missing(NO_HEADSET, self._reason)
@@ -584,18 +587,27 @@ class HeadsetPage:
 
     def _set_editable(self, editable: bool) -> None:
         """Load preset to headset stays sensitive: its dialog renames, deletes and adds with
-        no base station, and grays out its own Load (set_writable). Graying the Name row with
-        the cursor in it takes the cursor out first."""
-        if not editable and holds_focus(self._parent.get_focus(), self.name_row):
+        no base station, and grays out its own Load (set_writable). Graying the Name row or a
+        band's spin row with the cursor in it takes the cursor out first, and in the spin row
+        drops a number typed and not yet taken."""
+        focus = self._parent.get_focus()
+        if not editable and holds_focus(focus, self.name_row):
             if self._shown.typed(self.name_row):
                 # Grayed out, the row loses the cursor, which EntryTexts.typing goes by.
                 self._typed_when_grayed = True
             # GTK grays a widget before it moves the cursor out, and a grayed widget's
             # controllers get no focus-out: the row's text still took itself for focused, so
             # a name put in it later started a cursor blink, which warned "did not receive a
-            # focus-out event" at the next frame (GTK 4.22.4). A spin row is left to GTK:
-            # its focus-out takes the number typed in it.
+            # focus-out event" at the next frame (GTK 4.22.4).
             self._parent.set_focus(None)
+        for spin in (*self.freq_rows, *self.width_rows.values()):
+            if not editable and holds_focus(focus, spin):
+                # The same for a spin row, whose focus-out takes the text in it, half typed or
+                # not. The signal has GtkSpinButton write its value over the text; a set_value
+                # that changes no value leaves the text alone (measured with libadwaita 1.9.1).
+                with self._loading:
+                    spin.get_adjustment().emit("value-changed")
+                    self._parent.set_focus(None)
         for row in (*self.setting_rows.values(), self.preset_row, self.name_row,
                     *self.band_rows, self.import_row, self.reset_row):
             row.set_sensitive(editable)
@@ -638,8 +650,8 @@ class HeadsetPage:
 
     def show_state(self, info: dict) -> None:
         """The status group's title and rows, from the reply."""
-        self.status_group.set_title(GLib.markup_escape_text(str(info.get("name")
-                                                                or HEADSET_TAB)))
+        self.status_group.set_title(
+            GLib.markup_escape_text(displayable(str(info.get("name") or HEADSET_TAB))))
         linked = info.get("linked") is True
         state: bool | str
         if not self.answering:
@@ -653,7 +665,7 @@ class HeadsetPage:
             state = ASLEEP
         set_dot(self.state_dot, state)
         if state == ASLEEP:
-            # set_dot's label, asleep or switched off, is wrong for a silent base station.
+            # set_dot's label is the bare state; these words say what it is on a base station.
             self.state_dot.update_property([Gtk.AccessibleProperty.LABEL], [words])
         self.state_row.set_subtitle(words)
         show_firmware(self.firmware_row, versions_text(info.get("versions")))

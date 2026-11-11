@@ -81,7 +81,8 @@ class KeyboardBattery(BatteryNotices):
     def take_report(self, event: Event) -> bool:
         """Whether `event` was the keyboard's 0x1004 status, which it sends as its battery
         changes (battery.unified), on its cable and through its receiver alike: the G915 X
-        LIGHTSPEED sent one on each on 2026-10-23. The reading is kept
+        LIGHTSPEED sent one on each on 2026-10-23, and taking it is the owner's decision of
+        that day. The reading is kept
         for `status` and the tray (Readings.keep_report) and given to the notices at once,
         as on external power on its cable, as the poll gives them too
         (Readings.cable_power), unless a reading is assumed for them (assumed_here)."""

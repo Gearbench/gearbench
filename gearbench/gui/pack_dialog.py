@@ -15,7 +15,7 @@ from gi.repository import Adw, Gtk
 from .. import import_plan, pack
 from ..macros import Macro, macro_summary
 from ..profiles import GameProfile
-from ..wording import LEFT_OUT, counted
+from ..wording import LEFT_OUT, counted, printable
 from .import_dialog import (
     KEEP_MINE,
     NO_MATCH as NO_PROFILE_MATCH,
@@ -89,7 +89,8 @@ class PackDialog(Importer):
         if self.pack.broken:
             group = Adw.PreferencesGroup(title=LEFT_OUT)
             for file, why in self.pack.broken:
-                group.add(left_out_row(file, why))
+                # A file's name is whoever made the pack's, and can hold anything.
+                group.add(left_out_row(printable(file), why))
             body.append(group)
         return self._page("pick", CHOOSE_WHAT, self._counted(
             len(self.pack.profiles), len(self.pack.macros)), body, self.next)

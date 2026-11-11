@@ -14,7 +14,7 @@ from gi.repository import Adw, GObject, Gtk
 
 from ..astro import NAME as A50_NAME
 from ..wording import capitalized
-from .style import HEADSET_TAB, gray_switched_off, switched_off_title, top_switcher
+from .style import HEADSET_TAB, displayable, gray_switched_off, switched_off_title, top_switcher
 
 
 @dataclass
@@ -119,7 +119,7 @@ class HeadsetStack:
         """Show the daemon's headset problems on the banner, a line each, or take it down."""
         lines = [capitalized(p["message"]) for p in problems]
         if lines:
-            self.problem_banner.set_title("\n".join(lines))
+            self.problem_banner.set_title(displayable("\n".join(lines)))
         self.problem_banner.set_revealed(bool(lines))
 
     def _page(self, name: str) -> Gtk.StackPage:

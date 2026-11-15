@@ -716,8 +716,8 @@ Active row switches the M profile and the Name row renames the one shown.
 `gearbench-ctl m-profile 2` does what M2 does (`profile 2`, its name in
 Gearbench 1.1.0, too).
 
-A keyboard with no M keys, such as the G515, the PRO X TKL, the G213 or the
-G915 X LIGHTSPEED, has the same three M profiles. Switch them from its M
+A keyboard with no M keys, such as the G515, the PRO X TKL, the PRO X 60, the
+G213 or the G915 X LIGHTSPEED, has the same three M profiles. Switch them from its M
 profile group or, while the keyboard is attached, from the tray icon's menu,
 whose M profile submenu lists them with the active one marked. The daemon
 saves the active M profile, and a game profile loaded by hand, as they
@@ -905,9 +905,10 @@ macros work on the mouse's G4 to G9.
   G-Shift and each MR LED that shows it, whatever key or button holds it. A
   G key or MR still held through it does nothing until you release it and
   press it again.
-- The Game Mode button is the keyboard's own Game Mode, which Gearbench
-  does not touch. Game Mode turns off the Super key: if Super does nothing,
-  the Activities overview included, press the Game Mode button again.
+- The Game Mode button, a switch on a PRO X 60 LIGHTSPEED, is the
+  keyboard's own Game Mode, which Gearbench does not touch. Game Mode turns
+  off the Super key: if Super does nothing, the Activities overview
+  included, press the Game Mode button again, or move the switch back.
 - With the daemon stopped, the keyboard runs its onboard profiles. A G915's
   G1 to G5 then type F1 to F5 on M1, 1 to 5 on M2 and 6 to 0 on M3. A G915
   TKL's or PRO X TKL's F1 to F12 type F1 to F12. At a shutdown or reboot the
@@ -1057,9 +1058,10 @@ The Brightness row, or `gearbench-ctl brightness`, sets the backlight,
 rounded down to a level the keyboard keeps: on the G915, 0, 12, 25, 50 or
 100%. The keyboard's own brightness key works too, and the daemon saves the
 level it sets. On a G515 that is FN+F8, which steps through 100, 50, 25, 13
-and 0%.
+and 0%. On a PRO X 60 LIGHTSPEED, FN+Z steps it down and FN+X up.
 
-A G515 TKL and a G915 X LIGHTSPEED keep their brightness when switched off,
+A G515 TKL, a PRO X 60 LIGHTSPEED and a G915 X LIGHTSPEED keep their
+brightness when switched off,
 and the G515 LIGHTSPEED TKL is taken to do the same. So Gearbench sends one
 of them a level only when the level changes. The 13% that a G515's FN+F8 or
 a G915 X LIGHTSPEED's Brightness button sets stays 13%; the Brightness row
@@ -1076,8 +1078,8 @@ between, unless Gearbench restarts before it connects again: then it can
 keep the level of the keyboard it followed as its own. Gearbench also reads
 and keeps the level of each of the G515's other newer relatives, the G915
 X, the G915 X LIGHTSPEED TKL and the G316 X and G512 X models, when it
-connects. Whether they keep their brightness when switched off is not
-known. A PRO X TKL LIGHTSPEED has the G515's brightness feature: Gearbench
+connects. Whether they keep their brightness when
+switched off is not known. A PRO X TKL LIGHTSPEED has the G515's brightness feature: Gearbench
 writes its level each time it lights the board and does not read it back,
 and whether it keeps the level when switched off is not known.
 
@@ -1108,11 +1110,22 @@ the backtick and 1 to 3, F3 to F12 and, on the 75, Print Screen, Page Up
 and Page Down. It has been tested on a G915 X LIGHTSPEED, and on none of the
 others yet.
 
-A G915 X LIGHTSPEED's FN keys do not light while its custom assignments
-are off, since it tells Gearbench that FN is held only while they are on;
-each of these keyboards, the G515s included, is taken to do the same. When
-FN+F1 turns the custom assignments off, the FN keys go back to the
-profile's colors at once.
+A PRO X 60 LIGHTSPEED lights the keys whose caps print an FN function, and
+FN itself: Esc, 1 to 0, - and =, and Backspace; U, I, O, P, [ and ]; S, D, F,
+J, K, L, ; and '; and Z, X, C, V, N, M, comma, period and slash. A stays as
+it is: FN with A is the shortcut for its custom assignments. This has been
+tested on one, on its cable and through its receiver.
+
+The FN keys of a G915 X LIGHTSPEED and of a PRO X 60 LIGHTSPEED do not light
+while the keyboard's custom assignments are off, since it tells Gearbench
+that FN is held only while they are on; the others here, the G515s included,
+are taken to do the same. When the keyboard's shortcut, FN+F1, or FN+A on a
+PRO X 60 LIGHTSPEED, turns the custom assignments off, the FN keys go back
+to the profile's colors at once. If holding FN lights nothing, look at the
+tab's Custom assignments row or `gearbench-ctl status`: each says whether
+they are on and names the shortcut that turns them on. While they are off
+on one of these keyboards, each adds "holding FN lights no keys until they
+are on".
 
 To see FN, Gearbench has each of these keyboards send it Ctrl, Shift, Alt,
 Super and FN as you press them. For what that lets other programs read, see
@@ -1134,8 +1147,8 @@ keyboards dim together (see [Idle, lock and suspend](#idle-lock-and-suspend)). W
 with more than one keyboard plugged in and switched on, it sets up the one
 picked to lead first, if it is among them, then the others in this order:
 the G915, the wired G515 TKL, the G515 LIGHTSPEED TKL, the G915 TKL, the
-G815, the PRO X TKL LIGHTSPEED, the G515's newer relatives (the G915 X,
-G316 X and G512 X models) and the G213 Prodigy. With none of them picked,
+G815, the PRO X TKL LIGHTSPEED, the PRO X 60 LIGHTSPEED, the G515's newer
+relatives (the G915 X, G316 X and G512 X models) and the G213 Prodigy. With none of them picked,
 the first in that order leads.
 
 A keyboard switched off with its receiver plugged in is set up once it is
@@ -1354,6 +1367,72 @@ keyboard may store it as a G515 does (see [Brightness](#brightness)). It
 writes nothing else to its onboard memory and does not drive it over
 Bluetooth.
 
+### The PRO X 60 LIGHTSPEED
+
+A PRO X 60 LIGHTSPEED works on its cable and through its receiver. It was
+built from two device reports of one (2026-11-14, see [Reporting a
+device](#reporting-a-device)), the key layout G HUB draws for it and its
+setup guide, and tested on that keyboard the same day, on its cable and
+through its receiver.
+
+Gearbench drives it as it drives the G515: per-key lighting, the effects it
+reports (static, breathe, cycle, wave and ripple), brightness, the FN keys
+lit while FN is held (see [The FN keys](#the-fn-keys)) and Game Mode's state.
+Its wave runs in each of the six directions.
+Its tab draws its 61 keys, with Esc where a larger board has the backtick
+key. Groups leaves out F keys, G keys, Arrows, Keypad, Media and Logo. The
+switches, buttons and volume roller on its edges have no light and are not
+drawn. A color a profile holds for a key it lacks, such as an F key or an
+arrow, stays in the profile and is not sent.
+
+None of its keys binds: it has no G keys and no F row, so its tab has no
+Bind toggle, and Gearbench writes none of its custom assignments. It has no
+M keys or MR: its M profiles are switched from the M profile group and the
+tray icon's menu (see [M profiles](#m-profiles)).
+
+The tab's Custom assignments row says whether the keyboard's custom
+assignments are on, with the shortcut that turns them the other way, FN+A.
+Each turn brings a
+notice (see [Custom assignments](#custom-assignments) under "Battery and
+DPI notices"). Turned on, they stay on through a power-off.
+Its FN keys light only while its custom
+assignments are on, as a G915 X LIGHTSPEED's do: if holding FN lights
+nothing, press FN+A. The Game Mode row says
+whether Game Mode is on, once its Game Mode switch has been moved after
+Gearbench last set the keyboard up; until then it reads "Not known until
+the keyboard's Game Mode switch is moved". With Game Mode on, the keyboard's Super
+and Menu keys do nothing.
+
+While Gearbench runs, the keyboard is in its host mode, as a G515 is, and
+Gearbench puts it back in its onboard mode when it stops (see [The G915 X,
+G316 X and G512 X models](#the-g915-x-g316-x-and-g512-x-models)). Each of its
+FN shortcuts types or does what its keycap prints, and its volume roller
+changes the system volume; that was tested with Gearbench not running.
+While Gearbench runs, FN+Z and
+FN+X step the brightness, and Gearbench keeps the level they set. FN+S, FN+D
+and FN+F pick an onboard profile and leave Gearbench's lighting in place.
+FN+C, the keyboard's animation key, starts the keyboard's own animation in
+place of Gearbench's lighting. Under a static color or painted keys,
+Gearbench then sends its lighting again, so the board goes back to it
+within a moment. While one of Gearbench's animations runs, Gearbench
+cannot tell the keyboard's animation from its own and sends nothing, and
+what the board shows then has not been tested. The keyboard was read
+doing this under a static color on its cable; Gearbench's answer has not
+been tested on one yet.
+
+Its group has a Battery row with the charge the keyboard reports. Through
+its receiver it works on a node of its own, with the G915's low-battery
+notices. With its udev rule installed, any program you run can read what you
+type on it through that node; Gearbench drops those reports unread. [The
+udev rules](#the-udev-rules) says how to limit that grant to one group's
+accounts on a machine several people use. The keyboard keeps its brightness
+when switched off, as a G515 does, so Gearbench sends it a level only when
+the level changes (see
+[Brightness](#brightness)). It writes nothing else to its onboard memory,
+does not set its report rate and does not drive it over Bluetooth. Not yet
+tested on one: its idle dimming and its low-battery notices under Gearbench,
+and a switch to Bluetooth and back.
+
 ### The G915 X, G316 X and G512 X models
 
 The G515's newer relatives work too: the G915 X, the G915 X LIGHTSPEED and
@@ -1399,8 +1478,8 @@ F12 bind, is grayed out with "Bindings wait for a test on this model" on its
 row. `gearbench-ctl bind` saves a binding and says so; meanwhile the keys
 send what the keyboard sends for them in its host mode, described below.
 
-While Gearbench runs, it puts each of these keyboards and each G515 in the
-keyboard's own host mode, as G HUB does. It puts the keyboard back in its
+While Gearbench runs, it puts each of these keyboards, each G515 and the PRO
+X 60 LIGHTSPEED in the keyboard's own host mode, as G HUB does. It puts the keyboard back in its
 onboard mode when it stops, except at a shutdown or reboot, which leaves it
 in host mode with its lights off. The keyboard starts in its onboard mode
 each time it is switched on, and a keyboard with no battery each time it is
@@ -4969,8 +5048,8 @@ or on, a notice names the keyboard and says which: "G915 X LIGHTSPEED:
 custom assignments off". The line under it says what the keys Gearbench set
 to report to it do until the shortcut turns them back. For that keyboard it
 reads "Its G keys send F13 to F21 until FN+F1 turns them on". Where turning
-them changes no key, as on a model whose keys do not bind yet, the line
-names the shortcut alone. A
+them changes no key, as on a model whose keys do not bind yet or one with no
+key that binds, the line names the shortcut alone. A
 second press within 1.5 s changes the notice in place, and Gearbench takes
 it down 5 s after the last, as with a DPI notice. Starting Gearbench or
 connecting a keyboard posts none. The notice has no switch of its own.
@@ -5117,7 +5196,11 @@ gearbench-ctl battery-notices 10/5 --mouse G305   a device's low-battery notices
 `gearbench-ctl daemon` refuses to start as root: run it as yourself, not
 with `sudo`. It refuses while another daemon runs too, the service's
 included, and names the lock it found. Stop the service first
-(`systemctl --user stop gearbench`).
+(`systemctl --user stop gearbench`). As root with no account behind it, as
+after `su`, `headset-spatial`, `headset-outputs`, `headset-volume`,
+`headset-noise`, `g432-eq` and `gui` refuse to run, since the sound server's
+programs they start could read your account's settings as root: run them as
+yourself.
 
 The keyboard (see [The keyboard](#the-keyboard) and [Idle, lock and suspend](#idle-lock-and-suspend)):
 
@@ -5590,7 +5673,7 @@ and on Fedora 44. On Arch Linux the suite is not run: there, the install from
 a git checkout and the package's install are checked in a clean container at
 each change.
 
-On 2026-10-28, and again for this release on 2026-11-11, it was tested on
+On 2026-10-28, and again on 2026-11-11, it was tested on
 three more systems, each a virtual machine with a G305 mouse on its receiver
 and a G432 headset passed through to it.
 No keyboard was. On each, the package installed from its file and the
@@ -5598,6 +5681,13 @@ install from a git checkout both started the daemon, which found the two
 devices. The window showed them, a press of the G305's DPI button stepped
 its DPI, Gearbench Game played on the G432 under Outputs, and Spatial sound
 linked to the G432.
+
+For this release, on 2026-11-15, the same checks ran with nobody at the
+devices. On each of the three the package installed from its file and the
+install from a git checkout both started the daemon, which found the G432,
+and on Fedora the G305, asleep on the other two. The window showed what the
+daemon found, and Gearbench Game played to the G432 under Outputs. No button was pressed
+and nobody listened.
 
 | System | Desktop | Kernel | PipeWire | WirePlumber | Python |
 | --- | --- | --- | --- | --- | --- |
@@ -5822,8 +5912,9 @@ Some of the nodes the rules grant (the files under `/dev` that programs open
 to talk to a device) also carry what you type. With their rules installed,
 any program you run can read your typing on them; Gearbench drops those
 reports unread. They are the node through its receiver of the G515
-LIGHTSPEED TKL, the PRO X TKL LIGHTSPEED, the G915 X LIGHTSPEED and the G915
-X LIGHTSPEED TKL, and the control interface on its cable of the G815, the
+LIGHTSPEED TKL, the PRO X TKL LIGHTSPEED, the PRO X 60 LIGHTSPEED, the G915 X
+LIGHTSPEED and the G915 X LIGHTSPEED TKL, and the control interface on its
+cable of the G815, the
 G813 and the G213 Prodigy, whose interface is taken to be one as the G815's
 is. On Linux 7.3 or later, going by the kernel's source, the G915 TKL's and
 the G913 TKL's own node behind its receiver is one too. Pair
@@ -5836,8 +5927,9 @@ the G102 LIGHTSYNC carries the keystrokes the mouse sends for a button its onboa
 to a key, and so, going by the kernel's source, does the node of each mouse
 behind its receiver. A program you run can read those the same way.
 
-The control interface of the G515 TKL, of the G515 LIGHTSPEED TKL on its
-cable and of the G915 X, G316 X and G512 X models carries each press and
+The control interface of the G515 TKL, of the G515 LIGHTSPEED TKL and the
+PRO X 60 LIGHTSPEED on their cables and of the G915 X, G316 X and G512 X
+models carries each press and
 release of Ctrl, Shift, Alt and Super, and of FN while its custom
 assignments are on, once a program asks the keyboard for them. Gearbench
 asks each time it sets one of these keyboards up, to light its FN keys, and
@@ -5943,6 +6035,13 @@ Each rule and what it grants:
   that is has not been checked on the hardware; the rule's comment says how
   to check it and, if it is not 02, how to take back the rule's grant with a
   copy in `/etc/udev/rules.d/`. Through its receiver, the rule grants the
+  keyboard's own node, which also carries what you type on the keyboard, so
+  a program you run can read it.
+- `70-pro-x-60.rules` lets you open the PRO X 60 LIGHTSPEED's control
+  interface on its cable, interface 02, as a device report of one read it.
+  That interface carries FN as you press it while the keyboard's custom
+  assignments are on, and is taken to carry the Ctrl, Shift, Alt and Super
+  keys you press too, as said above. Through its receiver, the rule grants the
   keyboard's own node, which also carries what you type on the keyboard, so
   a program you run can read it.
 - `70-g915-x.rules`, `70-g316-x.rules` and `70-g512-x.rules` let you open
@@ -6123,6 +6222,7 @@ has no lighting you can set and no buttons to bind.
 | G915 TKL, G913 TKL | 046d:c343 on its cable; 046d:c545, or 046d:408e on receiver 046d:c545 where the kernel gives the keyboard a node of its own (see [The udev rules](#the-udev-rules)) | from its firmware, the key layout Logitech's G HUB draws for it and published listings of its features |
 | G815, G813 | 046d:c33f on its cable | from published listings and logs of its features and its quick-start guide |
 | PRO X TKL LIGHTSPEED | 046d:c352 on its cable, 046d:40b0 on receiver 046d:c547 | from a published listing of its features, the key layout G HUB draws for it and its setup guide |
+| PRO X 60 LIGHTSPEED | 046d:c351 on its cable, 046d:40af on receiver 046d:c547 | from two device reports of one (2026-11-14), the key layout G HUB draws for it and its setup guide, then tested on that one the same day |
 | G915 X | 046d:c359 on its cable | from a published listing of its features, its setup guide and the key layout G HUB draws for it |
 | G915 X LIGHTSPEED | 046d:c356 on its cable, 046d:40b5 on receiver 046d:c547 | from published listings of its features and the key layout G HUB draws for it, then tested on one on 2026-10-23 |
 | G915 X LIGHTSPEED TKL | 046d:c357 on its cable, 046d:40b6 on its receiver, taken to be a 046d:c547 | from the G915 X LIGHTSPEED's features, which G HUB's description of it matches, and the key layout G HUB draws for it |
@@ -6160,8 +6260,9 @@ has no lighting you can set and no buttons to bind.
 | G325 LIGHTSPEED | 046d:0b21, its receiver | from published logs of its features and messages and G HUB's description of it |
 
 These have been tested on the hardware: the G915, the G502 X PLUS and the
-G305, which Gearbench was built on; the wired G515 TKL; and the G915 X
-LIGHTSPEED, on its cable and through its receiver. Five others have been
+G305, which Gearbench was built on; the wired G515 TKL; and the PRO X 60
+LIGHTSPEED and the G915 X LIGHTSPEED, each on its cable and through its
+receiver. Five others have been
 tested in part:
 
 - The G502 HERO: its DPI, its lighting, the report rate and onboard
@@ -6232,9 +6333,9 @@ journal ask for a device report from it (see [Reporting a device](#reporting-a-d
 Each model's own section says what it does and lacks:
 
 - the G915: see [The keyboard](#the-keyboard)
-- the thirteen other keyboards, under "Keyboard models": see [The G515 TKL
+- the fourteen other keyboards, under "Keyboard models": see [The G515 TKL
   and G515 LIGHTSPEED TKL](#the-g515-tkl-and-g515-lightspeed-tkl), [The G915 TKL](#the-g915-tkl), [The G815](#the-g815), [The PRO X TKL
-  LIGHTSPEED](#the-pro-x-tkl-lightspeed), [The G915 X, G316 X and G512 X models](#the-g915-x-g316-x-and-g512-x-models) and [The G213 Prodigy](#the-g213-prodigy)
+  LIGHTSPEED](#the-pro-x-tkl-lightspeed), [The PRO X 60 LIGHTSPEED](#the-pro-x-60-lightspeed), [The G915 X, G316 X and G512 X models](#the-g915-x-g316-x-and-g512-x-models) and [The G213 Prodigy](#the-g213-prodigy)
 - the G502 X PLUS and the G305: see [The mouse](#the-mouse)
 - each other mouse, under "Mouse models": see [The G502 HERO](#the-g502-hero), [The G502 X
   LIGHTSPEED](#the-g502-x-lightspeed), [The PRO X SUPERLIGHT](#the-pro-x-superlight), [The G502 X](#the-g502-x), [The G502 X PLUS
@@ -6255,7 +6356,7 @@ Find what you see, then the section that fixes it:
 | A tab says Keyboard not available, Mouse not available or Headset not available | see [The device tabs](#the-device-tabs) |
 | A banner says the daemon is not running or did not answer, or names another program that drives these devices | see [Banners and messages](#banners-and-messages) |
 | A banner says the Gearbench focus extension is not running, or a game profile does not load while its game has focus | see [Following the game in front](#following-the-game-in-front) and [Hold-offs and Keep loaded](#hold-offs-and-keep-loaded) |
-| Super does nothing, the Activities overview included | see [How the keys behave](#how-the-keys-behave) (the Game Mode button) |
+| Super does nothing, the Activities overview included | see [How the keys behave](#how-the-keys-behave) (the Game Mode button or switch) |
 | The keyboard's lights dimmed or went off | see [Idle, lock and suspend](#idle-lock-and-suspend) |
 | G4 to G9 do nothing | see [Host mode](#host-mode) and [The buttons, G4 to G9](#the-buttons-g4-to-g9) |
 | The G502 X PLUS's wheel scrolls about an eighth as far per notch | see [Asleep or switched off](#asleep-or-switched-off) |
@@ -6388,7 +6489,8 @@ on standard error, below it. For each device, the block lists:
 
 It also gives what PipeWire, the sound server, says of each Logitech or
 Astro sound card: its profiles, the one in use and its output's volume, read
-with `pw-dump` where that is installed. `--json` adds the factory profiles in
+with `pw-dump` where that is installed, and not as root with no account
+behind it, as after `su`. `--json` adds the factory profiles in
 the onboard memory, the read-only copies every unit of a model carries, and
 each question and answer in hexadecimal.
 
@@ -6409,8 +6511,8 @@ place of `hidrawN`.
 
 The exit status is 0 when the report was printed, whatever it could not read.
 It is 1 when no Logitech device is on USB and no Logitech or Astro sound card
-was read from PipeWire (the error gives the cause when `pw-dump` is missing
-or fails). It is also 1 when the report stopped before a question that is
+was read from PipeWire (the error gives the cause when `pw-dump` is missing,
+fails or was not run). It is also 1 when the report stopped before a question that is
 not on its list, with that question unsent: a fault in Gearbench to report.
 
 ## Why and how we built it

@@ -42,8 +42,8 @@ Description: lighting, G keys, DPI and macros for Logitech G keyboards, mice and
  interfaces, on a cable or through a LIGHTSPEED receiver, and probes what
  each one can do from its own feature table. The README's table lists the
  models. Those not yet tested on the hardware are these: the G515
- LIGHTSPEED TKL, G915 TKL, G815, PRO X TKL LIGHTSPEED, G213 Prodigy,
- G915 X, G915 X LIGHTSPEED TKL, G316 X, G316 X 98,
+ LIGHTSPEED TKL, G915 TKL, G815, PRO X TKL LIGHTSPEED,
+ G213 Prodigy, G915 X, G915 X LIGHTSPEED TKL, G316 X, G316 X 98,
  G512 X 75 and G512 X 98 keyboards and the G502 X, G502 X
  LIGHTSPEED, G502 X PLUS MILLENNIUM FALCON, G502 LIGHTSPEED, PRO X
  SUPERLIGHT, PRO WIRELESS, PRO X SUPERLIGHT 2, PRO X SUPERLIGHT 2 DEX, PRO X
@@ -105,8 +105,8 @@ Description: lighting, G keys, DPI and macros for Logitech G keyboards, mice and
  and would carry the keystrokes of a keyboard paired to the same receiver
  after the mouse, so pair nothing else there. The G815's and G813's
  control interfaces and the nodes of the G515
- LIGHTSPEED TKL, G915 TKL, G913 TKL, PRO X TKL LIGHTSPEED, G915 X LIGHTSPEED and
- G915 X LIGHTSPEED TKL behind their receivers
+ LIGHTSPEED TKL, G915 TKL, G913 TKL, PRO X TKL LIGHTSPEED, PRO X 60 LIGHTSPEED,
+ G915 X LIGHTSPEED and G915 X LIGHTSPEED TKL behind their receivers
  carry what is typed on them, the G213 Prodigy's control interface is taken
  to, and the G502 HERO's,
  G502 X's, G203 LIGHTSYNC's and G102 LIGHTSYNC's control interfaces the keys
@@ -115,7 +115,8 @@ Description: lighting, G keys, DPI and macros for Logitech G keyboards, mice and
  paired to one of those receivers after the keyboard on it would, going by
  the kernel's source, have its keystrokes arrive on that keyboard's node
  too, so pair no other keyboard there. The control
- interfaces of the G515 TKL, the G515 LIGHTSPEED TKL on its cable and the
+ interfaces of the G515 TKL, the G515 LIGHTSPEED TKL and the PRO X 60
+ LIGHTSPEED on their cables and the
  G915 X, G316 X and G512 X models carry each press and release of Ctrl,
  Shift, Alt and Super, and of FN while its custom assignments are on, too,
  from the time Gearbench sets the keyboard up until it loses power: switched
@@ -143,9 +144,10 @@ Description: lighting, G keys, DPI and macros for Logitech G keyboards, mice and
  it lets go, or change what its buttons send until the mouse is plugged in
  again.
  .
- The keyboard's onboard profile is never written, but the G515 TKL and the
- G915 X LIGHTSPEED keep the brightness they are sent through a power-off,
- and the G515 LIGHTSPEED TKL is taken to. Five mouse commands do write a
+ The keyboard's onboard profile is never written, but the G515 TKL, the
+ PRO X 60 LIGHTSPEED and the G915 X LIGHTSPEED keep the brightness they are
+ sent through a power-off, and the G515 LIGHTSPEED TKL is taken to. Five
+ mouse commands do write a
  mouse's onboard profile 1, each backing up every profile sector first and
  reading the sector back after. The A50 Gen 4's settings reach its base
  station's flash only when saved. The A50 X keeps each setting written to it

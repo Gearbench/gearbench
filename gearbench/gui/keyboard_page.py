@@ -19,15 +19,20 @@ from ..keyboard import (
     BASE_BINDING_TOO,
     BOUND_KEY_CAPABILITIES,
     CABLED_IDS,
-    MODEL_OF as KEYBOARDS,
     followed,
+    game_mode_unknown_words,
     key_name,
     m_profiles_in_menu,
     model_named,
+    model_of,
     needs_base_binding,
 )
 from ..keycodes import ZONE_NAMES, by_zone
-from ..keycontrol import GAME_MODE_NOT_KNOWN, GAME_MODE_UNKNOWN, SHORTCUT_TURNS
+from ..keycontrol import (
+    FN_KEYS_UNLIT,
+    GAME_MODE_UNKNOWN,
+    SHORTCUT_TURNS,
+)
 from ..layout import G915_BOARD, Board, Key
 from ..lighting import (
     ANIMATIONS,
@@ -147,20 +152,21 @@ BIND_KEYS_HELP = "Click {} key to choose what it sends"
 BIND_IN = "Click {} key to bind it in {}"
 WITH_ARTICLE = {"G": "a G", "F": "an F"}
 #: The status group's rows for Game Mode, shown on a keyboard that has it, not known until
-#: an event gives it, and for custom assignments, shown on or off on a keyboard whose own keys
-#: bind through them (`assigned_keys`) or wait for a test to, with the shortcut that turns
+#: an event gives it (game_mode_shown), and for custom assignments, shown on or off on a
+#: keyboard that says which (the reply's `custom_assignments`), with the shortcut that turns
 #: them the other way.
 GAME_MODE = "Game Mode"
-GAME_MODE_SHOWN = {"on": "On", "off": "Off",
-                   GAME_MODE_UNKNOWN: capitalized(GAME_MODE_NOT_KNOWN)}
+GAME_MODE_SHOWN = {"on": "On", "off": "Off"}
 CUSTOM_ASSIGNMENTS = "Custom assignments"
 #: The grayed toggle's tooltip and the board row's line on a keyboard whose bindings wait for
 #: a test (the reply's `assignments_untested`), in the Read only row's words.
 ASSIGNMENTS_UNTESTED = f"Bindings wait {TEST_WAIT}"
 #: Its line by the reply's `custom_assignments`, and with the shortcut: "On · FN+F1 turns
-#: them off".
+#: them off". Then the line under it while the reply's `fn_keys_unlit` is true, `status`'s
+#: words.
 ASSIGNMENTS_SHOWN = {True: "On", False: "Off"}
 ASSIGNMENTS_SHORTCUT = "{} · " + SHORTCUT_TURNS
+FN_UNLIT_LINE = "\n" + capitalized(FN_KEYS_UNLIT)
 #: How both boards' help begins, the same on each.
 MOVE_HELP = "Arrow keys move between the keys. Space or Enter does what a click does."
 #: What the board says to a screen reader about its keys, which the board row says only for
@@ -170,6 +176,10 @@ MOVE_HELP = "Arrow keys move between the keys. Space or Enter does what a click 
 BOARD_HELP = (f"{MOVE_HELP} Under {mode_label(PER_KEY)}, with {{}} off, "
               "Shift with an arrow paints each key it reaches, and Delete or the Menu key "
               "clears a key.")
+#: The same for a board lit key by key with no key to bind, the PRO X 60 LIGHTSPEED's, whose
+#: tab has no toggle.
+PLAIN_BOARD_HELP = (f"{MOVE_HELP} Under {mode_label(PER_KEY)}, Shift with an arrow paints each "
+                    "key it reaches, and Delete or the Menu key clears a key.")
 #: The same for a board lit by areas, which has no G keys to map.
 AREA_BOARD_HELP = (f"{MOVE_HELP} Under {AREA_LABEL}, Shift with an arrow paints the area "
                    "of each key it reaches, and Delete or the Menu key clears a key's area.")
@@ -233,12 +243,18 @@ QUICK_GROUPS = quick_groups(G915_BOARD)
 
 
 def board_of(product: object) -> Board | None:
-    """The board of the keyboard a status's `product`, its id in hex, names; None for none, or
-    for an id this build does not know, from a daemon of another version."""
-    try:
-        return KEYBOARDS[int(str(product), 16)].board
-    except (ValueError, KeyError):
-        return None
+    """The board of that keyboard (model_of), or None."""
+    model = model_of(product)
+    return None if model is None else model.board
+
+
+def game_mode_shown(status: dict) -> str | None:
+    """The Game Mode row's line by a status's `game_mode`: On, Off, or `status`'s words for
+    not known (keyboard.game_mode_unknown_words); None on a keyboard without Game Mode."""
+    game = status.get("game_mode")
+    if game == GAME_MODE_UNKNOWN:
+        return capitalized(game_mode_unknown_words(status.get("product")))
+    return GAME_MODE_SHOWN.get(game) if isinstance(game, str) else None
 
 
 def gives_way(picked: str | None, asked: str | None, shown: str | None,
@@ -508,7 +524,7 @@ class KeyboardPage:
         # The gone keyboard's, which the daemon forgets at its teardown; show_capabilities
         # gives a connected one's.
         show_firmware(self.firmware_row, None)
-        self.show_key_control({}, set())
+        self.show_key_control({})
 
     def daemon_gone(self, why: str) -> None:
         """The daemon did not answer, for the reason `why`. The row says so instead of
@@ -586,7 +602,7 @@ class KeyboardPage:
         self._tray_shown = (status.get("tray") or {}).get("shown") is True
         self.profile_group.set_visible("m_keys" in able or self._in_menu)
         self._show_switch(True)
-        self.show_key_control(status, able)
+        self.show_key_control(status)
         # A game profile holds lighting and G-key bindings; with neither it holds nothing.
         self.game_group.set_visible(bool(able & {"lighting", *BOUND_KEY_CAPABILITIES}))
         self.light_group.set_visible("lighting" in able)
@@ -614,24 +630,25 @@ class KeyboardPage:
         self.map_toggle.set_tooltip_text(ASSIGNMENTS_UNTESTED if held
                                          else bind_help(self.board.board))
 
-    def show_key_control(self, status: dict, able: set[str]) -> None:
+    def show_key_control(self, status: dict) -> None:
         """The Game Mode row, on a keyboard that has it, and the Custom assignments row, on or
-        off as the status gives them on a keyboard able to do `able`, which binds its own keys
-        through them, or whose bindings wait for a test to (show_capabilities says that)."""
-        game = status.get("game_mode")
-        shown = GAME_MODE_SHOWN.get(game) if isinstance(game, str) else None
+        off as the status gives them, on a keyboard with a key that binds through them and on
+        one with none, the PRO X 60 LIGHTSPEED, with a second line while they are off on a
+        keyboard whose FN keys then stay unlit (FN_UNLIT_LINE); that bindings wait for a test
+        is show_capabilities' to say."""
+        shown = game_mode_shown(status)
         self.game_mode_row.set_visible(shown is not None)
         self.game_mode_row.set_subtitle(shown or "")
         shortcut = status.get("assignment_shortcut")
-        untested = status.get("assignments_untested") is True
         state = status.get("custom_assignments")
-        self.assignments_row.set_visible(isinstance(state, bool)
-                                         and (untested or "assigned_keys" in able))
+        self.assignments_row.set_visible(isinstance(state, bool))
         on = state is True
-        self.assignments_row.set_subtitle(
-            ASSIGNMENTS_SHORTCUT.format(ASSIGNMENTS_SHOWN[on], shortcut, "off" if on else "on")
-            if isinstance(shortcut, str)
-            else ASSIGNMENTS_SHOWN[on])
+        line = (ASSIGNMENTS_SHORTCUT.format(ASSIGNMENTS_SHOWN[on], shortcut,
+                                            "off" if on else "on")
+                if isinstance(shortcut, str) else ASSIGNMENTS_SHOWN[on])
+        # Only a status's true, as assignments_untested; the daemon gives it with them off.
+        unlit = status.get("fn_keys_unlit") is True
+        self.assignments_row.set_subtitle(line + FN_UNLIT_LINE if unlit else line)
 
     def _show_switch(self, connected: bool) -> None:
         """The M profile group's description (M_KEYS_SWITCH)."""
@@ -761,7 +778,8 @@ class KeyboardPage:
                               on_stroke_key=self.on_stroke_key,
                               on_stroke_end=self.on_stroke_end,
                               description=AREA_BOARD_HELP if board.areas
-                              else BOARD_HELP.format(toggle),
+                              else BOARD_HELP.format(toggle) if board.bindable_keys
+                              else PLAIN_BOARD_HELP,
                               board=board)
         self.board.place()
 

@@ -122,7 +122,8 @@ UCRED = struct.Struct("iII")
 
 def peer_uid(conn: socket.socket) -> int:
     """The user id of the process at the other end of `conn`, as the kernel took it when that
-    process called listen() (unix(7), SO_PEERCRED)."""
+    process called listen(), on a connection this process made, or connect(), on one it
+    accepted (unix(7), SO_PEERCRED)."""
     _pid, uid, _gid = UCRED.unpack(conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
                                                    UCRED.size))
     return uid

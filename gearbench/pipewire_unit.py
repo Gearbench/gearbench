@@ -72,14 +72,21 @@ def transient_argv(unit: str, description: str, bound_to: str, *, after: str) ->
             *(f"--property={setting}" for setting in HARDENING)]
 
 
+def unexpanded(argument: str) -> str:
+    """`argument`, an argument after the program word, as a transient unit's command line
+    passes it on: each $ doubled, since the user manager expands ${NAME} there, an unset one
+    to nothing, and reads $$ as $ (systemd.service(5), "Command lines"; systemd-run(1)'s
+    --expand-environment, on by default, is an option systemd 252 lacks). The program's
+    path is run unexpanded, and systemd-run looks it up as given, so it takes none of this."""
+    return argument.replace("$", "$$")
+
+
 def pipewire_argv(unit: str, description: str, conf: Path) -> list[str]:
     """systemd-run's command line for a transient unit, `unit`, that runs `pipewire -c` on
     `conf` (transient_argv)."""
     return [*transient_argv(unit, description, PIPEWIRE_BOUND_TO, after=PIPEWIRE_AFTER),
-            # Each $ doubled: the user manager expands ${NAME} in the command line, an unset
-            # one to nothing, and reads $$ as $ (systemd.service(5), "Command lines"), so
-            # PipeWire would read a conf in a folder private_runtime never checked.
-            pipewire_client.PIPEWIRE, "-c", str(conf).replace("$", "$$")]
+            # Unexpanded: PipeWire would read a conf in a folder private_runtime never checked.
+            pipewire_client.PIPEWIRE, "-c", unexpanded(str(conf))]
 
 
 def show_argv(unit: str) -> list[str]:

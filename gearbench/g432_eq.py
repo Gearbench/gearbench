@@ -442,7 +442,9 @@ def watch_argv(*, model: HeadsetModel) -> list[str]:
     """systemd-run's command line for the transient unit that watches for the headset's
     return: bound to its equalizer's unit, so it stops when that does (BindsTo= in
     systemd.unit(5); pipewire_unit.transient_argv), and given the package's folder on
-    PYTHONPATH and the interpreter running it, where the window and the CLI found it.
+    PYTHONPATH and the interpreter running it, where the window and the CLI found it, the
+    interpreter as it is: systemd-run looks it up as given and the manager runs ExecStart's
+    path unexpanded (systemd.service(5)); --setenv's value is not expanded either.
     `watch` alone watches the G432, and `watch KEY` another model."""
     named = WORDS[model.key]
     return [*pipewire_unit.transient_argv(named.watch_unit, named.watching, named.unit,

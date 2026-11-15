@@ -89,6 +89,7 @@ from .keycontrol import (
     FN_CONTROLS,
     read_controls,
 )
+from .keys import F_GKEY
 from .lighting import (
     F_BRIGHTNESS,
     F_PERKEY,
@@ -187,6 +188,8 @@ KERNEL = "Linux's hid-logitech-hidpp.c, {}"
 TRAFFIC = "the traffic in Solaar issue {}"
 #: A read no public source names, seen sent by G HUB and answered in a capture of its traffic.
 CAPTURE = "G HUB's traffic with a {}"
+#: A read no public specification names, in the code of keyleds, which sends it.
+KEYLEDS = "keyleds' libkeyleds, {}"
 
 
 def _any(_params: bytes) -> bool:
@@ -219,8 +222,9 @@ def _analog_button(params: bytes) -> bool:
 
 # 0x1B10, the control list of the G515 generation's keyboards (keycontrol.F_CONTROL_LIST):
 # G HUB alone sends it, so its reads are the list's only ones with a single source, and the
-# report sends them only to a model whose custom assignments need its key ids
-# (KeyboardModel.custom_assignments), the G515 TKL's generation.
+# report sends them only to a model with custom assignments, which name keys by their key
+# ids (KeyboardModel.custom_assignments): the G515 TKL's generation and the PRO X 60
+# LIGHTSPEED.
 
 
 def _control_offset(params: bytes) -> bool:
@@ -341,6 +345,10 @@ READS: Mapping[tuple[int, int], Read] = {
     (F_CONTROL_LIST, FN_CONTROLS): Read("getControlList", (
         CAPTURE.format("G515 TKL, 2026-10-21: 16 reads, 8 entries each"),),
         allowed=_control_offset),
+    # No public specification names 0x8010's functions: getCount, for keyleds'
+    # F_GET_GKEYS_COUNT, whose reply's first byte is the count.
+    (F_GKEY, 0): Read("getCount", (KEYLEDS.format("feature_gkeys.c, keyleds_gkeys_count"),
+                                   CAPTURE.format("G915, which answered function 0 with 05"))),
     (battery.F_STATUS, 0): Read("getBatteryLevelStatus",
                                 (KERNEL.format("CMD_BATTERY_LEVEL_STATUS_GET_BATTERY_LEVEL_STATUS"),
                                  SOLAAR.format("hidpp20.py, get_battery_status"))),
@@ -786,10 +794,19 @@ def analog_buttons(dev: ReadOnly) -> dict | None:
                         for button in ANALOG_BUTTONS]}
 
 
+def g_keys(dev: ReadOnly) -> dict | None:
+    """0x8010's count, the first byte of its function 0's reply, as keys.DivertedKeys reads it
+    at a G915's setup: 5 there, its G keys. The PRO X 60 LIGHTSPEED, which has no G key,
+    counted 12 on its cable and through its receiver (2026-11-14); which keys those are is
+    not known."""
+    return {"count": dev.read(F_GKEY, 0)[0]} if dev.has(F_GKEY) else None
+
+
 def control_list(dev: ReadOnly, product: int) -> dict | None:
     """0x1B10's count, and each entry in hex, the control id at that key id, from 0
-    (keycontrol.read_controls), on a keyboard whose custom assignments need its key ids
-    (KeyboardModel.key_ids); None for any other model, which is sent nothing of it."""
+    (keycontrol.read_controls), on a keyboard with custom assignments, which name its
+    bindable keys and its shortcut's by key id (KeyboardModel.custom_assignments); None for
+    any other model, which is sent nothing of it."""
     model = KEYBOARD_OF.get(product)
     if model is None or not model.custom_assignments or not dev.has(F_CONTROL_LIST):
         return None
@@ -939,7 +956,7 @@ def read_device(dev: ReadOnly, product: int) -> dict:
         ("dpi", lambda: dpi(dev)), ("report_rate", lambda: report_rate(dev)),
         ("extended_dpi", lambda: extended_dpi(dev)),
         ("extended_report_rate", lambda: extended_report_rate(dev)),
-        ("analog_buttons", lambda: analog_buttons(dev)),
+        ("analog_buttons", lambda: analog_buttons(dev)), ("g_keys", lambda: g_keys(dev)),
         ("control_list", lambda: control_list(dev, product)),
         ("sidetone", lambda: sidetone(dev)), ("equalizer", lambda: equalizer(dev)),
         ("reply_order", lambda: reply_order(dev)))

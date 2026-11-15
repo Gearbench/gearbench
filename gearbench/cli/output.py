@@ -38,6 +38,14 @@ WINDOW_DIGESTS = frozenset({"lighting", "was"})
 #: --json's help, on the root and on each subcommand that offers it: what it prints is the
 #: daemon's reply, or what a command that asks no daemon read itself.
 JSON_HELP = "print JSON instead of the formatted output"
+#: The refusal of a subcommand that runs PipeWire's programs (set_defaults runs_pipewire) as
+#: root with no invoking user (root_alone), filled with the subcommand's name: su without its
+#: dash, su -m and doas's keepenv keep a user's PATH, XDG_CONFIG_HOME, PIPEWIRE_CONFIG_DIR or
+#: HOME, so a program that user put on PATH, or a drop-in in that user's client.conf.d
+#: (context.exec), would run as root.
+PIPEWIRE_ROOT_ALONE = ("{} was not run: as root with no invoking user, the PipeWire programs "
+                       "it runs could read another account's settings, which can start a "
+                       "program; run it as yourself")
 #: The commands that stop and start the daemon.
 STOP, START = service_command("stop"), service_command("start")
 #: How long a look at the daemon waits for each answer, in seconds, short of send_command's

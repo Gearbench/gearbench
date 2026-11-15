@@ -154,6 +154,16 @@ QUIET_PIPEWIRE = {"PIPEWIRE_DEBUG": "0"}
 #: shell's profile can have exported a token.
 INVOKERS_ENVIRONMENT = ("PATH", "XDG_RUNTIME_DIR")
 
+#: Why pw-dump is not run as root with no invoking user (root_alone): su without its dash,
+#: su -m and doas's keepenv keep a user's PATH, XDG_CONFIG_HOME, PIPEWIRE_CONFIG_DIR or HOME,
+#: so a pw-dump that user put on PATH, or a drop-in in that user's client.conf.d, starts any
+#: program as root, the drop-in inside pw-dump before it connects (context.exec, measured on
+#: 1.6.2 on 2026-11-06).
+ROOT_ALONE_PIPEWIRE = ("pw-dump was not run: as root with no invoking user it could read "
+                       "another account's PipeWire settings, which can start a program; run "
+                       "the report as yourself, or with sudo, run0 or pkexec from your own "
+                       "account")
+
 
 def pipewire_read() -> dict:
     """The audio cards of AUDIO_VENDORS in one pw-dump (audio_cards), or, in words, why
@@ -163,7 +173,10 @@ def pipewire_read() -> dict:
     under sudo, run0 or pkexec: it reads that user's PipeWire (use_invoking_users_runtime_dir,
     which cmd_report calls first), whose socket any program of that user can serve, so it
     gets that user's rights and no more, of root's environment INVOKERS_ENVIRONMENT alone,
-    which that user's programs could read in /proc, and none of root's terminal."""
+    which that user's programs could read in /proc, and none of root's terminal. As root with
+    no invoking user it is not run (ROOT_ALONE_PIPEWIRE)."""
+    if root_alone():
+        return {"unread": ROOT_ALONE_PIPEWIRE, "cards": []}
     invoker = invoking_uid()
     if invoker is None:
         run = functools.partial(subprocess.run, env={**os.environ, **QUIET_PIPEWIRE})
@@ -458,6 +471,10 @@ def _effects(cluster: Mapping) -> str:
     return ", ".join(f"{e['name']} {e['id']}" for e in cluster["effects"]) or "no effects"
 
 
+#: The report rate line's words for an interval of 0 ms, in place of "every 0 ms".
+NO_INTERVAL = "the device gave no interval"
+
+
 def _section_lines(node: Mapping) -> list[str]:
     """The sections read from lighting to the equalizer, in read_device's order."""
     light = node.get("lighting", {})
@@ -493,10 +510,12 @@ def _section_lines(node: Mapping) -> list[str]:
                      f"{_span_words(dpi['range'])}, {counted(dpi['sensors'], 'sensor')}")
     if "report_rate" in node:
         rate = node["report_rate"]
-        lines.append(f"  report rate: every {rate['interval_ms']} ms, of "
+        # getReportRate's 0 is no interval: a keyboard answered it with its list of four.
+        now = f"every {rate['interval_ms']} ms" if rate["interval_ms"] else NO_INTERVAL
+        lines.append(f"  report rate: {now}, of "
                      f"{', '.join(f'{hz} Hz' for hz in rate['rates']) or 'none listed'}")
     lines += _extended_lines(node)
-    lines += _control_lines(node.get("control_list"))
+    lines += _key_lines(node)
     if "sidetone" in node:
         lines.append(f"  sidetone: {node['sidetone']['level']}")
     if "equalizer" in node:
@@ -539,6 +558,13 @@ def _span_words(span: list[int] | None) -> str:
     return "none listed" if not span else (
         f"{span[0]} to {span[1]}, in steps of {span[2]}"
         + (f" to {span[3]}, by band" if len(span) == 4 else ""))
+
+
+def _key_lines(node: Mapping) -> list[str]:
+    """0x8010's count in a line, then 0x1B10's list (_control_lines), where the node has
+    them."""
+    count = [f"  G keys: 0x8010 counts {node['g_keys']['count']}"] if "g_keys" in node else []
+    return count + _control_lines(node.get("control_list"))
 
 
 #: The control ids a line of the text form gives of 0x1B10's list.

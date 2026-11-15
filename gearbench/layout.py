@@ -54,6 +54,15 @@ one pitch apart, Brightness on G HUB's indicator light and Game Mode on its hot 
 media keys. Its light_map.json gives the top row's lights ids of their own (keycodes.ZONES).
 Its logo has no light. Logitech's setup guide for it draws the same rows (page 6).
 
+The PRO X 60 LIGHTSPEED's come from G HUB's package of its US layout (60fcc10b-..., fetched
+2026-11-14, its sha256 the manifest's): its metadata.json's 61 LED rectangles, at 137.4 px a
+key across and 137.2 down, fitted over all 61 with Esc at x 0 and the number row at y 2.5.
+They stand within 0.04 of the G915's main block from the number row to the shift row and of
+ANSI's bottom row, so those are its keys,
+with Esc in the ` key's place, lit at Esc's id, and FN at 111. The package draws no other
+light, and its power switch, connection buttons, Game Mode switch and volume roller, on the
+board's edges, are not drawn.
+
 The G213 Prodigy's come from G HUB's g213_us package (fetched 2026-10-21, its sha256 the
 manifest's): its metadata.json's rectangles, at 119.75 px a key. From the function row down
 they stand within 0.1 of the G915's, its bottom row of the G915's widths, so those are the
@@ -331,6 +340,15 @@ PRO_X_TKL_KEYS: tuple[Key, ...] = (
                  for key in G515_KEYS if not key.reserved), PRO_X_TKL_F_KEYS),
 )
 
+#: The PRO X 60 LIGHTSPEED, US ANSI, its 61 lit keys: the G915's main block from the number
+#: row to the shift row, with Esc where the G915 has `, and ANSI's bottom row. None is
+#: bindable (keyboard.PRO_X_60).
+PRO_X_60_KEYS: tuple[Key, ...] = (
+    Key("Esc", 0, 2.5, zone=ZONES["ESC"]),
+    *(key for key in KEYS if 2.5 <= key.y < 6 and 0 <= key.x < _NAV and key.zone != ZONES["`"]),
+    *_ANSI_BOTTOM,
+)
+
 #: The G915's media keys, which the G213 Prodigy has in places of its own.
 _G915_MEDIA = frozenset(ZONES[name] for name in ("PREVIOUS", "PLAY/PAUSE", "NEXT", "MUTE"))
 
@@ -522,6 +540,20 @@ G515_FN_KEYS = frozenset(ZONES[name] for name in (
 G915_TKL_BOARD = board(G915_TKL_KEYS)
 G815_BOARD = board(G815_KEYS)
 PRO_X_TKL_BOARD = board(PRO_X_TKL_KEYS)
+PRO_X_60_BOARD = board(PRO_X_60_KEYS)
+#: The PRO X 60 LIGHTSPEED's keys lit while FN is held, by the G515s' rule (G515_FN_KEYS; the
+#: owner's decision of 2026-11-14, "it should light the FN keys as other keyboards do"): each
+#: key whose cap prints an FN function, read off its front picture in G HUB's package and
+#: named by its setup guide (pages 7 to 9), and FN itself, by their zones. Esc types `, 1 to =
+#: F1 to F12 and Backspace Delete; U, I, O, P, [ and ] Scroll Lock, Insert and the media keys;
+#: S, D and F pick an onboard profile; J, K, L, ; and ' and N, M, comma, period and slash the
+#: navigation keys and the arrows; Z, X, C and V change the lighting. Not A, which with FN is
+#: its custom assignments' shortcut, as the G515s leave out F1. On the owner's on 2026-11-14
+#: each of these with FN did what its cap prints, V's not told apart from C's, and FN held
+#: under Gearbench's claim, with its custom assignments on, turned these 37 and FN white and
+#: left A as it was.
+PRO_X_60_FN_KEYS = frozenset(ZONES[name] for name in (
+    "ESC", *"1234567890-=", "BACKSPACE", *"UIOP[]", *"SDFJKL;'", *"ZXCVNM,./", "RIGHT WINDOWS"))
 G213_BOARD = board(G213_KEYS, G213_AREAS)
 G915X_BOARD = board(G915X_KEYS)
 G915X_LIGHTSPEED_BOARD = board(G915X_LIGHTSPEED_KEYS)

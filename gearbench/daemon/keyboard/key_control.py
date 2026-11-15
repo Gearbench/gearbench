@@ -46,6 +46,9 @@ log = logging.getLogger("gearbench")
 
 #: What the keys custom assignments set to report do while they are on, for a line.
 RUN_BINDINGS = "run their bindings"
+#: What a control list the keyboard refused leaves unnamed on a model with no key to bind:
+#: its shortcut is then given as "key 0x3b+key 0x1e" (keycontrol.shortcut_words).
+NO_LIST_SHORTCUT = "the keys of its custom assignments' shortcut are named by their key ids"
 #: The journal's line, by the keyboard's name, for the first setup since the start to find
 #: it in host mode: the only trace of a stop that did not hand it back.
 FOUND_IN_HOST = "%s was already in host mode at start: whatever drove it last did not hand it back"
@@ -130,7 +133,8 @@ class KeyControl:
 
     def read_controls(self, dev: Hidpp) -> tuple[int, ...] | None:
         """The keyboard's control list (keycontrol.read_controls), or None where its table
-        lacks 0x1B10 or it refused the list, which is said."""
+        lacks 0x1B10 or it refused the list, which is said with what then goes unnamed: its
+        bindable keys' key ids, or on a model with none its shortcut's keys."""
         listed = dev.feature(F_CONTROL_LIST)
         if listed is None:
             return None
@@ -144,7 +148,8 @@ class KeyControl:
             log.info("the %s did not give its control list (%s), so %s", self.keyboard.model_name(),
                      failure_reason(exc),
                      f"its {model.own_key}s are named by the key ids its test found"
-                     if model.key_ids else f"its {model.own_key}s' key ids are not known")
+                     if model.key_ids else f"its {model.own_key}s' key ids are not known"
+                     if model.g_key_names else NO_LIST_SHORTCUT)
             return None
 
     def found_key_ids(self) -> tuple[int, ...] | None:
@@ -225,8 +230,10 @@ class KeyControl:
         Windows, 2026-10-23): the owner's decision of 2026-10-23, "I want host mode default
         until we know more, we will not drop it." It is read first and written only where the
         keyboard is in another mode: it powers up in the on-board mode, as the G915 X LIGHTSPEED
-        read after a power cycle (on Windows), and the G915 X LIGHTSPEED kept host mode
-        across a link change (2026-10-23). Host mode the first answered read since the start
+        read after a power cycle (on Windows) and the PRO X 60 LIGHTSPEED twice after one
+        (2026-11-14), and the G915 X LIGHTSPEED kept host mode across a link change
+        (2026-10-23), as the PRO X 60 LIGHTSPEED did from its receiver to its cable
+        (2026-11-14). Host mode the first answered read since the start
         finds is said at info (FOUND_IN_HOST), as a 0x8100 keyboard's is (Keyboard.set_up). A
         refusal is said once and the keyboard runs on in the mode it is in: a refused read
         keeps what the last answer found, for the hand-back, and a refused write leaves the
@@ -402,8 +409,9 @@ class KeyControl:
         """FN held taken as let go (Modifiers.let_go), with its release's frame
         (Keyboard.take_fn), as the custom assignments go off, since a keyboard is taken to
         report FN only while they are on: the owner's decision of 2026-10-23, "All four
-        lessons", after the G915 X LIGHTSPEED's FN keys stayed white. Nothing where FN is not
-        held or not followed."""
+        lessons", after the G915 X LIGHTSPEED's FN keys stayed white. The PRO X 60 LIGHTSPEED
+        does the same: with them off, FN held sent no report and lit nothing (2026-11-14).
+        Nothing where FN is not held or not followed."""
         modifiers = self.keyboard.modifiers
         if modifiers is not None and modifiers.let_go():
             log.debug("FN taken as let go: the %s sends it only while its custom assignments "
@@ -439,8 +447,10 @@ class KeyControl:
     def status(self) -> dict:
         """The keyboard's custom assignments and Game Mode for `status`: on or off and their
         shortcut, None where not known; the names of the keys set to report; whether its G keys
-        take no binding until their write is tested (keyboard.assignments_untested); and Game
-        Mode, "on", "off" or GAME_MODE_UNKNOWN, None on a keyboard without it."""
+        take no binding until their write is tested (keyboard.assignments_untested); whether
+        its FN keys, which the daemon lights (Keyboard.modifiers), stay unlit because they are
+        off (fn_unreported); and Game Mode, "on", "off" or GAME_MODE_UNKNOWN, None on a
+        keyboard without it."""
         set_up = () if self.keys is None or self.keys.assigned is None else self.keys.assigned
         game = None if self._game is None else (
             GAME_MODE_UNKNOWN if self.game_mode is None else "on" if self.game_mode else "off")
@@ -451,5 +461,6 @@ class KeyControl:
                                for number in set_up],
             "assignments_untested": (self.keyboard.dev is not None
                                      and assignments_untested(self.keyboard.keyboard_product)),
+            "fn_keys_unlit": self.enabled is False and self.keyboard.modifiers is not None,
             "game_mode": game,
         }

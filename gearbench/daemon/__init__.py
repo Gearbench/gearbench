@@ -72,12 +72,12 @@ from .client import (
     NOT_REACHED as NOT_REACHED,
     NOT_RUNNING as NOT_RUNNING,
     REPLY_UNREAD as REPLY_UNREAD,
-    UCRED as UCRED,
     UNKNOWN as UNKNOWN,
     UNREAD as UNREAD,
     failure as failure,
     invoking_uid as invoking_uid,
     listening as listening,
+    peer_uid as peer_uid,
     root_alone as root_alone,
     send_command as send_command,
     socket_path,
@@ -218,8 +218,9 @@ PREPARING = "b true"
 
 def systemd_stopping() -> bool:
     """Whether `systemctl is-system-running` answers "stopping", as it does for the whole of a
-    shutdown once systemd's own jobs have begun. Any other answer, an error or none is logged
-    and counts as not stopping."""
+    shutdown once systemd's own jobs have begun, with or without an error on stderr. Any other
+    answer, or none, counts as not stopping. Each is logged, at info for an answer other than
+    running or stopping, one with an error, or none."""
     try:
         done = subprocess.run(
             ["systemctl", "is-system-running"],  # noqa: S607 -- the PATH is the user's own
@@ -248,8 +249,10 @@ def logind_preparing() -> bool:
     daemon with it, before systemd's own jobs begin: at a power-off on the owner's desktop
     (2026-11-08) logind said the system would power off 36 ms before GNOME's session stopped
     the daemon, and said it was powering down 18 ms after, and the daemon took the stop for a
-    plain one. A true answer is logged, since systemd's did not say so; an error or an answer
-    other than false is logged and counts as false."""
+    plain one. Only `b true` with exit status 0 counts as true, with or without an error on
+    stderr, and is logged at info, since systemd's answer did not say so. Any other answer, or
+    none, counts as false, and is logged at info too unless it is `b false` with nothing on
+    stderr."""
     try:
         done = subprocess.run(
             ["busctl", "get-property", "org.freedesktop.login1",  # noqa: S607 -- as above

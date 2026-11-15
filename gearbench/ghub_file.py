@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from .json_text import JsonRefused, json_value
-from .settings_files import ConfigError, read_capped
+from .settings_files import ConfigError, read_capped, refuse_for_root
 from .wording import reason, size_words, without_controls
 
 SQLITE_MAGIC = b"SQLite format 3\x00"
@@ -124,19 +124,27 @@ def _read_database(path: Path, raw: bytes) -> bytes:
     Opening the user's own file is not read-only in effect: SQLite creates a -shm beside it
     even read-only, cannot open it in a directory it may not write to, and a read-write
     connection checkpoints the -wal and deletes it on close. SQLite rebuilds the -shm from
-    the -wal.
+    the -wal. As root, no folder is made in a temporary folder that is, or sits behind, one
+    another account owns or may change (settings_files.refuse_for_root).
     """
     wal = _wal_beside(path)
     try:
-        made = tempfile.TemporaryDirectory(prefix="gearbench-ghub-")
+        base = Path(tempfile.gettempdir())
+    except OSError:
+        # gettempdir's error, which found no folder it can write to, lists each one it tried.
+        raise GhubError(f"could not copy {path.name}: no temporary folder can be "
+                        f"written to") from None
+    try:
+        # su without its dash and sudo -E keep a user's TEMP and TMP, which tempfile reads
+        # when TMPDIR is unset (the loader strips TMPDIR for a set-user-ID program): in a
+        # folder that user owns, their programs can rename the copy's new folder and link
+        # its name to any folder, before root writes the copy or removes the folder, and
+        # TemporaryDirectory's cleanup unlinks by path where rmtree meets a PermissionError.
+        refuse_for_root(base)
+        made = tempfile.TemporaryDirectory(prefix="gearbench-ghub-", dir=base)
     except OSError as exc:
-        # Not the user's file: mkdtemp's error names the folder it could not make, and
-        # gettempdir's, which found no folder it can write to, lists each one it tried.
-        if exc.filename is None:
-            raise GhubError(f"could not copy {path.name}: no temporary folder can be "
-                            f"written to") from None
-        raise GhubError(f"could not copy {path.name} into {Path(exc.filename).parent}: "
-                        f"{reason(exc)}") from None
+        # Not the user's file.
+        raise GhubError(f"could not copy {path.name} into {base}: {reason(exc)}") from None
     with made as tmp:
         copy = Path(tmp) / "settings.db"
         try:
@@ -145,7 +153,7 @@ def _read_database(path: Path, raw: bytes) -> bytes:
                 (Path(tmp) / "settings.db-wal").write_bytes(wal)
         except OSError as exc:
             # A full temp folder, not the user's file: its write carries no file name.
-            raise GhubError(f"could not copy {path.name} into {Path(tmp).parent}: "
+            raise GhubError(f"could not copy {path.name} into {base}: "
                             f"{reason(exc)}") from None
         try:
             with contextlib.closing(sqlite3.connect(f"{copy.as_uri()}?mode=ro",

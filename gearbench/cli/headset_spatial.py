@@ -79,4 +79,4 @@ def add_headset_spatial(sub: Subcommands) -> None:
                      help="competitive (the default): direction alone; immersive: a "
                           "short, dry room about 11 dB under the sound; the room changes "
                           "while it plays, with no restart")
-    hsp.set_defaults(func=cmd_headset_spatial)
+    hsp.set_defaults(func=cmd_headset_spatial, runs_pipewire=True)

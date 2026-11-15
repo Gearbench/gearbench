@@ -12,7 +12,7 @@
     <p>
       Gearbench is an app for Logitech G keyboards (the G915,
       G915 TKL, G815, G515 TKL, G515 LIGHTSPEED TKL, PRO X TKL LIGHTSPEED,
-      G213 Prodigy, G915 X, G915 X LIGHTSPEED, G915 X LIGHTSPEED TKL, G316 X,
+      PRO X 60 LIGHTSPEED, G213 Prodigy, G915 X, G915 X LIGHTSPEED, G915 X LIGHTSPEED TKL, G316 X,
       G316 X 98, G512 X 75 and G512 X 98), mice (the
       G502 X PLUS, G502 X, G502 X LIGHTSPEED, G502 X PLUS MILLENNIUM FALCON,
       G502 HERO, G502 LIGHTSPEED, G305, PRO X SUPERLIGHT, PRO WIRELESS,
@@ -79,9 +79,9 @@
     </p>
     <p>
       Keyboard lighting is lost at a power-off, but for the brightness: the
-      G515 TKL and the G915 X LIGHTSPEED keep it, the G515 LIGHTSPEED TKL is
-      taken to keep it, and the G915 X, G915 X LIGHTSPEED TKL, G316 X,
-      G316 X 98, G512 X 75 and G512 X 98 may keep it. The keyboard's onboard
+      G515 TKL, the PRO X 60 LIGHTSPEED and the G915 X LIGHTSPEED keep it, the
+      G515 LIGHTSPEED TKL is taken to keep it, and the G915 X, G915 X LIGHTSPEED
+      TKL, G316 X, G316 X 98, G512 X 75 and G512 X 98 may keep it. The keyboard's onboard
       profile is never written.
       Each write to the mouse's onboard profile, from the window or
       gearbench-ctl, backs up every profile sector first and reads the written
@@ -95,7 +95,7 @@
   <screenshots>
     <screenshot type="default">
       <caption>Keyboard: keys painted by click or drag, G keys and M profiles</caption>
-      <image>https://raw.githubusercontent.com/gearbench/gearbench/v1.3.1/docs/images/hero.png</image>
+      <image>https://raw.githubusercontent.com/gearbench/gearbench/v1.3.2/docs/images/hero.png</image>
     </screenshot>
   </screenshots>
 
@@ -164,6 +164,8 @@
     <modalias>usb:v046DpC09D*</modalias>
     <modalias>usb:v046DpC352*</modalias>
     <modalias>hid:b0003g*v0000046Dp000040B0*</modalias>
+    <modalias>usb:v046DpC351*</modalias>
+    <modalias>hid:b0003g*v0000046Dp000040AF*</modalias>
     <modalias>usb:v046DpC336*</modalias>
     <modalias>usb:v046DpC359*</modalias>
     <modalias>usb:v046DpC356*</modalias>
@@ -200,15 +202,15 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
-    <release version="1.3.1" date="2026-11-11">
+    <release version="1.3.2" date="2026-11-15">
       <description>
-        <p>Fixes. Switching Outputs or noise suppression off keeps the
-        output or input you picked while it ran. At a power-off the
-        keyboard and a mouse that follows it stay dark.</p>
-        <p>Settings files and commands run as root refuse links and
-        folders another account could change, and a reply from the daemon's
-        socket is read only up to a size limit. Fixes to game profiles,
-        macros, the G HUB import and the device report.</p>
+        <p>The PRO X 60 LIGHTSPEED keyboard is supported, on its cable and
+        through its receiver: per-key lighting, animations, brightness, its
+        FN keys lit while FN is held, battery and Game Mode's state.</p>
+        <p>Commands run as root with no invoking user no longer start
+        PipeWire's programs, and root's saves and the G HUB import refuse
+        folders another account could change. Fixes to the device report
+        and to status.</p>
       </description>
     </release>
   </releases>

@@ -41,10 +41,15 @@ def keyboard_features(model: KeyboardModel) -> list[tuple[int, str]]:
     if model.g_key_defaults:
         found.append((F_ONBOARD, "the onboard mode its G keys type their own keys in"))
     if model.custom_assignments:
+        # A board with no key to bind is written no file: 0x8101 is its host mode's, and the
+        # control list names its shortcut's keys alone.
+        binds = bool(model.g_key_names)
         found += [(F_KEY_CONTROL, "its custom assignments"),
-                  (F_FILES, "the file its custom assignments are written in")]
+                  (F_FILES, "the file its custom assignments are written in" if binds
+                   else "its host mode")]
         if not model.key_ids:
-            found.append((F_CONTROL_LIST, f"its {model.own_key}s' key ids"))
+            found.append((F_CONTROL_LIST, f"its {model.own_key}s' key ids" if binds
+                          else "the names of its shortcut's keys"))
     if model.fn_keys:
         found.append((F_MODIFIERS, "its FN key's reports"))
     if model.probe not in dict(found):

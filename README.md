@@ -32,10 +32,10 @@ It is made for Ubuntu 26.04 with GNOME 50 on Wayland and has also run on
 [Fedora 44, Arch Linux and CachyOS](docs/GUIDE.md#systems-and-desktops),
 tested there with a mouse and a headset but no keyboard. It is
 [tested on the hardware](docs/GUIDE.md#the-models-and-their-ids) on the G915,
-G515 TKL and G915 X LIGHTSPEED keyboards, the G502 X PLUS, G502 HERO and G305
-mice, and the Astro A50 Gen 4, Astro A50 X, G432 and G933 headsets.
-[Forty more models](#supported-devices) are built and wait for their first
-test on the hardware.
+G515 TKL, PRO X 60 LIGHTSPEED and G915 X LIGHTSPEED keyboards, the G502 X PLUS,
+G502 HERO and G305 mice, and the Astro A50 Gen 4, Astro A50 X, G432 and G933
+headsets. [Forty more models](#supported-devices) are built and wait for their
+first test on the hardware.
 
 Gearbench needs no online account and sends nothing over the network. Its
 daemon runs as you, not as root, and the window and `gearbench-ctl` reach it
@@ -75,8 +75,9 @@ yet.
 ### Keyboards
 
 Gearbench writes nothing to the onboard memory of the G915 TKL or the G815.
-The PRO X TKL LIGHTSPEED may store the brightness Gearbench sets, as a G515
-does; nothing else is written to its onboard memory.
+The PRO X 60 LIGHTSPEED keeps the brightness Gearbench sets through a
+power-off, as a G515 does, and the PRO X TKL LIGHTSPEED may; nothing else is
+written to their onboard memory.
 
 | Device | Tested on the hardware | What Gearbench drives |
 | --- | --- | --- |
@@ -86,6 +87,7 @@ does; nothing else is written to its onboard memory.
 | G915 TKL and G913 TKL (cable or receiver) | No | F1 to F12 as G keys, M1 to M3, MR, per-key lighting, animations, brightness, battery |
 | G815 and G813 (cable) | No | G1 to G5, M1 to M3, MR, per-key lighting, animations, brightness |
 | PRO X TKL LIGHTSPEED (cable or receiver) | No | F1 to F12 as G keys, per-key lighting, animations, brightness, battery |
+| PRO X 60 LIGHTSPEED (cable or receiver) | Yes | per-key lighting, animations, brightness, FN keys lit while FN is held, battery, Game Mode's state; none of its keys binds; its lighting sent again after the keyboard's own animation key is not tested on it yet |
 | G915 X (cable) | No | per-key lighting, animations, brightness, FN keys lit while FN is held, Game Mode's state; G1 to G9 bind after they are tested on the model |
 | G915 X LIGHTSPEED (cable or receiver) | Yes | G1 to G9, per-key lighting, animations, brightness, FN keys lit while FN is held, battery, Game Mode's state; wave's six directions are not tested on it yet |
 | G915 X LIGHTSPEED TKL (cable or receiver) | No | per-key lighting, animations, brightness, FN keys lit while FN is held, battery, Game Mode's state; F1 to F12 bind after they are tested on the model |
@@ -196,12 +198,13 @@ types itself on the G915 TKL, G913 TKL and PRO X TKL LIGHTSPEED, and drops
 the rest unread.
 
 - What you type, on the G815, G813 and G213 Prodigy keyboards; through
-  their receivers, on the G515 LIGHTSPEED TKL, PRO X TKL LIGHTSPEED, G915 X
-  LIGHTSPEED and G915 X LIGHTSPEED TKL, and on Linux 7.3 or later the G915
-  TKL and G913 TKL; on the G502 HERO, G502 X, G203 LIGHTSYNC and G102
+  their receivers, on the G515 LIGHTSPEED TKL, PRO X TKL LIGHTSPEED, PRO X 60
+  LIGHTSPEED, G915 X LIGHTSPEED and G915 X LIGHTSPEED TKL, and on Linux 7.3
+  or later the G915 TKL and G913 TKL; on the G502 HERO, G502 X, G203 LIGHTSYNC and G102
   LIGHTSYNC mice; and on each mouse through its receiver.
-- The modifier keys you press, on the G515 TKL, the G515 LIGHTSPEED TKL on
-  its cable and the G915 X, G316 X and G512 X models: each press and release
+- The modifier keys you press, on the G515 TKL, the G515 LIGHTSPEED TKL and
+  the PRO X 60 LIGHTSPEED on their cables and the G915 X, G316 X and G512 X
+  models: each press and release
   of Ctrl, Shift, Alt and Super, and of FN while its
   [custom assignments](docs/GUIDE.md#custom-assignments) are on, once a
   program asks the keyboard for them. Gearbench asks each time it sets the

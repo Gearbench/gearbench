@@ -39,7 +39,6 @@ from ...lighting import (
     BRIGHTNESS_EVENT,
     DARK,
     DIM,
-    IDLE_WAKE_EVENT,
     LIT,
     OFF,
     Lighting,
@@ -842,8 +841,7 @@ class Keyboard:
             return
         if (self.lighting is not None and power_modes(self.lighting)
                 and event.feature_index == self.lighting.rgb_index
-                and event.address == IDLE_WAKE_EVENT):
-            self.idle.take_notice(event.data)
+                and self.idle.take_event(event)):
             return
         if (event.feature_index == self.keyboard_wireless
                 and event.address == 0 and event.data[1] == 1):

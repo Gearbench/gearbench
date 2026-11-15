@@ -4,7 +4,10 @@ Most commands go through the daemon's control socket: the daemon holds the light
 claims, and a second process writing lighting would fight them. The man page's
 DESCRIPTION names the commands that need no daemon. A command that runs systemd's or PipeWire's
 programs runs them in this process, outside the daemon's sandbox; `daemon` itself runs
-one, `systemctl --user reenable`, as it starts (spatial.reenable_old_switch_on).
+three inside it: `systemctl --user reenable` as it starts (spatial.reenable_old_switch_on),
+and `systemctl is-system-running` and `busctl get-property` as it stops
+(daemon.systemd_stopping, daemon.logind_preparing). As root with no invoking user, one that
+runs PipeWire's programs is refused (`_run`), but for `report`, which leaves PipeWire unread.
 
 This module has `build_parser` and `main`. A group of subcommands is a module with its
 handlers and the functions that add its subcommands to the parser:
@@ -42,7 +45,7 @@ import os
 import select
 import sys
 import traceback
-from typing import NoReturn, cast
+from typing import cast
 
 from .. import __version__
 from ..daemon import (
@@ -53,12 +56,13 @@ from ..daemon import (
     REPLY_UNREAD,
     UNREAD,
     failure,
+    root_alone,
     socket_path,
 )
 from ..desktop import APP_SUMMARY
 from ..keyboard import MODEL_OF as KEYBOARDS
 from ..settings_files import backup_dir, shown_path
-from ..wording import SERVICE_JOURNAL, escaped, reason, word_list
+from ..wording import SERVICE_JOURNAL, EscapingParser, escaped, reason, word_list
 from . import (
     a50x,
     g432,
@@ -75,17 +79,7 @@ from . import (
     service,
     status,
 )
-from .output import JSON_HELP, Subcommands
-
-
-class _Parser(argparse.ArgumentParser):
-    """A parser whose refusals go through `escaped`: argparse quotes a refused value with
-    repr, but writes an unrecognized argument and an ambiguous option as typed, and a glob
-    passes on a file name whoever shared the file chose. add_subparsers makes each
-    subcommand's parser of the root's class."""
-
-    def error(self, message: str) -> NoReturn:
-        super().error(escaped(message))
+from .output import JSON_HELP, PIPEWIRE_ROOT_ALONE, Subcommands
 
 
 def _keeping_brightness(tested: bool) -> list[str]:
@@ -117,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     # --help says; the description is what Gearbench is, the one sentence of every view.
     unwritten = a50x.model_names(lambda model: not model.writes_tested)
     taken = _keeping_brightness(tested=False)
-    parser = _Parser(
+    parser = EscapingParser(
         prog="gearbench-ctl",
         description=f"{APP_SUMMARY}.",
         epilog="The keyboard's onboard profile is never written, but a "
@@ -222,6 +216,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    """The handler's exit status. A subcommand that runs PipeWire's programs (set_defaults
+    runs_pipewire) is refused as root with no invoking user (PIPEWIRE_ROOT_ALONE), with
+    nothing run, and exits 1."""
+    if getattr(args, "runs_pipewire", False) and root_alone():
+        print(f"error: {PIPEWIRE_ROOT_ALONE.format(args.cmd)}", file=sys.stderr)
+        return 1
     try:
         return args.func(args)
     except (OSError, json.JSONDecodeError) as exc:

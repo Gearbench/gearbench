@@ -653,4 +653,4 @@ def _add_computer_commands(sub: Subcommands) -> None:
     geq.add_argument("--flat", action="store_true",
                      help="every gain of the preset to 0 dB first, before any other gain "
                           "given")
-    geq.set_defaults(func=cmd_g432_eq)
+    geq.set_defaults(func=cmd_g432_eq, runs_pipewire=True)

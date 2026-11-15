@@ -197,19 +197,51 @@ ROOT_SAVE_REFUSED = ("{at_fault}, on the way to it, is another account's or open
                      "accounts, so root saves nothing there; run the command as the account "
                      "whose settings these are")
 
+#: The errors of a walk down a link's target path that stop it where the kernel would too:
+#: a name not there, a file where a folder is named, a loop of links.
+PATH_STOPS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
+
 
 def refuse_for_root(target: Path) -> None:
     """PermissionError where root would save `target` on a way another account could change
-    (runtime_folder.on_the_way, as far as the path is there, a link to nothing stepped past for
-    the caller's words on it): su without its dash and sudo -E keep a user's XDG_CONFIG_HOME,
-    where that user's programs can put a link to any file. Nothing for another account, which
-    writes only what it may itself."""
+    (runtime_folder.on_the_way, as far as the path is there), or where a name on it is not
+    there yet in a folder others may make names in, sticky or not: su without its dash and
+    sudo -E keep a user's XDG_CONFIG_HOME, where that user's programs can put a link to any
+    file. A link to nothing on the way is checked too, then followed to where its target's
+    path stops, since write_json writes through one whose folder is there; where nothing is
+    at fault, the caller words the link. Nothing for another account, which writes only what
+    it may itself."""
     if os.geteuid() != 0:
         return
-    there = next(place for place in (target, *target.parents) if place.exists())
-    if (at_fault := on_the_way(there)) is not None:
-        raise PermissionError(errno.EPERM, ROOT_SAVE_REFUSED.format(at_fault=escaped(at_fault)),
-                              str(target))
+    way, followed = target, set[Path]()
+    while True:
+        there = next(place for place in (way, *way.parents) if place.exists())
+        link = next(place for place in (way, *way.parents) if os.path.lexists(place))
+        at_fault = on_the_way(there)
+        if at_fault is None and there != way and there.is_dir() and there.stat().st_mode & 0o022:
+            # The sticky bit on_the_way lets pass keeps others from renaming what a folder
+            # holds, not from making a name not there yet: the folder mkdir's exist_ok then
+            # takes, or the link resolve() follows, is theirs.
+            at_fault = there
+        if at_fault is None and link != there:
+            # on_the_way walks the link and its target's path, and fails where that stops: a
+            # name not there, a file in a folder's place or a loop, which the next turn stops
+            # at for the caller's words on the link.
+            try:
+                at_fault = on_the_way(link)
+            except OSError as exc:
+                if exc.errno not in PATH_STOPS:
+                    raise
+        if at_fault is not None:
+            raise PermissionError(errno.EPERM,
+                                  ROOT_SAVE_REFUSED.format(at_fault=escaped(at_fault)),
+                                  str(target))
+        # Where the path stops, or a loop of links, which resolve() leaves at the link that
+        # closes it, in a folder checked here.
+        if link == there or link in followed:
+            return
+        followed.add(link)
+        way = link.parent / link.readlink() / way.relative_to(link)
 
 
 #: write_json's journal line for a folder sync that failed after the replace.

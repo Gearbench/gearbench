@@ -1,16 +1,18 @@
-"""How the package words and escapes what it says, and the JSON value checks a refusal
-rests on. Standard library only, and below every other module, the device layers included.
+"""How the package words and escapes what it says, argparse's refusals included, and the
+JSON value checks a refusal rests on. Standard library only, and below every other module,
+the device layers included.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import time
 import unicodedata
 from collections.abc import Collection, Iterable, Sequence
 from pathlib import Path
-from typing import TypeGuard
+from typing import NoReturn, TypeGuard
 
 #: The longest refusal of a file kept whole. A refusal quotes the refused value, which can
 #: be most of the file and comes out of repr() up to four times as long; the libraries keep
@@ -134,6 +136,16 @@ def escaped(value: object) -> str:
     (Cf) included, written as its escape: names from devices, files, processes and
     PipeWire can hold an escape sequence. --json needs none: json.dumps escapes them."""
     return "".join(c if c.isprintable() else repr(c)[1:-1] for c in str(value))
+
+
+class EscapingParser(argparse.ArgumentParser):
+    """A parser whose refusals go through `escaped`: argparse quotes a refused value with
+    repr, but writes an unrecognized argument and an ambiguous option as typed, and a glob
+    passes on a file name whoever shared the file chose. add_subparsers makes each
+    subcommand's parser of the root's class."""
+
+    def error(self, message: str) -> NoReturn:
+        super().error(escaped(message))
 
 
 def home_shortened(text: str) -> str:

@@ -264,6 +264,15 @@ class Paint:
                 self.disable_cluster(lighting, cluster)
             self.write_zone_effect(lighting, cluster, effect_name, color, extra_params, dim=dim)
 
+    def animates(self) -> bool:
+        """Whether the board runs an animation Gearbench wrote, for Idle.take_sync: its lights
+        up, the layer in force an effect that does not show as static (shows_static), and FN
+        not held, which pauses it (write_fn). A `paint` or a drag's frame over such a layer
+        still counts."""
+        effect_name = self.d.per_keyboard.active_lighting(self.keyboard)[0]
+        return (self.keyboard.lights != DARK and not self.shows_static(effect_name)
+                and not self.fn_zones())
+
     def fn_zones(self) -> dict[int, int]:
         """The FN keys of the attached keyboard's model in FN_WHITE while FN is held
         (KeyboardModel.fn_keys, Modifiers.fn_held); empty otherwise."""

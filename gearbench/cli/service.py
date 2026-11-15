@@ -170,4 +170,4 @@ def add_gui(sub: Subcommands) -> None:
     g = sub.add("gui", help="open the window", offers_json=False)
     g.add_argument("--gapplication-service", action="store_true",
                    help="wait to be asked over D-Bus to open, as the desktop starts it")
-    g.set_defaults(func=cmd_gui)
+    g.set_defaults(func=cmd_gui, runs_pipewire=True)

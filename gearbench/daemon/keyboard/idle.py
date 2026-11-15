@@ -1,4 +1,6 @@
-"""The keyboard's idle notices and its light level: each idle or wake notice answered and the
+"""0x8071's notices and the keyboard's light level (take_event): the effect-sync notice of the
+keyboard's own animation answered with the lighting sent again (take_sync), each idle or wake
+notice answered and the
 first of a train acted on (take_notice), the claim's own wake notice and the later copies of an
 idle train put back left unanswered (expect_claim_wake, stale_idle_notice), the idle times
 written at the claim (claimed), after a change or another keyboard's wake (wake_for_change,
@@ -20,6 +22,7 @@ from ...keyboard import NO_IDLE_TIMES
 from ...lighting import (
     DARK,
     DIM,
+    EFFECT_SYNC_EVENT,
     IDLE_NOTICE,
     IDLE_WAKE_EVENT,
     LEVEL_WORDS,
@@ -31,6 +34,7 @@ from ..shared import NO_LIGHTING, darker, unanswered
 from .notes import LIGHTS_DOWN_NOTE, named_words
 
 if TYPE_CHECKING:
+    from ...hidpp import Event
     from .. import Daemon
     from . import Keyboard
 
@@ -88,6 +92,15 @@ WAKE_REPAINT_DELAY = 0.5
 #: later than this is answered: after the claim's 05 none comes until an idle notice is
 #: answered, which ends the claim's own first.
 CLAIM_WAKE_WINDOW = 10.0
+
+#: How soon after the lighting was sent again for the keyboard's own animation
+#: (Idle.take_sync) another effect-sync notice is taken for one the keyboard sent before that
+#: paint reached it, in seconds. The notice comes once a period (Logitech's x8071
+#: specification), and each one the PRO X 60 LIGHTSPEED sent on 2026-11-14 came 1,984 ms into
+#: its period, so two notices of one animation are taken to be at least that far apart
+#: (inferred): an animation the paint did not stop says so again past the gap, and is painted
+#: over again.
+OWN_ANIMATION_GAP = 1.0
 
 #: Why a lighting change lit a keyboard, for the journal (wake_for_change).
 CHANGE_WAKE = "a lighting change woke the keyboard"
@@ -155,6 +168,8 @@ class Idle:
         #: are read, each other keyboard below lit is lit with it unless it went idle since
         #: (tend_idle), as a key would, which after a claim sends no notice.
         self.back_owed = False
+        #: When the lighting was last sent again for the keyboard's own animation (take_sync).
+        self._own_animation_at = float("-inf")
 
     # `lighting` for code reached only while the keyboard has 0x8071's, which alone has idle
     # times and notices (keyboard_zones.power_modes), after a check made in another function,
@@ -211,7 +226,56 @@ class Idle:
         keyboard.idle_lights, self._dim_held = LIT, False
         keyboard.lights = self.d.keyboards.lock_lights
 
-    # -- the idle notices ----------------------------------------------------
+    # -- the notices ---------------------------------------------------------
+
+    def take_event(self, event: Event) -> bool:
+        """Whether `event`, a report of the keyboard's 0x8071, was one of its notices, now
+        taken: its idle or wake notice (take_notice), or its effect-sync notice where that
+        says the keyboard's own animation took a cluster (take_sync). Any other is the
+        caller's to log."""
+        if event.address == IDLE_WAKE_EVENT:
+            self.take_notice(event.data)
+            return True
+        return event.address == EFFECT_SYNC_EVENT and self.take_sync(event.data)
+
+    def take_sync(self, data: bytes) -> bool:
+        """The keyboard's effect-sync notice, `data` its cluster's index and the time into its
+        effect's period (lighting.EFFECT_SYNC_EVENT), on a model with repaints_own_animation,
+        the PRO X 60 LIGHTSPEED: where it names a cluster of the keyboard's that Gearbench
+        runs no animation on (Paint.animates), the animation there is the keyboard's own, and
+        the lighting in force is sent again (Keyboard.apply_profile): the owner's decision of
+        2026-11-14, "Paint again at once". Whether the notice was taken; one left alone is
+        the caller's to log.
+
+        Read from Logitech's specification: what the notice is, and its bytes. Inferred from
+        the two patterns that keyboard sent on 2026-11-14: `00 07 c0`, at its animation key
+        with its own animation running over a static claim, is that animation's on cluster 0,
+        the keys; `01 07 c0`, at its onboard profile keys with the board unchanged, names a
+        cluster it does not list, and is left alone.
+
+        It cannot loop: static, a per-key paint and the dark have no period, so the paint
+        draws no notice, and under an animation of Gearbench's own nothing is sent, since a
+        paint there would start that animation over. No notice came under a wave of
+        Gearbench's (measured on the PRO X 60 LIGHTSPEED, 2026-11-15), so what one there
+        would say is not known. Nor flood: a notice within OWN_ANIMATION_GAP of the last
+        paint sent for one is not answered. A notice read just after a change from an
+        animation of Gearbench's to static is answered too, whatever it was sent for, with
+        one more paint of the same lighting."""
+        keyboard = self.keyboard
+        if (not keyboard.keyboard_model().repaints_own_animation
+                or all(cluster.index != data[0] for cluster in self._lighting.clusters)
+                or keyboard.paint.animates()):
+            return False
+        since = time.monotonic() - self._own_animation_at
+        if since < OWN_ANIMATION_GAP:
+            log.debug("the %s's effect-sync notice left alone: its lighting was sent again "
+                      "%.1f s ago", keyboard.model_name(), since)
+            return True
+        self._own_animation_at = time.monotonic()
+        log.info("the %s says an animation runs where Gearbench shows none; sending "
+                 "Gearbench's lighting again", keyboard.model_name())
+        keyboard.apply_profile()
+        return True
 
     def take_notice(self, data: bytes) -> None:
         """An idle notice (data 00) or a wake notice (01) from the keyboard.

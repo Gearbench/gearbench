@@ -161,4 +161,4 @@ def add_headset_noise(sub: Subcommands) -> None:
                             "removes the input; test: once it is on and linked, count "
                             f"{headset_mic.COUNT_IN}, record {headset_mic.TEST_SECONDS} s of "
                             "the input into memory and play them back on the default output")
-    noise.set_defaults(func=cmd_headset_noise)
+    noise.set_defaults(func=cmd_headset_noise, runs_pipewire=True)

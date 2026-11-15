@@ -27,7 +27,7 @@ from .config import (
 )
 from .hidpp import RECEIVER_SLOTS, Hidpp, find_each_attached
 from .keycodes import ZONES
-from .keycontrol import F_FILES, F_KEY_CONTROL
+from .keycontrol import F_FILES, F_KEY_CONTROL, GAME_MODE_BUTTON, game_mode_not_known
 from .keys import F_GKEY, F_MKEYS, F_MR
 from .layout import (
     G213_BOARD,
@@ -46,6 +46,8 @@ from .layout import (
     G915X_FN_KEYS,
     G915X_LIGHTSPEED_BOARD,
     G915X_TKL_BOARD,
+    PRO_X_60_BOARD,
+    PRO_X_60_FN_KEYS,
     PRO_X_TKL_BOARD,
     Board,
 )
@@ -90,10 +92,13 @@ class KeyboardModel:
     #: it ONBOARD mode back, a shutdown's included, or they type nothing until it is switched
     #: off and on. Empty where an unbound G key types nothing.
     g_key_defaults: tuple[str, ...] = ()
-    #: Whether its G keys are keys of its own board that its custom assignments set to report
-    #: to Gearbench while bound and leave doing their own job while unbound
-    #: (keycontrol.TriggeredKeys): the G515 generation's way. False for a keyboard whose G
-    #: keys 0x8010 diverts, and for one with no G keys.
+    #: Whether it has the G515 generation's custom assignments (0x1B05 and 0x8101): it is set
+    #: to host mode through 0x8101 and handed back from it, their state and shortcut are
+    #: followed, and its 0x8010, where it lists one, is sent nothing (capabilities). Where its
+    #: board has bindable keys, they are keys of its own that its custom assignments set to
+    #: report to Gearbench while bound and leave doing their own job while unbound
+    #: (keycontrol.TriggeredKeys). False for a keyboard whose G keys 0x8010 diverts, and for
+    #: one with neither.
     custom_assignments: bool = False
     #: The key id of each of those G keys, from G1 on, which the file that sets them names,
     #: where they were measured on one, and the check of the read below. Empty for a model
@@ -148,6 +153,13 @@ class KeyboardModel:
     #: The 0x8070 zone that lights each of its board's areas (layout.Board.areas), in their
     #: order, on a model with zone_lighting whose areas take a color each. Empty otherwise.
     area_zones: tuple[int, ...] = ()
+    #: Whether Gearbench sends its lighting again when the keyboard's effect-sync notice
+    #: (lighting.EFFECT_SYNC_EVENT) names a cluster Gearbench runs no animation on: the
+    #: keyboard's own animation key started the firmware's there, over the claim
+    #: (daemon.keyboard.idle.Idle.take_sync). Measured on the PRO X 60 LIGHTSPEED alone.
+    repaints_own_animation: bool = False
+    #: What turns its Game Mode, as a line names it: a word of keycontrol.GAME_MODE_WORKED.
+    game_mode_control: str = GAME_MODE_BUTTON
     #: The whole-board effects its 0x8071 cluster 0xff, its whole board's, is read for where
     #: its device info counts effects on it (lighting.Lighting.whole_board), each run there
     #: where the cluster lists its id and a counted cluster lacks it. With none, nothing is
@@ -380,6 +392,45 @@ G512_X_75 = g515_generation("G512 X 75", G512X75_BOARD, G512X75_FN_KEYS,
 G512_X_98 = g515_generation("G512 X 98", G512X98_BOARD, G512X98_FN_KEYS,
                             whole_board=G512X_WHOLE_BOARD)
 
+# The PRO X 60 LIGHTSPEED, a 61-key board: the owner's was read on its cable and through its
+# c547 receiver with the device report on 2026-11-14 (MPK 22.01.B0015), the one source of
+# its feature tables, since no published listing of it was found, and ran its first connect
+# on both routes that day, so it is tested. It has the G515 generation's 0x1B05 v1, 0x8101,
+# 0x8051, 0x4523 and 0x8040 beside 0x8071 v3 and 0x8081 v0, and is driven as that generation
+# is, each part watched or read on the owner's that day: host mode through 0x8101 and its
+# hand-back (it powers up in its on-board mode, fn 6 reading `03 00 01` twice after a power
+# cycle, and took host mode); FN's reports and its FN keys lit (layout.PRO_X_60_FN_KEYS),
+# which it sends only while its custom assignments are on, as the G915 X LIGHTSPEED does;
+# Game Mode's switch, followed both ways, and named so (the owner's decision of 2026-11-15,
+# "Yes, 'switch' here"); the brightness event of its FN+Z and FN+X; and its
+# custom assignments' state and shortcut, FN+A by its own control list. No key of it binds
+# (the owner's decision of 2026-11-14, "None on this model"), so it has no control_ids and
+# is written no layer file. Its key cluster lists the G515's six effects and its brightness
+# levels are 0, 12, 25, 50 and 100 (read); each effect ran as named, and its wave ran each of
+# the G915's six directions as named (watched). Its HID++ is on interface 02 of its cable,
+# the one interface with no key reports, and through its receiver on a node of its own,
+# 40AF, at device index 0x01, which carries what is typed (both read). Its table lists
+# 0x8010 too, which no other model with custom assignments has. Its fn 0 counts 12 on both
+# routes and G HUB's record gives it no G key; which keys the 12 are is not known, since
+# fn 2, which would have them report, has not been sent, and Gearbench sends its 0x8010
+# nothing (capabilities). Its device info counts four effects on cluster 0xff, which nothing
+# has read, and its counted cluster lists wave and ripple, so its whole board is not read.
+# Its battery is 0x1004's, which gives a charge of its own, so it needs no cell. It keeps
+# its brightness when it loses power: 50 read 50 again after the cable was out and the
+# keyboard switched off 5 s, so it is read at each connect and written only on change, as
+# the G515s are. Its report rate (0x8060), its 0x1BC0 and its Bluetooth route are not
+# driven. FN+C, its animation key, ran the keyboard's own animation over a static claim on
+# its cable and sent the effect-sync notice for cluster 0, its keys, `00 07 c0`, several
+# times, with the claim still read as held, and a `color` put Gearbench's lighting back; FN+S,
+# FN+D and FN+F, its onboard profiles, sent `01 07 c0`, a cluster it does not list, and left
+# the board as painted (measured 2026-11-14). So Gearbench sends its lighting again at that
+# notice (the owner's decision of 2026-11-14, "Paint again at once"); FN+V and its receiver
+# route are taken to be the same (assumed).
+PRO_X_60 = replace(g515_generation("PRO X 60 LIGHTSPEED", PRO_X_60_BOARD, PRO_X_60_FN_KEYS,
+                                   whole_board=()),
+                   control_ids=(), tested=True, keeps_brightness=True,
+                   repaints_own_animation=True, game_mode_control="switch")
+
 #: Each product id's model, in the order they are looked for: the G915 on its cable, then on
 #: its receiver (both read off the hardware 2026-09-22), then the wired-only G515 TKL and the
 #: G515 LIGHTSPEED TKL on its cable (G HUB's device database), then the G515 LIGHTSPEED TKL on
@@ -395,13 +446,15 @@ G512_X_98 = g515_generation("G512 X 98", G512X98_BOARD, G512X98_FN_KEYS,
 #: keyboard's replies to the other (inferred from the c547, where the G502 X PLUS answers on
 #: a node of its own). Then the G815, on its cable alone (Solaar's listing; G HUB's record).
 #: Then the PRO X TKL LIGHTSPEED on its cable and on a node of its own behind its c547, as the
-#: G515 LIGHTSPEED TKL (G HUB's records), then the G515 generation's others, each on its
-#: cable, the G915 X LIGHTSPEED and the G915 X LIGHTSPEED TKL each then on a node of its own
-#: behind its receiver, as the G515 LIGHTSPEED TKL, and last the G213 Prodigy on its cable
-#: alone (G HUB's records). G HUB names the pair's 40B5 and 40B6 and gives their receiver's
-#: kind, LS2, as it gives the G515 LIGHTSPEED TKL's and the PRO X TKL's, and not its id: the
-#: G915 X LIGHTSPEED's was a c547, which the installed kernel's hid-logitech-dj binds, on
-#: 2026-10-23 (its first connect, and on Windows), and the TKL's is assumed to be one.
+#: G515 LIGHTSPEED TKL (G HUB's records), then the PRO X 60 LIGHTSPEED on its cable and on a
+#: node of its own behind its c547, at device index 0x01 (both read off the owner's on
+#: 2026-11-14), then the G515 generation's others, each on its cable, the G915 X LIGHTSPEED
+#: and the G915 X LIGHTSPEED TKL each then on a node of its own behind its receiver, as the
+#: G515 LIGHTSPEED TKL, and last the G213 Prodigy on its cable alone (G HUB's records). G HUB
+#: names the pair's 40B5 and 40B6 and gives their receiver's kind, LS2, as it gives the G515
+#: LIGHTSPEED TKL's and the PRO X TKL's, and not its id: the G915 X LIGHTSPEED's was a c547,
+#: which the installed kernel's hid-logitech-dj binds, on 2026-10-23 (its first connect, and
+#: on Windows), and the TKL's is assumed to be one.
 MODEL_OF: dict[int, KeyboardModel] = {
     0xC33E: G915,
     0xC541: G915,
@@ -414,6 +467,8 @@ MODEL_OF: dict[int, KeyboardModel] = {
     0xC33F: G815,
     0xC352: PRO_X_TKL,
     0x40B0: PRO_X_TKL,
+    0xC351: PRO_X_60,
+    0x40AF: PRO_X_60,
     0xC359: G915_X,
     0xC356: G915_X_LIGHTSPEED,
     0x40B5: G915_X_LIGHTSPEED,
@@ -564,7 +619,7 @@ def shown_lighting(entries: Mapping[str, Lighting], key: str | None, leader: str
 #: is not asked; on the receiver the cable is looked for by these ids, and on a receiver's
 #: own node the link notices are turned on (RECEIVER_NODE_IDS). Listed by hand: a new
 #: model's cabled id goes here too.
-CABLED_IDS = frozenset({0xC33E, 0xC358, 0xC355, 0xC343, 0xC33F, 0xC352, 0xC336,
+CABLED_IDS = frozenset({0xC33E, 0xC358, 0xC355, 0xC343, 0xC33F, 0xC352, 0xC351, 0xC336,
                         0xC359, 0xC356, 0xC357, 0xC361, 0xC36B, 0xC35F, 0xC360})
 
 #: The ids of a receiver's own node, which a keyboard is reached through on its slot, and
@@ -603,6 +658,23 @@ BOUND_KEY_CAPABILITIES = frozenset({"g_keys", "assigned_keys"})
 
 def name(product: int | None) -> str:
     return MODELS[product] if product else "keyboard"
+
+
+def model_of(product: object) -> KeyboardModel | None:
+    """The model of the keyboard a status's `product`, its id in hex, names; None for none, or
+    for an id this build does not know, from a daemon of another version."""
+    try:
+        return MODEL_OF[int(str(product), 16)]
+    except (ValueError, KeyError):
+        return None
+
+
+def game_mode_unknown_words(product: object) -> str:
+    """The words for Game Mode not known on the keyboard a status's `product` names
+    (model_of): they name its model's button or switch, a button for an id this build does
+    not know."""
+    model = model_of(product)
+    return game_mode_not_known(GAME_MODE_BUTTON if model is None else model.game_mode_control)
 
 
 def read_battery(dev: Hidpp, product: int | None, name: str) -> dict | None:
@@ -660,14 +732,16 @@ def capabilities(dev: Hidpp, model: KeyboardModel) -> list[str]:
     `battery` for any of the battery features (battery.has_battery), which the wired G515 TKL
     lacks. A model whose G keys type its own keys while unbound
     (KeyboardModel.g_key_defaults) has `typed_keys` after `g_keys`: its stop hands it its
-    onboard profile back. A model whose G keys bind through its custom assignments
-    (KeyboardModel.custom_assignments) has `assigned_keys` where that write has passed its
-    test and the keyboard has both of its features.
+    onboard profile back. A model with custom assignments (KeyboardModel.custom_assignments)
+    has no `g_keys`, though its table lists 0x8010 as the PRO X 60 LIGHTSPEED's does, so its
+    0x8010 is neither read nor diverted (Known.take_parts); it has `assigned_keys` where that
+    write has passed its test and the keyboard has both of its features.
 
     Not lighting: a device can advertise the feature with nothing behind it, so the
     daemon adds `lighting` once clusters enumerate.
     """
-    able = [able for able, feature in CAPABILITIES if dev.feature(feature) is not None]
+    able = [able for able, feature in CAPABILITIES if dev.feature(feature) is not None
+            and not (feature == F_GKEY and model.custom_assignments)]
     if model.g_key_defaults:
         # Found by its 0x8010 (WITNESS), such a keyboard has g_keys.
         able.insert(able.index("g_keys") + 1, "typed_keys")
@@ -712,9 +786,11 @@ def own_named_keys(keys: Collection[str]) -> list[str]:
 def assignments_untested(product: int | None) -> bool:
     """Whether the keyboard of id `product` has G keys that bind through its custom
     assignments (KeyboardModel.custom_assignments) whose write has not passed its test on
-    this hardware (KeyboardModel.assignments_tested). False with no keyboard found yet."""
+    this hardware (KeyboardModel.assignments_tested). False for a model whose board has no
+    key to bind, the PRO X 60 LIGHTSPEED, and with no keyboard found yet."""
     model = None if product is None else MODEL_OF[product]
-    return model is not None and model.custom_assignments and not model.assignments_tested
+    return (model is not None and model.custom_assignments and not model.assignments_tested
+            and bool(model.g_key_names))
 
 
 def untested_assignment_words(product: int) -> str:

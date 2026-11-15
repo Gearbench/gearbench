@@ -129,4 +129,4 @@ def add_headset_outputs(sub: Subcommands) -> None:
                           f"{word_list(outputs_state.CHOICES)}")
     hop.add_argument("words", nargs="*", metavar="WORD",
                      help="balance's word, or app's key and output")
-    hop.set_defaults(func=cmd_headset_outputs)
+    hop.set_defaults(func=cmd_headset_outputs, runs_pipewire=True)

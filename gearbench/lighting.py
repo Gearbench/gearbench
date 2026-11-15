@@ -61,10 +61,18 @@ SW_HOST = 0x03
 #: leaves them (`01 00 06`, the owner's decision of 2026-09-23).
 SW_FIRMWARE = 0x00
 NOTIFY_SYNC, NOTIFY_WAKE, NOTIFY_IDLE = 0x01, 0x02, 0x04
-#: The event address of the idle and wake notices, and their data byte. The effect-sync
-#: report, at address 0x00, comes while an animation runs.
+#: The event address of the idle and wake notices, and their data byte.
 IDLE_WAKE_EVENT = 0x10
 IDLE_NOTICE, WAKE_NOTICE = 0x00, 0x01
+#: The event address of the effect-sync notice, event 0, effectSyncEvent in Logitech's x8071
+#: RGB effects specification (version 4, read 2026-11-14): its first byte the index of a
+#: cluster, 0xFF for every cluster, and the next two how far that cluster's effect is into its
+#: period, in ms, big-endian. By the specification the device sends one each period of an
+#: effect that has one, while notify bit 0 (NOTIFY_SYNC) is set, which the claim and each
+#: notice's answer set. The PRO X 60 LIGHTSPEED sent them at its own animation key and none
+#: under a wave of Gearbench's (measured on the PRO X 60 LIGHTSPEED, 2026-11-15).
+#: OpenLogi's decoder of the event reads the same two fields.
+EFFECT_SYNC_EVENT = 0x00
 # G HUB's claim: two writes of the notify byte, in this order. 07 asks for all three, and a
 # wake notice follows it; 05 leaves the wake notice off until an idle notice is answered.
 # The first alone does not settle, yet a read returns 03 05 either way: no proof of a claim.

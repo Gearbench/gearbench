@@ -108,4 +108,4 @@ def add_headset_volume(sub: Subcommands) -> None:
     volume.add_argument("level", nargs="?",
                         help=f"the volume to set, 0 to {system_volume.LEVEL_MAX}; left out, "
                              "it is shown")
-    volume.set_defaults(func=cmd_headset_volume, usage_error=volume.error)
+    volume.set_defaults(func=cmd_headset_volume, usage_error=volume.error, runs_pipewire=True)

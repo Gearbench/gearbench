@@ -43,15 +43,20 @@ from ..daemon import BUSY, DOWN, NOT_REACHED, NOT_RUNNING, REPLY_UNREAD, UNREAD,
 from ..focus import FOLLOWED, SHELL, held_until
 from ..keyboard import (
     CABLED_IDS as KEYBOARD_CABLED,
-    MODEL_OF as KEYBOARDS,
     NO_IDLE_TIMES,
     followed as leader_shown,
+    game_mode_unknown_words,
     key_name as model_shown,
     model_ids as keyboard_ids,
     model_named as keyboard_named,
+    model_of,
     untested_assignment_words,
 )
-from ..keycontrol import GAME_MODE_NOT_KNOWN, GAME_MODE_UNKNOWN, SHORTCUT_TURNS
+from ..keycontrol import (
+    FN_KEYS_UNLIT,
+    GAME_MODE_UNKNOWN,
+    SHORTCUT_TURNS,
+)
 from ..lighting import ANIMATIONS, COLORLESS, DARK, DIM, LEVEL_WORDS, OFF, SPEEDS, TWO_COLORED
 from ..macros import REPEAT_WORDS
 from ..mouse import (
@@ -113,8 +118,9 @@ def _claim_words(reply: dict) -> str:
         return "not claimed"
     held = [f"sw_control {reply['sw_control']}"] if reply.get("sw_control") is not None else []
     if "g_keys" not in (reply.get("capabilities") or ()):
-        # None to divert: the G213 has no G keys, and the G515 generation's go through their
-        # custom assignments, which the assignments line says.
+        # None to divert: the G213 has no G keys, and a model with custom assignments has no
+        # `g_keys` (keyboard.capabilities). The G515 generation's keys go through them, which
+        # the assignments line says, and the PRO X 60 LIGHTSPEED binds none.
         return ", ".join(["claimed", *held])
     keys = "G keys diverted" if reply.get("diverted") else "G keys not diverted"
     if reply.get("diverted") and reply.get("typed"):
@@ -124,18 +130,20 @@ def _claim_words(reply: dict) -> str:
 
 def _assignment_words(reply: dict) -> str:
     """The custom assignments line of `status`: on or off, the shortcut that turns them the
-    other way, then why its own keys take no binding yet, or the keys set to report to
-    Gearbench and, while they are off, what those do meanwhile: on a model whose every G key
-    reports (KeyboardModel.reports_unbound), its G keys in the model's own words."""
+    other way, then why its own keys take no binding yet on a model this build knows
+    (model_of), or the keys set to report to Gearbench and, while they are off, what those do
+    meanwhile: on a model whose every G key reports (KeyboardModel.reports_unbound), its G
+    keys in the model's own words. Last, while they are off on a keyboard whose FN keys the
+    daemon lights, that FN lights none (FN_KEYS_UNLIT)."""
     on = bool(reply["custom_assignments"])
     said = "on" if on else "off"
     if reply.get("assignment_shortcut"):
         said += ", " + SHORTCUT_TURNS.format(reply["assignment_shortcut"], "off" if on else "on")
     keys = [str(key) for key in reply.get("reporting_keys") or ()]
-    model = KEYBOARDS.get(int(reply["product"], 16)) if keys else None
-    if reply.get("assignments_untested"):
+    model = model_of(reply.get("product"))
+    if reply.get("assignments_untested") and model is not None:
         said += f"; {untested_assignment_words(int(reply['product'], 16))}"
-    elif model is not None and model.reports_unbound:
+    elif keys and model is not None and model.reports_unbound:
         said += (f"; its {model.own_key}s report to Gearbench" if on
                  else f"; until then its {model.own_key}s {model.unbound}")
     elif keys and on:
@@ -143,12 +151,19 @@ def _assignment_words(reply: dict) -> str:
     elif keys:
         said += (f"; until then {word_list(keys, 'and')} "
                  + ("types its own key" if len(keys) == 1 else "type their own keys"))
+    if reply.get("fn_keys_unlit"):
+        said += f"; {FN_KEYS_UNLIT}"
     return said
 
 
-#: The Game Mode line of `status`, by the reply's `game_mode`.
-GAME_MODE_WORDS = {"on": "on", "off": "off",
-                   GAME_MODE_UNKNOWN: GAME_MODE_NOT_KNOWN}
+def _game_mode_words(reply: dict) -> str | None:
+    """The Game Mode line of `status`, by the reply's `game_mode`: on, off, or not known
+    until the model's button or switch turns it, a button for an id this build does not know
+    (keyboard.game_mode_unknown_words); None on a keyboard without Game Mode."""
+    game = reply.get("game_mode")
+    if game == GAME_MODE_UNKNOWN:
+        return game_mode_unknown_words(reply.get("product"))
+    return game if game in ("on", "off") else None
 
 
 def _level_words(level: object) -> str | None:
@@ -474,8 +489,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     if reply.get("custom_assignments") is not None:
         # The Keyboard tab's word; "assignments" alone could name the G keys' bindings.
         line("custom assignments", _assignment_words(reply))
-    if reply.get("game_mode") in GAME_MODE_WORDS:
-        line("game mode", GAME_MODE_WORDS[reply["game_mode"]])
+    game_mode = _game_mode_words(reply)
+    if game_mode is not None:
+        line("game mode", game_mode)
     # What `effect` takes on the keyboard that leads, the one this report is of: its clusters'
     # effects that have a name.
     effects = reply.get("effects")

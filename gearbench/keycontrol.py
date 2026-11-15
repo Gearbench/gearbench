@@ -56,9 +56,16 @@ GAME_MODE_EVENT = 0x00
 #: Game Mode in `status` on a keyboard that has it, until an event since its connect or its
 #: last power loss gives it, and the words for that: the keyboard reports it only as an event.
 GAME_MODE_UNKNOWN = "unknown"
-GAME_MODE_NOT_KNOWN = "not known until the keyboard's Game Mode button is pressed"
+GAME_MODE_NOT_KNOWN = "not known until the keyboard's Game Mode {} is {}"
+#: What turns Game Mode on a keyboard, the word its record gives
+#: (KeyboardModel.game_mode_control), with what is done to it.
+GAME_MODE_BUTTON = "button"
+GAME_MODE_WORKED = {GAME_MODE_BUTTON: "pressed", "switch": "moved"}
 #: The words for the shortcut that turns custom assignments "on" or "off": "FN+F1 turns them on".
 SHORTCUT_TURNS = "{} turns them {}"
+#: What `status` and the Keyboard tab add while they are off on a keyboard whose FN keys the
+#: daemon lights (the reply's `fn_keys_unlit`): it reports FN only while they are on.
+FN_KEYS_UNLIT = "holding FN lights no keys until they are on"
 
 FN_BEGIN = 2            # 00 LL: a file of LL bytes follows
 FN_DATA = 3             # the file, DATA_FRAME bytes a frame
@@ -94,9 +101,12 @@ REPORT_TAIL = bytes.fromhex("00 00 80 00 80 00 00 00")
 #: the owner's on 2026-10-21, beside the names G HUB listed in fn 2's order, FN+F1,
 #: L.CTRL+CAPS, L.ALT+CAPS, R.CTRL+ENTER, FN+ENTER, R.CTRL+CAPS, L.ALT+ENTER and
 #: L.CTRL+ENTER. The G915 X LIGHTSPEED's shortcut, FN+F1 on the owner's on 2026-10-23, was
-#: key ids 0x69 and 0x09, which hold 0x0034 and 0x00F6 in its own list.
+#: key ids 0x69 and 0x09, which hold 0x0034 and 0x00F6 in its own list. A's, 0x0122, is the
+#: control id G HUB's layout package of the PRO X 60 LIGHTSPEED gives its A key, at key id
+#: 0x44 in the owner's own list, FN at 0x05: `status` named its shortcut FN+A by them, and
+#: FN+A turned its custom assignments on and off (2026-11-14).
 CONTROL_NAMES = {0x00F6: "F1", 0x010D: "Caps Lock", 0x0155: "Enter", 0x010F: "Left Ctrl",
-                 0x018B: "Left Alt", 0x0034: "FN", 0x0114: "Right Ctrl"}
+                 0x018B: "Left Alt", 0x0034: "FN", 0x0114: "Right Ctrl", 0x0122: "A"}
 
 #: 0x1B10, the control list (G HUB's ControlList): fn 0 the count of its entries, fn 1
 #: CONTROLS_A_READ of them, two bytes each, from the entry its one parameter names, the
@@ -108,6 +118,12 @@ F_CONTROL_LIST = 0x1B10
 FN_CONTROL_COUNT = 0
 FN_CONTROLS = 1
 CONTROLS_A_READ = 8
+
+
+def game_mode_not_known(control: str) -> str:
+    """GAME_MODE_NOT_KNOWN for a keyboard whose Game Mode `control` turns, a word of
+    GAME_MODE_WORKED: "... Game Mode switch is moved"."""
+    return GAME_MODE_NOT_KNOWN.format(control, GAME_MODE_WORKED[control])
 
 
 def remap_entry(key_id: int, page: int, usage: int) -> bytes:

@@ -4,7 +4,7 @@
 .\"
 .\" Keep this in step with build_parser() in gearbench/cli/. A man page that
 .\" disagrees with --help is worse than none.
-.TH GEARBENCH\-CTL 1 "2026-11-11" "gearbench\-ctl 1.3.1" "User Commands"
+.TH GEARBENCH\-CTL 1 "2026-11-15" "gearbench\-ctl 1.3.2" "User Commands"
 .\" Command, option, key and file names must not break at a hyphen, and a
 .\" justified line spreads them apart. groff's man macros set the adjustment
 .\" again from the AD string at each tagged paragraph, so .ad l alone lasts
@@ -133,10 +133,10 @@ describes but the G502 HERO: Gearbench does not write their onboard profile
 yet.
 .PP
 Gearbench never writes a keyboard's onboard profile.
-Keyboard lighting is volatile only, except the brightness: the wired G515 TKL
-and the G915 X LIGHTSPEED keep it through a power-off, the G515 LIGHTSPEED TKL
-is taken to, and the PRO X TKL LIGHTSPEED, the G915 X, G915 X LIGHTSPEED TKL,
-G316 X, G316 X 98, G512 X 75 and G512 X 98 may (see
+Keyboard lighting is volatile only, except the brightness: the wired G515 TKL,
+the PRO X 60 LIGHTSPEED and the G915 X LIGHTSPEED keep it through a power-off,
+the G515 LIGHTSPEED TKL is taken to, and the PRO X TKL LIGHTSPEED, the G915 X,
+G915 X LIGHTSPEED TKL, G316 X, G316 X 98, G512 X 75 and G512 X 98 may (see
 .BR brightness ).
 The five commands under
 .B Mouse onboard memory
@@ -301,10 +301,13 @@ unbound);
 .IP \(bu 2
 on a keyboard with custom assignments, whether they are on, the shortcut
 that turns them the other way, and the keys set to report to the daemon and,
-while they are off, what those do, or why none is yet;
+while they are off, what those do, or why none is yet; while they are off on
+a keyboard whose FN keys the daemon lights, that holding FN lights no keys
+until they are on;
 .IP \(bu 2
 whether Game Mode is on, or that it is not known until the keyboard's Game
-Mode button is pressed;
+Mode button is pressed, or on a PRO X 60 LIGHTSPEED until its Game Mode
+switch is moved;
 .IP \(bu 2
 the effects the attached keyboard has, which
 .B effect
@@ -647,7 +650,8 @@ read is an error, exit status 1.
 Read every Logitech device on USB, writing nothing, to paste into an issue.
 The report sends only the reads on one list, and stops before any other
 request, with nothing sent. Two published sources call each of them a read,
-except 0x1B10's two, which only G HUB was seen to send.
+except 0x8010's count, whose second source is G HUB's traffic with a G915,
+and 0x1B10's two, which only G HUB was seen to send.
 .IP
 Nothing in it names the unit or its owner. No serial number, friendly name or
 host name is asked; getDeviceInfo's unit id is zeroed as it is read; and of
@@ -692,8 +696,11 @@ included;
 .IP \(bu 2
 0x1B0C's capabilities and the left and right buttons' tuning, as raw bytes;
 .IP \(bu 2
+0x8010's count of G keys;
+.IP \(bu 2
 0x1B10's control list, its count and the control id at each key id, on a
-keyboard whose custom assignments need its key ids, the G515 generation;
+keyboard with custom assignments, which name keys by their key ids: the G515
+generation and the PRO X 60 LIGHTSPEED;
 .IP \(bu 2
 0x8300's sidetone, and 0x8310's equalizer with its saved and active gains.
 .RE
@@ -752,8 +759,8 @@ and each output route's index, name, device, channel volumes and volume base.
 No name PipeWire builds from the USB serial is taken, the card's and its
 nodes' among them, nor a description a WirePlumber rule gave the card. No
 .B pw\-dump
-installed, or no PipeWire to answer it, is said on the report's PipeWire
-line and is no error, unless no Logitech node was found either: the error then
+installed, no PipeWire to answer it, or a run as root with no invoking user,
+is said on the report's PipeWire line and is no error, unless no Logitech node was found either: the error then
 gives the cause.
 .IP
 A node the daemon holds, and every other node on its USB device, is sent
@@ -812,7 +819,13 @@ as the user who ran them, on that user's PipeWire, with only
 .B PATH
 and
 .B XDG_RUNTIME_DIR
-of root's environment and none of its terminal. No Logitech node on USB and
+of root's environment and none of its terminal.
+As root with neither variable naming a user other than root it runs no
+.BR pw\-dump :
+su without its dash, su \-m and doas with keepenv keep a user's
+.B PATH
+and PipeWire settings, and those can start any program.
+No Logitech node on USB and
 no PipeWire card of vendor 046d or 9886 is an error, exit status 1.
 .IP
 For each model Gearbench drives but has not yet tested, a note says
@@ -1039,8 +1052,8 @@ answering or not, else for the first keyboard model it found.
 Switch the M profile.
 .I index
 is 1, 2 or 3, the same thing the M1 to M3 keys do. A keyboard with no M keys,
-such as the G515, the PRO X TKL LIGHTSPEED, the G213 Prodigy or the G915 X
-LIGHTSPEED, has the same three M profiles, switched here, in the window and
+such as the G515, the PRO X TKL LIGHTSPEED, the PRO X 60 LIGHTSPEED, the G213
+Prodigy or the G915 X LIGHTSPEED, has the same three M profiles, switched here, in the window and
 from the tray.
 .B profile
 is its name in Gearbench 1.1.0 and does the same.
@@ -1081,7 +1094,8 @@ The keyboard's brightness key, FN+F8 on a G515, sets the level too, and the
 daemon saves the level it reports. A keyboard that follows the leader takes
 the leader's level: this command for the leader sets the leader's and each that follows, and the
 brightness key of the leader or of one that follows sets the leader's, which each that follows then takes.
-The wired G515 TKL and the G915 X LIGHTSPEED keep their brightness when
+The wired G515 TKL, the PRO X 60 LIGHTSPEED and the G915 X LIGHTSPEED keep
+their brightness when
 switched off, and the G515 LIGHTSPEED TKL is taken to do the same, so the
 daemon writes their level only when it changes and keeps the 13 that a
 G515's FN+F8 or a G915 X LIGHTSPEED's Brightness button sets, which a write
@@ -1793,7 +1807,9 @@ from
 with its
 .I settings.db\-wal
 beside it if there is one, which can hold the newest changes. The database is read from a private copy and
-never written. Each file must be a regular file, or a link to one. When
+never written. Run as root, the command makes no copy in a temporary folder
+another account could change: run it as the account whose settings they are.
+Each file must be a regular file, or a link to one. When
 .I settings.db
 is a link, the
 .I settings.db\-wal
@@ -4393,8 +4409,9 @@ measurements to sound like the A50 X's. The G325's three are untuned: no measure
 published, so they are the A50 X's bands as they are.
 .SH DEVICES
 These have been tested on the hardware: the G915, the G502 X PLUS and the
-G305, which Gearbench was built on; the wired G515 TKL; and the G915 X
-LIGHTSPEED, on its cable and through its receiver. The G502 HERO, the Astro
+G305, which Gearbench was built on; the wired G515 TKL; and the PRO X 60
+LIGHTSPEED and the G915 X LIGHTSPEED, each on its cable and through its
+receiver. The G502 HERO, the Astro
 A50 Gen 4, the Logitech G432, the G933 and the Astro A50 X have been tested
 in part. Below is each keyboard and mouse model but the G915, the G502 X PLUS and the G305:
 what it was built from, what is tested on it and what Gearbench writes to
@@ -4722,6 +4739,54 @@ written to its onboard memory. Where this page says a G915 TKL
 types its F1 to F12, is left on its own profile or is put back in onboard
 mode, the same holds for it.
 .PP
+The PRO X 60 LIGHTSPEED, on its cable (046d:c351) or through its receiver
+(046d:40af, its node of its own behind a 046d:c547, at device index 0x01), is
+built from two device reports of one of 2026-11-14 (see
+.BR report ),
+G HUB's records and the key layout G HUB draws for it, and its setup guide,
+and was tested on the hardware that day, on both routes. It is driven as the
+G515s: probed for
+HID++ feature 0x8071, on interface 02 of the cable, with its lighting,
+brightness, FN's reports and FN keys, Game Mode and custom assignments driven
+by feature, and set to its host mode at each setup (HID++ feature 0x8101,
+function 6) and back to its onboard mode, which it powers up in, at the
+daemon's stop. None of its
+61 keys binds, so the daemon writes it no layer file, and
+.B status
+gives its custom assignments' state and shortcut alone, FN+A, named from the
+keyboard's own control list. While FN is held it lights
+the keys whose caps print an FN function, and FN: Esc, 1 to 0, \- and =,
+Backspace, U, I, O, P, [ and ], S, D, F, J, K, L, ; and \(aq, and Z, X, C, V,
+N, M, comma, period and slash. A, the other key of that shortcut, is not
+lit. It reports FN only while its custom assignments are on, as the G915 X
+LIGHTSPEED does, so with them off its FN keys do not light; FN+A turns them
+on, and they stayed on through a power cycle. Game Mode follows its
+switch, both ways, and
+.B status
+names it so: not known until the keyboard's Game Mode switch is moved. With the daemon running, FN+Z and FN+X step the
+brightness, which the daemon
+keeps as it does a G515's FN+F8, and FN+S, FN+D and FN+F pick an onboard
+profile and leave the daemon's lighting in place. FN+C, its animation key,
+puts the keyboard's own animation over the daemon's lighting, and the
+keyboard says so (HID++ feature 0x8071, event 0, for its keys' cluster): the
+daemon then sends the lighting in effect again, unless that is an animation
+of its own, whose event is the same, and the journal says
+.BR "the PRO X 60 LIGHTSPEED says an animation runs where Gearbench shows none; sending Gearbench's lighting again" .
+That event was read under a static color on the cable on 2026-11-14; the
+daemon's answer is not yet tested on the hardware. Its other FN combinations were read with no daemon running:
+each does what its cap prints. Its feature table lists HID++ feature 0x8010, the G915's G
+keys', beside its custom assignments: it counts 12 there, which keys those
+are is not known, and the
+daemon sends it nothing. Its cluster 0xff is not read, so
+.B wave
+and
+.B ripple
+run on its keys' cluster; its wave ran each of the six directions as named.
+It keeps its brightness through a power-off, as a G515 does, so the level is
+read at each setup and written only when it changes; nothing else is written
+to its onboard memory. Its battery is read as the G515 LIGHTSPEED TKL's is.
+Its report rate (0x8060) is not set, and over Bluetooth it is not driven.
+.PP
 The G213 Prodigy, on its cable (046d:c336), is built from a
 published listing of its features and G HUB's records, and not yet tested
 on the hardware. Its lighting is HID++ feature 0x8070's zones, the whole
@@ -4793,7 +4858,8 @@ The configuration, one JSON object: \fBversion\fR, 4; \fBactive_profile\fR, the
 M profile in effect; \fBbrightness\fR, each keyboard model's, keyed by the
 model's first product id in four hex digits: \fBc33e\fR for the G915,
 \fBc355\fR for the G515 LIGHTSPEED TKL, \fBc343\fR for the G915 TKL,
-\fBc352\fR for the PRO X TKL LIGHTSPEED, \fBc356\fR for the G915 X LIGHTSPEED
+\fBc352\fR for the PRO X TKL LIGHTSPEED, \fBc351\fR for the PRO X 60
+LIGHTSPEED, \fBc356\fR for the G915 X LIGHTSPEED
 and \fBc357\fR for the G915 X LIGHTSPEED TKL, each on its cable and its
 receiver, and on its cable alone \fBc358\fR for the G515 TKL, \fBc33f\fR for
 the G815, \fBc359\fR for the G915 X, \fBc361\fR for the G316 X, \fBc36b\fR for
@@ -5409,6 +5475,8 @@ enabled and disabled extensions.
 .TQ
 .I /usr/lib/udev/rules.d/70\-pro\-x\-tkl.rules
 .TQ
+.I /usr/lib/udev/rules.d/70\-pro\-x\-60.rules
+.TQ
 .I /usr/lib/udev/rules.d/70\-g213.rules
 .TQ
 .I /usr/lib/udev/rules.d/70\-g915\-x.rules
@@ -5480,6 +5548,9 @@ the G515 LIGHTSPEED TKL's node behind its receiver;
 .IR 70\-pro\-x\-tkl.rules :
 the PRO X TKL LIGHTSPEED's node behind its receiver;
 .IP \(bu 2
+.IR 70\-pro\-x\-60.rules :
+the PRO X 60 LIGHTSPEED's node behind its receiver;
+.IP \(bu 2
 .IR 70\-g915\-x.rules :
 the G915 X LIGHTSPEED's and G915 X LIGHTSPEED TKL's nodes, each behind
 its receiver;
@@ -5495,13 +5566,15 @@ For the G815's node this goes by a published report descriptor, the G213
 Prodigy's is taken to be the same, and for those behind a receiver it goes by
 the kernel's
 hid\-logitech\-dj.c.
-The vendor HID++ interface of the G515 TKL and the G515 LIGHTSPEED TKL on
-their cable, and of the G915 X, G316 X and G512 X models, carries each press
+The vendor HID++ interface of the G515 TKL, the G515 LIGHTSPEED TKL and the
+PRO X 60 LIGHTSPEED on their cable, and of the G915 X, G316 X and G512 X
+models, carries each press
 and release of the modifier keys too, from the time their FN reports are
 turned on until the keyboard loses power: switched off, or unplugged where
 it has no battery. A wired G515 TKL did so on 2026-10-21 and a G915 X
 LIGHTSPEED on 2026-10-23, which kept them on through a replug of its cable;
-the others are taken to. The daemon turns
+a PRO X 60 LIGHTSPEED sent FN's on 2026-11-14, on its cable and through its
+receiver; the others are taken to. The daemon turns
 them on at each setup (HID++ feature 0x8051 function 3), and any program
 with the node can turn them on itself. The daemon reads FN alone.
 Through the same node a program can also write the keyboard's custom
@@ -5514,7 +5587,8 @@ The daemon writes custom assignments to the G915 X LIGHTSPEED alone, for its
 G keys.
 With its custom assignments off the G915 X LIGHTSPEED sent no report of FN
 held on 2026-10-23, nor of Ctrl, Shift, Alt or Super held on 2026-10-30,
-and the others are taken to do the same.
+and the PRO X 60 LIGHTSPEED none of FN held on 2026-11-14;
+the others are taken to do the same.
 .IP
 .B uaccess
 gives a node to the account whose session has the seat. While another account
@@ -5657,7 +5731,9 @@ could change, such as the user's own that
 .B su
 without its dash and
 .B sudo \-E
-leave set: run it as the account whose settings they are.
+leave set, and makes no file or directory in one other accounts may add to, such as
+.IR /tmp :
+run it as the account whose settings they are.
 .TP
 .B XDG_STATE_HOME
 Where the Outputs unit's process looks for WirePlumber's stream\-properties,
@@ -5743,7 +5819,20 @@ Run as root with neither set to such an id, they cannot ask the user's daemon
 (see
 .B probe
 and
-.BR report ).
+.BR report ),
+and
+.BR headset\-spatial ,
+.BR headset\-outputs ,
+.BR headset\-volume ,
+.BR headset\-noise ,
+.B g432\-eq
+and
+.B gui
+run nothing and exit 1:
+su without its dash, su \-m and doas with keepenv keep a user's
+.B PATH
+and PipeWire settings, and those can start any program in the PipeWire
+programs they run.
 .TP
 .B GEARBENCH_SETTINGS_GRANT
 Set by the service's unit to
@@ -6648,10 +6737,12 @@ PULSE_SINK=gearbench\-spatial %command%
 .EE
 .RE
 .SH NOTES
-The Game Mode button is the keyboard's own Game Mode, and
+The Game Mode button, a switch on a PRO X 60 LIGHTSPEED, is the keyboard's
+own Game Mode, and
 .B gearbench\-ctl
 does not touch it. Game Mode turns off the Super key: if the Super key does
-nothing, Game Mode is on; press the Game Mode button again.
+nothing, Game Mode is on; press the Game Mode button again, or move the
+switch back.
 .PP
 With the daemon stopped a keyboard runs its own lighting and, where it has them,
 its onboard profiles and the power saving that turns it off a few minutes after
@@ -6677,8 +6768,8 @@ Pair nothing else to a keyboard's receiver either. Going by the
 kernel's hid\-logitech\-dj.c, a keyboard or mouse paired there after it
 could have the keystrokes it sends arrive on the node of the one paired
 first, which the udev
-rules grant for the G515 LIGHTSPEED TKL, the PRO X TKL LIGHTSPEED, the
-G915 X LIGHTSPEED, the G915 X LIGHTSPEED TKL and, on a kernel that gives it
+rules grant for the G515 LIGHTSPEED TKL, the PRO X TKL LIGHTSPEED, the PRO X
+60 LIGHTSPEED, the G915 X LIGHTSPEED, the G915 X LIGHTSPEED TKL and, on a kernel that gives it
 one, the G915 TKL.
 .PP
 Six of the daemon's commands have no subcommand:
